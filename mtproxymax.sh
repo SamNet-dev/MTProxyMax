@@ -2626,7 +2626,7 @@ telegram_send_message() {
 
     local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
     local ip
-    ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "")
+    ip=$(get_public_ip)
     local header
     if [ -n "$ip" ]; then
         header="[$(escape_md "$label") | ${ip}]"
@@ -2908,13 +2908,29 @@ load_tg_settings() {
     done < "$SETTINGS_FILE"
 }
 
+# IP cache (refreshed every 5 minutes)
+_TG_IP_CACHE=""
+_TG_IP_CACHE_AGE=0
+get_cached_ip() {
+    local now; now=$(date +%s)
+    if [ -n "$_TG_IP_CACHE" ] && [ $(( now - _TG_IP_CACHE_AGE )) -lt 300 ]; then
+        echo "$_TG_IP_CACHE"; return 0
+    fi
+    local ip
+    ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "")
+    if [ -n "$ip" ]; then
+        _TG_IP_CACHE="$ip"
+        _TG_IP_CACHE_AGE=$now
+    fi
+    echo "$ip"
+}
+
 # Minimal Telegram send
 tg_send() {
     local msg="$1"
     local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
-    local _ip
-    _ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "")
-    [ -n "$_ip" ] && msg="[${label} | ${_ip}] ${msg}" || msg="[${label}] ${msg}"
+    local _ip; _ip=$(get_cached_ip)
+    [ -n "$_ip" ] && msg="[$(_esc "$label") | ${_ip}] ${msg}" || msg="[$(_esc "$label")] ${msg}"
     local _cfg=$(mktemp /tmp/.mtproxymax-tg.XXXXXX)
     chmod 600 "$_cfg"
     printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TELEGRAM_BOT_TOKEN" > "$_cfg"
@@ -2933,7 +2949,7 @@ tg_send_photo() {
     curl -s --max-time 15 -X POST -K "$_cfg" \
         --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
         --data-urlencode "photo=${photo}" \
-        --data-urlencode "caption=[${TELEGRAM_SERVER_LABEL:-MTProxyMax}] ${caption}" \
+        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
         --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
     rm -f "$_cfg"
 }
@@ -2978,8 +2994,8 @@ get_uptime() {
 }
 
 get_user_stats_tg() {
-    local user="$1"
-    local m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
+    local user="$1" m="${2:-}"
+    [ -z "$m" ] && m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
     [ -z "$m" ] && echo "0 0 0" && return
     local i=$(echo "$m"|awk -v u="$user" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {print $NF}')
     local o=$(echo "$m"|awk -v u="$user" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {print $NF}')
@@ -3034,9 +3050,15 @@ save_traffic() {
 }
 
 update_traffic() {
-    local stats=$(get_stats)
-    local cur_in=$(echo "$stats"|awk '{print $1}')
-    local cur_out=$(echo "$stats"|awk '{print $2}')
+    # Fetch metrics once for both global and per-user stats
+    local _metrics
+    _metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
+    local cur_in cur_out
+    if [ -n "$_metrics" ]; then
+        cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+        cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
+    fi
+    cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
 
     # Compute deltas (torware pattern: detect container restart by negative delta)
     local delta_in=$((cur_in - _prev_total_in))
@@ -3048,11 +3070,11 @@ update_traffic() {
     _prev_total_in=$cur_in
     _prev_total_out=$cur_out
 
-    # Per-user delta tracking
+    # Per-user delta tracking (reuse already-fetched metrics)
     while IFS='|' read -r label secret created enabled _mc _mi _q _ex; do
         [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
         [ "$enabled" != "true" ] && continue
-        local us=$(get_user_stats_tg "$label")
+        local us=$(get_user_stats_tg "$label" "$_metrics")
         local ui=$(echo "$us"|awk '{print $1}')
         local uo=$(echo "$us"|awk '{print $2}')
         local prev_ui=${_prev_user_in["$label"]:-0}
@@ -3142,11 +3164,13 @@ _process_cmd() {
             load_tg_settings
             [ ! -f "$SECRETS_FILE" ] && tg_send "📋 No secrets configured." && return
             local msg="📋 *Secrets*\n\n"
+            local _sec_metrics
+            _sec_metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 local icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
-                local us=$(get_user_stats_tg "$label")
+                local us=$(get_user_stats_tg "$label" "$_sec_metrics")
                 local uc=$(echo "$us"|awk '{print $3}')
                 local cum_u=$(get_cum_user_traffic "$label")
                 local cui=$(echo "$cum_u"|awk '{print $1}')
@@ -3157,7 +3181,7 @@ _process_cmd() {
             ;;
         /mp_link|/mp_link@*)
             load_tg_settings
-            local ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null)
+            local ip; ip=$(get_cached_ip)
             [ -z "$ip" ] && tg_send "❌ Cannot detect server IP" && return
             local msg="🔗 *Proxy Links*\n\n"
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex; do
@@ -3187,24 +3211,34 @@ _process_cmd() {
             "${INSTALL_DIR}/mtproxymax" secret add "$label" &>/dev/null
             if [ $? -eq 0 ]; then
                 load_tg_settings
-                local ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null)
+                local ip; ip=$(get_cached_ip)
                 local ns=$(grep "^${label}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${ns}${dh}"
                 tg_send "✅ Secret *$(_esc "$label")* created!\n\n🔗 \`tg://proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}\`\n\n🌐 https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}"
             else
-                tg_send "❌ Failed to add secret '${label}' (may already exist)"
+                tg_send "❌ Failed to add secret '$(_esc "$label")' (may already exist)"
             fi
             ;;
         /mp_remove\ *|/mp_remove@*\ *)
             local label=$(echo "$text" | awk '{print $2}')
             [ -z "$label" ] && tg_send "❌ Usage: /mp\\_remove <label>" && return
             [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || { tg_send "❌ Invalid label"; return; }
+            if ! grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
+                tg_send "❌ Secret '$(_esc "$label")' not found"
+                return
+            fi
+            local _scount
+            _scount=$(grep -v '^#' "$SECRETS_FILE" 2>/dev/null | grep -c '|' || echo 0)
+            if [ "${_scount:-0}" -le 1 ]; then
+                tg_send "❌ Cannot remove the last secret"
+                return
+            fi
             "${INSTALL_DIR}/mtproxymax" secret remove "$label" &>/dev/null
             if [ $? -eq 0 ]; then
                 tg_send "✅ Secret *$(_esc "$label")* removed"
             else
-                tg_send "❌ Secret '${label}' not found"
+                tg_send "❌ Failed to remove secret '$(_esc "$label")'"
             fi
             ;;
         /mp_rotate\ *|/mp_rotate@*\ *)
@@ -3214,14 +3248,14 @@ _process_cmd() {
             "${INSTALL_DIR}/mtproxymax" secret rotate "$label" &>/dev/null
             if [ $? -eq 0 ]; then
                 load_tg_settings
-                local ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null)
+                local ip; ip=$(get_cached_ip)
                 # Re-read the new secret from file
                 local ns=$(grep "^${label}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${ns}${dh}"
                 tg_send "🔄 Secret *$(_esc "$label")* rotated!\n\n🔗 New link:\n\`tg://proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}\`"
             else
-                tg_send "❌ Secret '${label}' not found"
+                tg_send "❌ Secret '$(_esc "$label")' not found"
             fi
             ;;
         /mp_restart|/mp_restart@*)
@@ -3242,7 +3276,7 @@ _process_cmd() {
             if [ $? -eq 0 ]; then
                 tg_send "✅ Secret *$(_esc "$label")* enabled"
             else
-                tg_send "❌ Secret '${label}' not found"
+                tg_send "❌ Secret '$(_esc "$label")' not found"
             fi
             ;;
         /mp_disable\ *|/mp_disable@*\ *)
@@ -3253,7 +3287,7 @@ _process_cmd() {
             if [ $? -eq 0 ]; then
                 tg_send "✅ Secret *$(_esc "$label")* disabled"
             else
-                tg_send "❌ Secret '${label}' not found"
+                tg_send "❌ Secret '$(_esc "$label")' not found"
             fi
             ;;
         /mp_health|/mp_health@*)
