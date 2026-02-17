@@ -127,6 +127,8 @@ TERM_WIDTH=$(tput cols 2>/dev/null || echo 60)
 _strlen() {
     local clean="$1"
     local esc=$'\033'
+    # Normalize literal \033 (from single-quoted color vars) to real ESC byte
+    clean="${clean//$'\\033'/$esc}"
     # Strip ANSI escape sequences in pure bash (no subprocesses)
     while [[ "$clean" == *"${esc}["* ]]; do
         local before="${clean%%${esc}\[*}"
