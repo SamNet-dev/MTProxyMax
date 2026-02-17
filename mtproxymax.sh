@@ -125,15 +125,24 @@ TERM_WIDTH=$(tput cols 2>/dev/null || echo 60)
 
 # Get string display length (strips ANSI escape codes)
 _strlen() {
-    local str="$1"
-    str=$(echo -e "$str" | sed 's/\x1b\[[0-9;]*m//g')
-    echo ${#str}
+    local clean="$1"
+    local esc=$'\033'
+    # Strip ANSI escape sequences in pure bash (no subprocesses)
+    while [[ "$clean" == *"${esc}["* ]]; do
+        local before="${clean%%${esc}\[*}"
+        local rest="${clean#*${esc}\[}"
+        local after="${rest#*m}"
+        [ "$rest" = "$after" ] && break
+        clean="${before}${after}"
+    done
+    echo "${#clean}"
 }
 
-# Repeat a character n times
+# Repeat a character n times (pure bash, no subprocesses)
 _repeat() {
-    local char="$1" count="$2"
-    printf '%0.s'"$char" $(seq 1 "$count")
+    local char="$1" count="$2" str
+    printf -v str '%*s' "$count" ''
+    printf '%s' "${str// /$char}"
 }
 
 # Draw a horizontal line
@@ -393,13 +402,24 @@ escape_md() {
 }
 
 # Get public IP address
+_PUBLIC_IP_CACHE=""
+_PUBLIC_IP_CACHE_AGE=0
+
 get_public_ip() {
+    local now; now=$(date +%s)
+    # Return cached IP if less than 5 minutes old
+    if [ -n "$_PUBLIC_IP_CACHE" ] && [ $(( now - _PUBLIC_IP_CACHE_AGE )) -lt 300 ]; then
+        echo "$_PUBLIC_IP_CACHE"
+        return 0
+    fi
     local ip=""
-    ip=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null) ||
-    ip=$(curl -s --max-time 5 https://ifconfig.me 2>/dev/null) ||
-    ip=$(curl -s --max-time 5 https://icanhazip.com 2>/dev/null) ||
+    ip=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null) ||
+    ip=$(curl -s --max-time 3 https://ifconfig.me 2>/dev/null) ||
+    ip=$(curl -s --max-time 3 https://icanhazip.com 2>/dev/null) ||
     ip=""
     if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$ip" =~ : ]]; then
+        _PUBLIC_IP_CACHE="$ip"
+        _PUBLIC_IP_CACHE_AGE=$now
         echo "$ip"
     fi
 }
@@ -2105,6 +2125,7 @@ run_proxy_container() {
     if is_proxy_running; then
         log_success "Proxy is running on port ${PROXY_PORT}"
         traffic_tracking_setup
+        geoblock_reapply_all
 
         # Show links for all enabled secrets
         local server_ip
@@ -2213,13 +2234,125 @@ generate_qr_url() {
 
 # ── Section 11: Geo-Blocking ────────────────────────────────
 
-build_blocklist_config() {
-    local countries="$BLOCKLIST_COUNTRIES"
-    [ -z "$countries" ] && return
+GEOBLOCK_CACHE_DIR="${INSTALL_DIR}/geoblock"
+GEOBLOCK_IPSET_PREFIX="mtpmax_"
+GEOBLOCK_COMMENT="mtproxymax-geoblock"
 
-    # This would be added to telemt config if telemt supports it
-    # For now, use iptables-based blocking
-    log_info "Geo-blocking configured for: ${countries}"
+# Ensure ipset is installed
+_ensure_ipset() {
+    command -v ipset &>/dev/null && return 0
+    log_info "Installing ipset..."
+    local os; os=$(detect_os)
+    case "$os" in
+        debian) apt-get install -y -qq ipset ;;
+        rhel)   yum install -y -q ipset ;;
+        alpine) apk add --no-cache ipset ;;
+    esac
+    command -v ipset &>/dev/null || { log_error "Failed to install ipset"; return 1; }
+}
+
+# Download and cache CIDR list for a country
+_download_country_cidrs() {
+    local code="$1"
+    local cache_file="${GEOBLOCK_CACHE_DIR}/${code}.zone"
+    mkdir -p "$GEOBLOCK_CACHE_DIR"
+
+    # Use cached file if less than 24 hours old
+    if [ -f "$cache_file" ] && [ $(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) )) -lt 86400 ]; then
+        return 0
+    fi
+
+    log_info "Downloading IP list for ${code^^}..."
+    local url="https://www.ipdeny.com/ipblocks/data/aggregated/${code}-aggregated.zone"
+    if ! curl -fsSL --max-time 30 "$url" -o "$cache_file" 2>/dev/null; then
+        rm -f "$cache_file"
+        log_error "Failed to download IP list for ${code^^} — check country code"
+        return 1
+    fi
+
+    local count; count=$(wc -l < "$cache_file")
+    log_info "Downloaded ${count} IP ranges for ${code^^}"
+}
+
+# Apply iptables/ipset rules for one country
+_apply_country_rules() {
+    local code="$1"
+    local setname="${GEOBLOCK_IPSET_PREFIX}${code}"
+    local cache_file="${GEOBLOCK_CACHE_DIR}/${code}.zone"
+
+    [ -f "$cache_file" ] || { log_error "No cached IP list for ${code}"; return 1; }
+
+    # Create if not exists, then flush to clear stale entries
+    ipset create -exist "$setname" hash:net family inet maxelem 131072
+    ipset flush "$setname"
+
+    # Batch load all CIDRs via ipset restore (fast, single pass)
+    awk -v s="$setname" 'NF && !/^#/ { print "add " s " " $1 }' "$cache_file" \
+        | ipset restore -exist
+
+    # Add iptables DROP rule if not already present
+    if ! iptables -C INPUT -m set --match-set "$setname" src \
+        -p tcp --dport "$PROXY_PORT" \
+        -m comment --comment "$GEOBLOCK_COMMENT" -j DROP 2>/dev/null; then
+        iptables -I INPUT -m set --match-set "$setname" src \
+            -p tcp --dport "$PROXY_PORT" \
+            -m comment --comment "$GEOBLOCK_COMMENT" -j DROP
+    fi
+
+    log_success "Geo-blocking active for ${code^^} (port ${PROXY_PORT})"
+}
+
+# Remove iptables rules and ipset for one country
+_remove_country_rules() {
+    local code="$1"
+    local setname="${GEOBLOCK_IPSET_PREFIX}${code}"
+
+    # Remove iptables rule
+    iptables -D INPUT -m set --match-set "$setname" src \
+        -p tcp --dport "$PROXY_PORT" \
+        -m comment --comment "$GEOBLOCK_COMMENT" -j DROP 2>/dev/null || true
+
+    # Destroy ipset
+    ipset destroy "$setname" 2>/dev/null || true
+}
+
+# Reapply all saved geoblock rules (called on proxy start)
+geoblock_reapply_all() {
+    [ -z "$BLOCKLIST_COUNTRIES" ] && return 0
+    command -v ipset &>/dev/null || return 0
+
+    local code
+    IFS=',' read -ra codes <<< "$BLOCKLIST_COUNTRIES"
+    for code in "${codes[@]}"; do
+        [ -z "$code" ] && continue
+        if [ -f "${GEOBLOCK_CACHE_DIR}/${code}.zone" ]; then
+            _apply_country_rules "$code" &>/dev/null || true
+        fi
+    done
+}
+
+# Remove ALL mtproxymax geoblock rules (called on uninstall)
+geoblock_remove_all() {
+    # Remove all tagged iptables rules
+    if command -v iptables &>/dev/null; then
+        iptables-save 2>/dev/null | grep -- "--comment ${GEOBLOCK_COMMENT}" | \
+            sed 's/^-A/-D/' | while IFS= read -r rule; do
+                iptables $rule 2>/dev/null || true
+            done
+    fi
+
+    # Destroy all mtpmax_ ipsets
+    if command -v ipset &>/dev/null; then
+        ipset list -n 2>/dev/null | grep "^${GEOBLOCK_IPSET_PREFIX}" | \
+            while IFS= read -r setname; do
+                ipset destroy "$setname" 2>/dev/null || true
+            done
+    fi
+}
+
+build_blocklist_config() {
+    [ -z "$BLOCKLIST_COUNTRIES" ] && return
+    geoblock_reapply_all
 }
 
 show_geoblock_menu() {
@@ -2250,14 +2383,12 @@ show_geoblock_menu() {
                 if [[ "$code" =~ ^[a-z]{2}$ ]]; then
                     if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
                         log_info "Country '${code}' is already blocked"
-                    elif [ -z "$BLOCKLIST_COUNTRIES" ]; then
-                        BLOCKLIST_COUNTRIES="$code"
-                        save_settings
-                        log_success "Added ${code} to blocklist"
                     else
-                        BLOCKLIST_COUNTRIES="${BLOCKLIST_COUNTRIES},${code}"
-                        save_settings
-                        log_success "Added ${code} to blocklist"
+                        _ensure_ipset && _download_country_cidrs "$code" && {
+                            [ -z "$BLOCKLIST_COUNTRIES" ] && BLOCKLIST_COUNTRIES="$code" || BLOCKLIST_COUNTRIES="${BLOCKLIST_COUNTRIES},${code}"
+                            save_settings
+                            _apply_country_rules "$code"
+                        }
                     fi
                 else
                     log_error "Invalid country code (use 2-letter ISO code, e.g. us, de, ir)"
@@ -2273,7 +2404,9 @@ show_geoblock_menu() {
                     if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${rm_code},"; then
                         BLOCKLIST_COUNTRIES=$(echo ",$BLOCKLIST_COUNTRIES," | sed "s/,${rm_code},/,/g;s/^,//;s/,$//")
                         save_settings
-                        log_success "Removed ${rm_code}"
+                        _remove_country_rules "$rm_code"
+                        rm -f "${GEOBLOCK_CACHE_DIR}/${rm_code}.zone"
+                        log_success "Removed ${rm_code^^} — rules and cache cleared"
                     else
                         log_info "Country '${rm_code}' is not in the blocklist"
                     fi
@@ -2283,9 +2416,16 @@ show_geoblock_menu() {
                 press_any_key
                 ;;
             3)
+                local code
+                IFS=',' read -ra codes <<< "$BLOCKLIST_COUNTRIES"
+                for code in "${codes[@]}"; do
+                    [ -z "$code" ] && continue
+                    _remove_country_rules "$code"
+                    rm -f "${GEOBLOCK_CACHE_DIR}/${code}.zone"
+                done
                 BLOCKLIST_COUNTRIES=""
                 save_settings
-                log_success "Blocklist cleared"
+                log_success "All geo-blocks cleared"
                 press_any_key
                 ;;
             0|"") return ;;
@@ -3659,6 +3799,9 @@ uninstall() {
 
     systemctl daemon-reload 2>/dev/null || true
 
+    log_info "Removing geo-blocking rules..."
+    geoblock_remove_all
+
     log_info "Removing traffic tracking..."
     traffic_tracking_teardown
 
@@ -4004,11 +4147,13 @@ cli_main() {
                     local code=$(echo "$2" | tr '[:upper:]' '[:lower:]')
                     if [[ "$code" =~ ^[a-z]{2}$ ]]; then
                         if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
-                            log_info "Country '${code}' is already blocked"
+                            log_info "Country '${code^^}' is already blocked"
                         else
-                            [ -z "$BLOCKLIST_COUNTRIES" ] && BLOCKLIST_COUNTRIES="$code" || BLOCKLIST_COUNTRIES="${BLOCKLIST_COUNTRIES},${code}"
-                            save_settings
-                            log_success "Added ${code}"
+                            _ensure_ipset && _download_country_cidrs "$code" && {
+                                [ -z "$BLOCKLIST_COUNTRIES" ] && BLOCKLIST_COUNTRIES="$code" || BLOCKLIST_COUNTRIES="${BLOCKLIST_COUNTRIES},${code}"
+                                save_settings
+                                _apply_country_rules "$code"
+                            }
                         fi
                     else
                         log_error "Invalid country code (use 2-letter ISO code, e.g. us, de, ir)"
@@ -4021,9 +4166,11 @@ cli_main() {
                         if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
                             BLOCKLIST_COUNTRIES=$(echo ",$BLOCKLIST_COUNTRIES," | sed "s/,${code},/,/g;s/^,//;s/,$//")
                             save_settings
-                            log_success "Removed ${code}"
+                            _remove_country_rules "$code"
+                            rm -f "${GEOBLOCK_CACHE_DIR}/${code}.zone"
+                            log_success "Removed ${code^^} — rules and cache cleared"
                         else
-                            log_info "Country '${code}' is not blocked"
+                            log_info "Country '${code^^}' is not blocked"
                         fi
                     else
                         log_error "Invalid country code (use 2-letter ISO code)"
@@ -4031,9 +4178,16 @@ cli_main() {
                     ;;
                 clear)
                     check_root
+                    local code
+                    IFS=',' read -ra codes <<< "$BLOCKLIST_COUNTRIES"
+                    for code in "${codes[@]}"; do
+                        [ -z "$code" ] && continue
+                        _remove_country_rules "$code"
+                        rm -f "${GEOBLOCK_CACHE_DIR}/${code}.zone"
+                    done
                     BLOCKLIST_COUNTRIES=""
                     save_settings
-                    log_success "Blocklist cleared"
+                    log_success "All geo-blocks cleared"
                     ;;
                 list|"")
                     echo -e "  ${BOLD}Blocked countries:${NC} ${BLOCKLIST_COUNTRIES:-${DIM}none${NC}}"
@@ -4393,7 +4547,7 @@ show_upstream_menu() {
 }
 
 show_main_menu() {
-    local _cached_telemt_ver
+    local _cached_telemt_ver _cached_start_epoch=""
     _cached_telemt_ver=$(get_telemt_version)
 
     while true; do
@@ -4403,7 +4557,7 @@ show_main_menu() {
 
         show_banner
 
-        # Status dashboard — single Docker check, cached
+        # Status dashboard — single Docker check
         draw_box_top "$w"
 
         local _running=false
@@ -4414,24 +4568,21 @@ show_main_menu() {
         local status_str uptime_str traffic_in traffic_out connections
         if [ "$_running" = "true" ]; then
             status_str=$(draw_status running)
-            local started_at up_secs=0
-            started_at=$(docker inspect --format '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null)
-            if [ -n "$started_at" ]; then
-                local start_epoch now_epoch
-                start_epoch=$(date -d "${started_at}" +%s 2>/dev/null || echo "0")
-                now_epoch=$(date +%s)
-                up_secs=$((now_epoch - start_epoch))
+            # Cache docker inspect — skip on subsequent renders unless container restarted
+            if [ -z "$_cached_start_epoch" ]; then
+                local started_at
+                started_at=$(docker inspect --format '{{.State.StartedAt}}' "$CONTAINER_NAME" 2>/dev/null)
+                _cached_start_epoch=$(date -d "${started_at}" +%s 2>/dev/null || echo "0")
             fi
+            local up_secs=$(( $(date +%s) - _cached_start_epoch ))
             uptime_str=$(format_duration "$up_secs")
-            local stats
-            stats=$(get_proxy_stats)
-            traffic_in=$(echo "$stats" | awk '{print $1}')
-            traffic_out=$(echo "$stats" | awk '{print $2}')
-            connections=$(echo "$stats" | awk '{print $3}')
+            # Parse all stats fields in a single read (no awk subprocesses)
+            read -r traffic_in traffic_out connections < <(get_proxy_stats)
         else
             status_str=$(draw_status stopped)
             uptime_str="—"
             traffic_in=0; traffic_out=0; connections=0
+            _cached_start_epoch=""  # Reset so it re-fetches when container comes back up
         fi
 
         local active=0 disabled=0
@@ -4489,11 +4640,9 @@ show_proxy_menu() {
         clear_screen
         draw_header "PROXY MANAGEMENT"
         echo ""
-        if is_proxy_running; then
-            echo -e "  Status: $(draw_status running)"
-        else
-            echo -e "  Status: $(draw_status stopped)"
-        fi
+        local _pstatus
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$" && _pstatus="running" || _pstatus="stopped"
+        echo -e "  Status: $(draw_status "$_pstatus")"
         echo ""
         echo -e "  ${DIM}[1]${NC} Start proxy"
         echo -e "  ${DIM}[2]${NC} Stop proxy"
