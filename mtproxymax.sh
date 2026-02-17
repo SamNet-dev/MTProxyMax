@@ -3795,6 +3795,7 @@ show_install_summary() {
             full_secret=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
             draw_box_line "  ${BRIGHT_GREEN}${SECRETS_LABELS[$i]}:${NC}" "$w"
             draw_box_line "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}" "$w"
+            draw_box_line "  ${CYAN}https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}" "$w"
             draw_box_empty "$w"
         done
     fi
