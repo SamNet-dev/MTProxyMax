@@ -1,0 +1,76 @@
+name: Build Telemt Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      telemt_commit:
+        description: 'Telemt commit hash to build from'
+        required: true
+        default: '43990c9'
+      version_tag:
+        description: 'Version tag (e.g. 3.0.0-43990c9)'
+        required: true
+        default: '3.0.0-43990c9'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: mtproxymax-telemt
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Set up QEMU (for ARM builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Dockerfile
+        run: |
+          cat > Dockerfile <<'DEOF'
+          FROM rust:1-bookworm AS builder
+          ARG TELEMT_REPO=telemt/telemt
+          ARG TELEMT_COMMIT
+          RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+          RUN git clone "https://github.com/${TELEMT_REPO}.git" /build
+          WORKDIR /build
+          RUN git checkout "${TELEMT_COMMIT}"
+          RUN cargo build --release && strip target/release/telemt 2>/dev/null || true && cp target/release/telemt /telemt
+          FROM debian:bookworm-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          COPY --from=builder /telemt /usr/local/bin/telemt
+          RUN chmod +x /usr/local/bin/telemt
+          STOPSIGNAL SIGINT
+          ENTRYPOINT ["telemt"]
+          DEOF
+          sed -i 's/^          //' Dockerfile
+
+      - name: Lowercase owner
+        id: owner
+        run: echo "name=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            TELEMT_COMMIT=${{ github.event.inputs.telemt_commit }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.version_tag }}
+            ${{ env.REGISTRY }}/${{ steps.owner.outputs.name }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
