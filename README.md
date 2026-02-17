@@ -297,7 +297,7 @@ Every feature is accessible through the menu. Built-in help pages explain FakeTL
 |---------|:-:|:-:|:-:|:-:|
 | **Engine** | telemt 3.x (Rust) | mtg (Go) | MTProxy (C) | Various |
 | **FakeTLS** | Yes | Yes | No (needs patches) | Varies |
-| **Traffic Masking** | Yes | No | No | No |
+| **Traffic Masking** | Yes | Yes | No | No |
 | **Multi-User Secrets** | Yes (unlimited) | No (1 secret) | Multi-secret | Usually 1 |
 | **Per-User Limits** | Yes (conns, IPs, quota, expiry) | No | No | No |
 | **Per-User Traffic Stats** | Yes (Prometheus) | No | No | No |
