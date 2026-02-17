@@ -495,6 +495,12 @@ mtproxymax telegram remove              # Remove bot completely
 
 ---
 
+## Credits
+
+MTProxyMax is built on top of **[telemt](https://github.com/telemt/telemt)** — a high-performance MTProto proxy engine written in Rust/Tokio. All proxy protocol handling, FakeTLS, traffic masking, and per-user enforcement is powered by telemt. Credit and thanks to the telemt authors for building and maintaining the engine.
+
+---
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
