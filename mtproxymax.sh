@@ -2618,7 +2618,8 @@ self_update() {
 # ── Section 14: Telegram Integration ────────────────────────
 
 telegram_send_message() {
-    local msg="$1"
+    local msg
+    msg=$(printf '%b' "$1")   # expand literal \n to real newlines
     local token="${TELEGRAM_BOT_TOKEN}"
     local chat_id="${TELEGRAM_CHAT_ID}"
 
@@ -2927,7 +2928,8 @@ get_cached_ip() {
 
 # Minimal Telegram send
 tg_send() {
-    local msg="$1"
+    local msg
+    msg=$(printf '%b' "$1")   # expand literal \n to real newlines
     local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
     local _ip; _ip=$(get_cached_ip)
     [ -n "$_ip" ] && msg="[$(_esc "$label") | ${_ip}] ${msg}" || msg="[$(_esc "$label")] ${msg}"
