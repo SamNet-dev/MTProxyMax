@@ -2493,37 +2493,145 @@ auto_recover() {
 
 # ── Section 13: Auto-Update ─────────────────────────────────
 
-check_for_updates() {
-    local latest
-    latest=$(curl -sL --max-time 10 \
-        "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" \
-        2>/dev/null | grep '"tag_name"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+_UPDATE_SHA_FILE="${INSTALL_DIR}/.update_sha"
+_UPDATE_BADGE="/tmp/.mtproxymax_update_available"
 
-    if [ -z "$latest" ]; then
-        return 1
-    fi
+# Background SHA check — non-blocking, ~40 bytes over the wire
+check_update_sha_bg() {
+    {
+        local _remote_sha
+        _remote_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+            "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+            -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
 
-    # Update available if current version is older than latest
-    if ! version_gte "$VERSION" "$latest"; then
-        echo "$latest"
-        return 0
-    fi
-    return 1
+        # Must be 40 lowercase hex chars
+        if [ -n "$_remote_sha" ] && [ ${#_remote_sha} -ge 40 ]; then
+            _remote_sha="${_remote_sha:0:40}"
+            case "$_remote_sha" in *[!a-f0-9]*) exit 0 ;; esac
+
+            local _stored=""
+            [ -f "$_UPDATE_SHA_FILE" ] && _stored=$(<"$_UPDATE_SHA_FILE")
+
+            if [ -z "$_stored" ]; then
+                # First run — save baseline, no badge
+                echo "$_remote_sha" > "$_UPDATE_SHA_FILE" 2>/dev/null || true
+                rm -f "$_UPDATE_BADGE" 2>/dev/null
+            elif [ "$_remote_sha" != "$_stored" ]; then
+                echo "new" > "$_UPDATE_BADGE" 2>/dev/null
+            else
+                rm -f "$_UPDATE_BADGE" 2>/dev/null
+            fi
+        fi
+        # API unreachable — do nothing; badge stays as-is (no false positives)
+    } &
 }
 
 self_update() {
-    log_info "Checking for updates..."
+    # Prevent concurrent updates
+    if command -v flock &>/dev/null; then
+        local _lfd
+        exec {_lfd}>/tmp/.mtproxymax_update.lock
+        if ! flock -n "$_lfd" 2>/dev/null; then
+            log_warn "Another update is already running."
+            return 1
+        fi
+    fi
 
-    # Check telemt engine update
-    local telemt_latest
-    telemt_latest=$(check_telemt_update 2>/dev/null) && {
-        local telemt_current
-        telemt_current=$(get_telemt_version)
-        log_info "Telemt engine update: v${telemt_current} -> v${telemt_latest}"
+    local _script_updated=false
+    local _url="https://raw.githubusercontent.com/${GITHUB_REPO}/main/mtproxymax.sh"
+
+    echo ""
+    log_info "Checking for script updates..."
+
+    local _tmp
+    _tmp=$(_mktemp) || return 1
+
+    if curl -fsSL --max-time 60 --max-filesize 5242880 -o "$_tmp" "$_url" 2>/dev/null; then
+        # Validate: bash syntax + sanity check
+        if ! bash -n "$_tmp" 2>/dev/null; then
+            log_error "Downloaded script has syntax errors — aborting"
+            rm -f "$_tmp"; return 1
+        fi
+        if ! grep -q "GITHUB_REPO=\"SamNet-dev/MTProxyMax\"" "$_tmp" 2>/dev/null; then
+            log_error "Downloaded file doesn't look like MTProxyMax — aborting"
+            rm -f "$_tmp"; return 1
+        fi
+        local _dl_size
+        _dl_size=$(wc -c < "$_tmp")
+        if [ "$_dl_size" -lt 10000 ]; then
+            log_error "Downloaded file too small (${_dl_size} bytes) — possible truncated download"
+            rm -f "$_tmp"; return 1
+        fi
+
+        local _new_ver
+        _new_ver=$(grep -m1 '^VERSION="' "$_tmp" | cut -d'"' -f2)
+
+        # Compare SHA256 — if identical, already up to date
+        local _local_hash _remote_hash
+        _local_hash=$(sha256sum "${INSTALL_DIR}/mtproxymax" 2>/dev/null | cut -d' ' -f1)
+        _remote_hash=$(sha256sum "$_tmp" | cut -d' ' -f1)
+
+        if [ "$_local_hash" = "$_remote_hash" ]; then
+            log_success "Script is already up to date (v${_new_ver:-${VERSION}})"
+            rm -f "$_tmp" "$_UPDATE_BADGE"
+        else
+            log_info "Update found: v${_new_ver:-?} (installed: v${VERSION})"
+            echo -en "  ${BOLD}Update now? [y/N]:${NC} "
+            local _confirm; read -r _confirm
+            if [ "$_confirm" != "y" ] && [ "$_confirm" != "Y" ]; then
+                log_info "Skipped"
+                rm -f "$_tmp"
+            else
+                mkdir -p "$BACKUP_DIR"
+                cp "${INSTALL_DIR}/mtproxymax" \
+                   "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)" 2>/dev/null || true
+                chmod +x "$_tmp"
+                mv "$_tmp" "${INSTALL_DIR}/mtproxymax"
+                log_success "Script updated to v${_new_ver:-?}"
+                _script_updated=true
+                rm -f "$_UPDATE_BADGE"
+
+                # Save new commit SHA as baseline
+                local _new_sha
+                _new_sha=$(curl -fsSL --connect-timeout 5 --max-time 10 \
+                    "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
+                    -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
+                if [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ]; then
+                    _new_sha="${_new_sha:0:40}"
+                    case "$_new_sha" in
+                        *[!a-f0-9]*) : ;;
+                        *) echo "$_new_sha" > "$_UPDATE_SHA_FILE" 2>/dev/null || true ;;
+                    esac
+                fi
+            fi
+        fi
+    else
+        log_error "Download failed — check your internet connection"
+        rm -f "$_tmp"
+        return 1
+    fi
+
+    # Regenerate + restart Telegram bot service if script was updated
+    if [ "$_script_updated" = true ] && [ "${TELEGRAM_ENABLED:-}" = "true" ]; then
+        log_info "Regenerating Telegram bot service..."
+        telegram_generate_service_script
+        if command -v systemctl &>/dev/null; then
+            systemctl restart mtproxymax-telegram.service 2>/dev/null \
+                && log_success "Telegram bot service restarted" \
+                || log_warn "Telegram restart failed — run: systemctl restart mtproxymax-telegram.service"
+        fi
+    fi
+
+    # Telemt engine update check
+    echo ""
+    local _telemt_latest
+    _telemt_latest=$(check_telemt_update 2>/dev/null) && {
+        local _telemt_cur
+        _telemt_cur=$(get_telemt_version)
+        log_info "Telemt engine update available: v${_telemt_cur} -> v${_telemt_latest}"
         echo -en "  ${BOLD}Update telemt engine? [y/N]:${NC} "
-        local tconfirm
-        read -r tconfirm
-        if [ "$tconfirm" = "y" ] || [ "$tconfirm" = "Y" ]; then
+        local _tconfirm; read -r _tconfirm
+        if [ "$_tconfirm" = "y" ] || [ "$_tconfirm" = "Y" ]; then
             build_telemt_image true
             if is_proxy_running; then
                 load_secrets
@@ -2531,88 +2639,13 @@ self_update() {
             fi
         fi
     } || {
-        local tver
-        tver=$(get_telemt_version)
-        if [ "$tver" = "unknown" ]; then
+        local _tver; _tver=$(get_telemt_version)
+        if [ "$_tver" = "unknown" ]; then
             log_warn "Telemt version unknown — try rebuilding with: mtproxymax rebuild"
         else
-            log_success "Telemt engine is up to date (v${tver})"
+            log_success "Telemt engine is up to date (v${_tver})"
         fi
     }
-
-    # Check script update
-    local latest
-    latest=$(check_for_updates 2>/dev/null)
-    local rc=$?
-    if [ $rc -ne 0 ] && [ -z "$latest" ]; then
-        log_info "Script update check unavailable (no releases found)"
-        return 0
-    fi
-    if [ -z "$latest" ]; then
-        log_success "Script is up to date (v${VERSION})"
-        return 0
-    fi
-
-    log_info "New version available: v${latest} (current: v${VERSION})"
-    echo -en "  ${BOLD}Update now? [y/N]:${NC} "
-    local confirm
-    read -r confirm
-    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { log_info "Skipped"; return 0; }
-
-    # Backup current script
-    mkdir -p "$BACKUP_DIR"
-    cp "${INSTALL_DIR}/mtproxymax" "${BACKUP_DIR}/mtproxymax.v${VERSION}.$(date +%s)" 2>/dev/null
-
-    # Download new version
-    local tmp
-    tmp=$(_mktemp) || return 1
-    if curl -sL --max-time 60 \
-        "https://raw.githubusercontent.com/${GITHUB_REPO}/main/mtproxymax.sh" \
-        -o "$tmp" 2>/dev/null; then
-
-        # Validate: must be a bash script, > 1KB, and contain the expected version
-        local dl_size
-        dl_size=$(wc -c < "$tmp")
-        if ! head -1 "$tmp" | grep -q '^#!/bin/bash'; then
-            log_error "Downloaded file is not a valid script"
-            return 1
-        fi
-        if [ "$dl_size" -lt 1000 ]; then
-            log_error "Downloaded file too small (${dl_size} bytes) — possible truncated download"
-            return 1
-        fi
-        local dl_version
-        dl_version=$(grep -oE '^VERSION="[0-9]+\.[0-9]+\.[0-9]+"' "$tmp" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-        if [ -n "$dl_version" ] && [ "$dl_version" != "$latest" ]; then
-            log_error "Version mismatch: expected v${latest}, got v${dl_version}"
-            return 1
-        fi
-        # Verify SHA256 integrity (download hash from repo if available)
-        local sha_expect
-        sha_expect=$(curl -sL --max-time 10 \
-            "https://raw.githubusercontent.com/${GITHUB_REPO}/main/mtproxymax.sh.sha256" 2>/dev/null \
-            | grep -oE '^[0-9a-f]{64}' | head -1)
-        if [ -n "$sha_expect" ]; then
-            local sha_actual
-            sha_actual=$(sha256sum "$tmp" | cut -d' ' -f1)
-            if [ "$sha_actual" != "$sha_expect" ]; then
-                log_error "SHA256 mismatch — download may be corrupted or tampered"
-                return 1
-            fi
-            log_info "SHA256 verified"
-        fi
-        chmod +x "$tmp"
-        mv "$tmp" "${INSTALL_DIR}/mtproxymax"
-        log_success "Updated to v${latest}"
-
-        # Regenerate telegram service if needed
-        if [ "$TELEGRAM_ENABLED" = "true" ]; then
-            telegram_generate_service_script
-        fi
-    else
-        log_error "Download failed"
-        return 1
-    fi
 }
 
 # ── Section 14: Telegram Integration ────────────────────────
@@ -3986,6 +4019,7 @@ cli_main() {
             if [ -f "$SETTINGS_FILE" ]; then
                 load_settings
                 load_secrets
+                check_update_sha_bg   # non-blocking background SHA check
                 show_main_menu
             else
                 run_installer
@@ -4633,6 +4667,10 @@ show_main_menu() {
         draw_box_line "  ${BOLD}Secrets:${NC} ${active} active / ${disabled} disabled" "$w"
 
         draw_box_sep "$w"
+        if [ -f "$_UPDATE_BADGE" ]; then
+            draw_box_line "  ${YELLOW}${BOLD}⬆  Update available — select [9] to update${NC}" "$w"
+            draw_box_sep "$w"
+        fi
         draw_box_empty "$w"
         draw_box_line "  ${BRIGHT_CYAN}[1]${NC}  Proxy Management" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[2]${NC}  Secret Management" "$w"
