@@ -327,7 +327,6 @@ But mtg v2:
 - **Only supports one secret** — no multi-user management
 - **No user limits** — can't restrict bandwidth, devices, or set expiry dates
 - **No management interface** — no TUI, no Telegram bot, no traffic breakdown per user
-- **No traffic masking** — non-proxy connections aren't forwarded to a cover site
 - **No auto-recovery** — if it goes down, you won't know until users complain
 
 ### Why Not the Official MTProxy?
