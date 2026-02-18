@@ -1535,7 +1535,7 @@ secret_rotate() {
 
     # Notify via Telegram if enabled
     if [ "$TELEGRAM_ENABLED" = "true" ] && [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-        local msg="🔄 *Secret Rotated*\n\nLabel: \`${label}\`\n\n🔗 New link:\n\`tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}\`"
+        local msg="🔄 *Secret Rotated*\n\nLabel: \`${label}\`\n📡 Server: \`${server_ip}\`\n🔌 Port: \`${PROXY_PORT}\`\n🔑 Secret: \`${full_secret}\`"
         telegram_send_message "$msg" &>/dev/null &
     fi
 }
@@ -2773,35 +2773,31 @@ telegram_notify_proxy_started() {
     server_ip=$(get_public_ip)
     [ -z "$server_ip" ] && return 1
 
-    # Build message with all enabled secrets
+    # Build message with all enabled secrets (split details — no full proxy URLs)
     local msg="📱 *MTProxy Started*\n\n"
-    local i
+    local i _first_secret=""
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
         local full_secret
         full_secret=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
-        local tg_link="tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}"
-        local https_link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}"
+        [ -z "$_first_secret" ] && _first_secret="$full_secret"
         msg+="🏷 *${SECRETS_LABELS[$i]}*\n"
-        msg+="🔗 \`${tg_link}\`\n"
-        msg+="🌐 ${https_link}\n\n"
+        msg+="📡 Server: \`${server_ip}\`\n"
+        msg+="🔌 Port: \`${PROXY_PORT}\`\n"
+        msg+="🔑 Secret: \`${full_secret}\`\n\n"
     done
 
     msg+="📊 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}\n"
-    msg+="_Share the QR code below with users who need access._"
+    msg+="_Scan the QR code below to connect._"
 
     telegram_send_message "$msg"
 
     # Send QR for first enabled secret
-    for i in "${!SECRETS_LABELS[@]}"; do
-        [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
-        local https_link
-        https_link=$(get_proxy_link_https "${SECRETS_LABELS[$i]}")
+    if [ -n "$_first_secret" ]; then
         local qr_url
-        qr_url=$(generate_qr_url "$https_link")
+        qr_url=$(generate_qr_url "https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${_first_secret}")
         telegram_send_photo "$qr_url" "📱 *MTProxy QR Code* — Scan in Telegram to connect"
-        break
-    done
+    fi
 }
 
 telegram_setup_wizard() {
@@ -2989,6 +2985,14 @@ tg_send_photo() {
         --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
         --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
     rm -f "$_cfg"
+}
+
+# Send QR code image for a proxy secret (no text URL — avoids Telegram bot bans)
+send_proxy_qr() {
+    local ip="$1" port="$2" secret="$3" caption="${4:-Scan in Telegram to connect}"
+    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
+    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
+    tg_send_photo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
 }
 
 # Escape Markdown special chars in labels for Telegram
@@ -3220,26 +3224,20 @@ _process_cmd() {
             load_tg_settings
             local ip; ip=$(get_cached_ip)
             [ -z "$ip" ] && tg_send "❌ Cannot detect server IP" && return
-            local msg="🔗 *Proxy Links*\n\n"
+            local msg="🔗 *Proxy Details*\n\n"
+            local _first_fs=""
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 [ "$enabled" != "true" ] && continue
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${secret}${dh}"
-                msg+="🏷 *$(_esc "$label")*\n\`tg://proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}\`\n\n"
+                [ -z "$_first_fs" ] && _first_fs="$fs"
+                msg+="🏷 *$(_esc "$label")*\n📡 Server: \`${ip}\`\n🔌 Port: \`${PROXY_PORT}\`\n🔑 Secret: \`${fs}\`\n\n"
             done < "$SECRETS_FILE"
             tg_send "$msg"
-            # Send QR for first
-            while IFS='|' read -r label secret created enabled _mc _mi _q _ex; do
-                [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue; [ "$enabled" != "true" ] && continue
-                local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
-                local fs="ee${secret}${dh}"
-                local hl="https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}"
-                local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
-                tg_send_photo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "📱 Scan in Telegram"
-                break
-            done < "$SECRETS_FILE"
+            # Send QR for first enabled secret
+            [ -n "$_first_fs" ] && send_proxy_qr "$ip" "$PROXY_PORT" "$_first_fs"
             ;;
         /mp_add\ *|/mp_add@*\ *)
             local label=$(echo "$text" | awk '{print $2}')
@@ -3252,7 +3250,8 @@ _process_cmd() {
                 local ns=$(grep "^${label}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${ns}${dh}"
-                tg_send "✅ Secret *$(_esc "$label")* created!\n\n🔗 \`tg://proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}\`\n\n🌐 https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}"
+                tg_send "✅ Secret *$(_esc "$label")* created!\n\n📡 Server: \`${ip}\`\n🔌 Port: \`${PROXY_PORT}\`\n🔑 Secret: \`${fs}\`"
+                send_proxy_qr "$ip" "$PROXY_PORT" "$fs"
             else
                 tg_send "❌ Failed to add secret '$(_esc "$label")' (may already exist)"
             fi
@@ -3290,7 +3289,8 @@ _process_cmd() {
                 local ns=$(grep "^${label}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${ns}${dh}"
-                tg_send "🔄 Secret *$(_esc "$label")* rotated!\n\n🔗 New link:\n\`tg://proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}\`"
+                tg_send "🔄 Secret *$(_esc "$label")* rotated!\n\n📡 Server: \`${ip}\`\n🔌 Port: \`${PROXY_PORT}\`\n🔑 Secret: \`${fs}\`"
+                send_proxy_qr "$ip" "$PROXY_PORT" "$fs"
             else
                 tg_send "❌ Secret '$(_esc "$label")' not found"
             fi
