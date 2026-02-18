@@ -23,8 +23,8 @@ BACKUP_DIR="${INSTALL_DIR}/backups"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
 TELEMT_REPO="telemt/telemt"
-TELEMT_MIN_VERSION="3.0.0"
-TELEMT_COMMIT="43990c9"  # Pinned: ME fixes + Prometheus metrics (post-v3.0.0)
+TELEMT_MIN_VERSION="3.0.3"
+TELEMT_COMMIT="cf71703"  # Pinned: v3.0.3 — ME autofallback, flush optimization, IPv6 parser
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -868,7 +868,7 @@ build_telemt_image() {
     local force="${1:-false}"
 
     local commit="${TELEMT_COMMIT}"
-    local version="3.0.0-${commit}"
+    local version="3.0.3-${commit}"
 
     # Skip if image already exists (unless forced)
     if [ "$force" != "true" ] && docker image inspect "${DOCKER_IMAGE_BASE}:${version}" &>/dev/null; then
@@ -975,7 +975,7 @@ get_docker_image() {
 check_telemt_update() {
     local current
     current=$(get_telemt_version)
-    # Strip commit suffix for comparison (3.0.0-43990c9 → 3.0.0)
+    # Strip commit suffix for comparison (3.0.3-cf71703 → 3.0.3)
     local current_base="${current%%-*}"
     local latest
     latest=$(curl -sL --max-time 10 \
@@ -4434,7 +4434,7 @@ cli_main() {
                     # Remove old image so build_telemt_image creates a new one
                     docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
                     mkdir -p "$INSTALL_DIR"
-                    echo "3.0.0-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
+                    echo "3.0.3-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
                     build_telemt_image true
                     if is_proxy_running; then
                         load_secrets
@@ -4463,7 +4463,7 @@ cli_main() {
                     TELEMT_COMMIT="${latest_short}"
                     docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
                     mkdir -p "$INSTALL_DIR"
-                    echo "3.0.0-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
+                    echo "3.0.3-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
                     build_telemt_image true
                     if is_proxy_running; then
                         load_secrets
@@ -5133,7 +5133,7 @@ show_engine_menu() {
                 TELEMT_COMMIT="${latest_short}"
                 docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
                 mkdir -p "$INSTALL_DIR"
-                echo "3.0.0-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
+                echo "3.0.3-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
                 build_telemt_image true
                 if is_proxy_running; then
                     load_secrets
@@ -5167,7 +5167,7 @@ show_engine_menu() {
                 TELEMT_COMMIT="${verify_short}"
                 docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
                 mkdir -p "$INSTALL_DIR"
-                echo "3.0.0-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
+                echo "3.0.3-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
                 build_telemt_image true
                 if is_proxy_running; then
                     load_secrets
