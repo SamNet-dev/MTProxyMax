@@ -102,6 +102,7 @@ PROXY_DOMAIN="cloudflare.com"
 PROXY_CONCURRENCY=8192
 PROXY_CPUS=""
 PROXY_MEMORY=""
+CUSTOM_IP=""
 AD_TAG=""
 BLOCKLIST_COUNTRIES=""
 MASKING_ENABLED="true"
@@ -407,6 +408,11 @@ _PUBLIC_IP_CACHE=""
 _PUBLIC_IP_CACHE_AGE=0
 
 get_public_ip() {
+    # Return custom IP if configured
+    if [ -n "${CUSTOM_IP}" ]; then
+        echo "${CUSTOM_IP}"
+        return 0
+    fi
     local now; now=$(date +%s)
     # Return cached IP if less than 5 minutes old
     if [ -n "$_PUBLIC_IP_CACHE" ] && [ $(( now - _PUBLIC_IP_CACHE_AGE )) -lt 300 ]; then
@@ -544,6 +550,7 @@ PROXY_DOMAIN='${PROXY_DOMAIN}'
 PROXY_CONCURRENCY='${PROXY_CONCURRENCY}'
 PROXY_CPUS='${PROXY_CPUS}'
 PROXY_MEMORY='${PROXY_MEMORY}'
+CUSTOM_IP='${CUSTOM_IP}'
 
 # Ad-Tag (from @MTProxyBot)
 AD_TAG='${AD_TAG}'
@@ -595,7 +602,7 @@ load_settings() {
         # Whitelist of allowed keys
         case "$key" in
             PROXY_PORT|PROXY_METRICS_PORT|PROXY_DOMAIN|PROXY_CONCURRENCY|\
-            PROXY_CPUS|PROXY_MEMORY|AD_TAG|BLOCKLIST_COUNTRIES|\
+            PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|AD_TAG|BLOCKLIST_COUNTRIES|\
             MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
@@ -2897,7 +2904,7 @@ load_tg_settings() {
             local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
             case "$key" in
                 PROXY_PORT|PROXY_DOMAIN|PROXY_METRICS_PORT|PROXY_CONCURRENCY|\
-                PROXY_CPUS|PROXY_MEMORY|MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
+                PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
                 AD_TAG|BLOCKLIST_COUNTRIES|AUTO_UPDATE_ENABLED|\
                 TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
                 TELEGRAM_INTERVAL|TELEGRAM_SERVER_LABEL|TELEGRAM_ALERTS_ENABLED)
@@ -2911,6 +2918,10 @@ load_tg_settings() {
 _TG_IP_CACHE=""
 _TG_IP_CACHE_AGE=0
 get_cached_ip() {
+    # Return custom IP if configured
+    if [ -n "${CUSTOM_IP}" ]; then
+        echo "${CUSTOM_IP}"; return 0
+    fi
     local now; now=$(date +%s)
     if [ -n "$_TG_IP_CACHE" ] && [ $(( now - _TG_IP_CACHE_AGE )) -lt 300 ]; then
         echo "$_TG_IP_CACHE"; return 0
@@ -3542,6 +3553,22 @@ run_installer() {
         fi
     fi
 
+    # Custom IP
+    echo ""
+    local _detected_ip
+    _detected_ip=$(CUSTOM_IP="" get_public_ip)
+    echo -e "  ${BOLD}Server IP${NC} ${DIM}(used in proxy links)${NC}"
+    echo -en "  ${DIM}Detected: ${_detected_ip:-unknown} — Enter custom IP or press Enter [${_detected_ip:-auto}]:${NC} "
+    local ip_input
+    read -r ip_input
+    if [ -n "$ip_input" ]; then
+        if [[ "$ip_input" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$ip_input" =~ ^[0-9a-fA-F:]+$ ]]; then
+            CUSTOM_IP="$ip_input"
+        else
+            log_warn "Invalid IP address, using auto-detected"
+        fi
+    fi
+
     # Domain
     echo ""
     echo -e "  ${BOLD}FakeTLS domain${NC} ${DIM}(your proxy will look like HTTPS to this site)${NC}"
@@ -3900,6 +3927,7 @@ show_cli_help() {
     echo ""
     echo -e "  ${BOLD}Configuration:${NC}"
     echo -e "    ${GREEN}port${NC} [get|<number>]       Show or change proxy port"
+    echo -e "    ${GREEN}ip${NC} [get|auto|<address>]   Show, reset, or set custom IP for links"
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}adtag${NC} [set <hex>|remove|view] Manage ad-tag"
     echo -e "    ${GREEN}geoblock${NC} [add|remove|list|clear] Manage geo-blocking"
@@ -4110,6 +4138,38 @@ cli_main() {
                 log_error "Invalid port: ${new_port} (must be 1-65535)"
                 return 1
             fi
+            ;;
+
+        ip)
+            load_settings
+            local ip_arg="$1"
+            case "$ip_arg" in
+                ""|get)
+                    if [ -n "${CUSTOM_IP}" ]; then
+                        echo "${CUSTOM_IP} (custom)"
+                    else
+                        echo "$(get_public_ip) (auto-detected)"
+                    fi
+                    return 0
+                    ;;
+                auto|clear)
+                    check_root
+                    CUSTOM_IP=""
+                    save_settings
+                    log_success "IP reset to auto-detect ($(CUSTOM_IP="" get_public_ip))"
+                    ;;
+                *)
+                    check_root
+                    if [[ "$ip_arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$ip_arg" =~ ^[0-9a-fA-F:]+$ ]]; then
+                        CUSTOM_IP="$ip_arg"
+                        save_settings
+                        log_success "IP set to ${ip_arg}"
+                    else
+                        log_error "Invalid IP address: ${ip_arg}"
+                        return 1
+                    fi
+                    ;;
+            esac
             ;;
 
         domain)
@@ -4831,6 +4891,7 @@ show_settings_menu() {
         draw_header "SETTINGS"
         echo ""
         echo -e "  ${BOLD}Port:${NC}        ${PROXY_PORT}"
+        echo -e "  ${BOLD}IP:${NC}          ${CUSTOM_IP:-$(get_public_ip) ${DIM}(auto)${NC}}"
         echo -e "  ${BOLD}Domain:${NC}      ${PROXY_DOMAIN}"
         echo -e "  ${BOLD}CPU:${NC}         ${PROXY_CPUS:-unlimited}"
         echo -e "  ${BOLD}Memory:${NC}      ${PROXY_MEMORY:-unlimited}"
@@ -4840,12 +4901,13 @@ show_settings_menu() {
         echo -e "  ${BOLD}Engine:${NC}      telemt v$(get_telemt_version)"
         echo ""
         echo -e "  ${DIM}[1]${NC} Change port"
-        echo -e "  ${DIM}[2]${NC} Change domain"
-        echo -e "  ${DIM}[3]${NC} Change resources (CPU/RAM)"
-        echo -e "  ${DIM}[4]${NC} Toggle traffic masking"
-        echo -e "  ${DIM}[5]${NC} Set ad-tag"
-        echo -e "  ${DIM}[6]${NC} Toggle auto-update"
-        echo -e "  ${DIM}[7]${NC} Engine Management"
+        echo -e "  ${DIM}[2]${NC} Change IP"
+        echo -e "  ${DIM}[3]${NC} Change domain"
+        echo -e "  ${DIM}[4]${NC} Change resources (CPU/RAM)"
+        echo -e "  ${DIM}[5]${NC} Toggle traffic masking"
+        echo -e "  ${DIM}[6]${NC} Set ad-tag"
+        echo -e "  ${DIM}[7]${NC} Toggle auto-update"
+        echo -e "  ${DIM}[8]${NC} Engine Management"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -4869,6 +4931,26 @@ show_settings_menu() {
                 press_any_key
                 ;;
             2)
+                local _det_ip; _det_ip=$(CUSTOM_IP="" get_public_ip)
+                echo -e "  ${DIM}Detected: ${_det_ip:-unknown}${NC}"
+                echo -en "  ${BOLD}Custom IP [${CUSTOM_IP:-auto}]:${NC} "
+                local ip; read -r ip
+                if [ "$ip" = "auto" ] || [ "$ip" = "clear" ]; then
+                    CUSTOM_IP=""
+                    save_settings
+                    log_success "IP reset to auto-detect (${_det_ip})"
+                elif [ -n "$ip" ]; then
+                    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+                        CUSTOM_IP="$ip"
+                        save_settings
+                        log_success "IP set to ${ip}"
+                    else
+                        log_error "Invalid IP address"
+                    fi
+                fi
+                press_any_key
+                ;;
+            3)
                 echo -e "  ${DIM}[1] cloudflare.com  [2] google.com  [3] microsoft.com  [4] Custom${NC}"
                 local d; d=$(read_choice "Choice" "1")
                 local _domain_changed=true
@@ -4900,7 +4982,7 @@ show_settings_menu() {
                 fi
                 press_any_key
                 ;;
-            3)
+            4)
                 echo -en "  ${BOLD}CPU cores [${PROXY_CPUS:-unlimited}]:${NC} "
                 local c; read -r c
                 local _res_changed=false
@@ -4932,7 +5014,7 @@ show_settings_menu() {
                 fi
                 press_any_key
                 ;;
-            4)
+            5)
                 [ "$MASKING_ENABLED" = "true" ] && MASKING_ENABLED="false" || MASKING_ENABLED="true"
                 save_settings
                 log_success "Traffic masking: ${MASKING_ENABLED}"
@@ -4943,7 +5025,7 @@ show_settings_menu() {
                 fi
                 press_any_key
                 ;;
-            5)
+            6)
                 echo -en "  ${BOLD}Ad-tag (32 hex chars, or 'remove'):${NC} "
                 local at; read -r at
                 if [ "$at" = "remove" ]; then
@@ -4965,13 +5047,13 @@ show_settings_menu() {
                 fi
                 press_any_key
                 ;;
-            6)
+            7)
                 [ "$AUTO_UPDATE_ENABLED" = "true" ] && AUTO_UPDATE_ENABLED="false" || AUTO_UPDATE_ENABLED="true"
                 save_settings
                 log_success "Auto-update: ${AUTO_UPDATE_ENABLED}"
                 press_any_key
                 ;;
-            7) show_engine_menu ;;
+            8) show_engine_menu ;;
             0|"") return ;;
             *) ;;
         esac

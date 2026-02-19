@@ -410,6 +410,7 @@ mtproxymax secret setlimits <label> <conns> <ips> <quota> [expires]  # Set all l
 
 ```bash
 mtproxymax port [get|<number>]          # Get/set proxy port
+mtproxymax ip [get|auto|<address>]      # Get/set custom IP for proxy links
 mtproxymax domain [get|clear|<host>]    # Get/set FakeTLS domain
 mtproxymax adtag set <hex>              # Set ad-tag
 mtproxymax adtag remove                 # Remove ad-tag
