@@ -101,8 +101,8 @@ PROXY_PORT=443
 PROXY_METRICS_PORT=9090
 PROXY_DOMAIN="cloudflare.com"
 PROXY_CONCURRENCY=8192
-PROXY_CPUS="1"
-PROXY_MEMORY="256m"
+PROXY_CPUS=""
+PROXY_MEMORY=""
 AD_TAG=""
 BLOCKLIST_COUNTRIES=""
 MASKING_ENABLED="true"
@@ -2105,15 +2105,17 @@ run_proxy_container() {
     # Run container
     log_info "Starting telemt proxy on port ${PROXY_PORT}..."
 
-    docker run -d \
-        --name "$CONTAINER_NAME" \
-        --restart unless-stopped \
-        --network host \
-        --log-opt max-size=10m \
-        --log-opt max-file=3 \
-        --cpus "${PROXY_CPUS}" \
-        --memory "${PROXY_MEMORY}" \
-        --memory-swap "${PROXY_MEMORY}" \
+    local _docker_args=(
+        --name "$CONTAINER_NAME"
+        --restart unless-stopped
+        --network host
+        --log-opt max-size=10m
+        --log-opt max-file=3
+    )
+    [ -n "${PROXY_CPUS}" ] && _docker_args+=(--cpus "${PROXY_CPUS}")
+    [ -n "${PROXY_MEMORY}" ] && _docker_args+=(--memory "${PROXY_MEMORY}" --memory-swap "${PROXY_MEMORY}")
+
+    docker run -d "${_docker_args[@]}" \
         -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
         "$(get_docker_image)" /etc/telemt.toml \
         &>/dev/null || {

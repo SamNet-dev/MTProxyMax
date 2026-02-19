@@ -47,6 +47,7 @@ jobs:
           RUN git clone "https://github.com/${TELEMT_REPO}.git" /build
           WORKDIR /build
           RUN git checkout "${TELEMT_COMMIT}"
+          ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
           RUN cargo build --release && strip target/release/telemt 2>/dev/null || true && cp target/release/telemt /telemt
           FROM debian:bookworm-slim
           RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
