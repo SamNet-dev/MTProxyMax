@@ -4,7 +4,7 @@
 #  Copyright (c) 2026 SamNet Technologies
 #  https://github.com/SamNet-dev/MTProxyMax
 #
-#  Engine: telemt 3.x (Rust+Tokio) — https://github.com/telemt/telemt
+#  Engine: telemt 3.x (Rust+Tokio)
 #  License: MIT
 # ═══════════════════════════════════════════════════════════════
 set -eo pipefail
@@ -22,9 +22,8 @@ UPSTREAMS_FILE="${INSTALL_DIR}/upstreams.conf"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_REPO="telemt/telemt"
-TELEMT_MIN_VERSION="3.0.3"
-TELEMT_COMMIT="cf71703"  # Pinned: v3.0.3 — ME autofallback, flush optimization, IPv6 parser
+TELEMT_MIN_VERSION="3.0.4"
+TELEMT_COMMIT="f7a7fb9"  # Pinned: v3.0.4 — ME Pool V2, keepalives, staggered warmup, reconnect policy
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -517,11 +516,6 @@ parse_human_bytes() {
     esac
 }
 
-# Compare version strings (returns 0 if $1 >= $2)
-version_gte() {
-    [ "$(printf '%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]
-}
-
 # Validate a domain name (reject TOML/shell-unsafe characters)
 validate_domain() {
     local d="$1"
@@ -868,7 +862,7 @@ build_telemt_image() {
     local force="${1:-false}"
 
     local commit="${TELEMT_COMMIT}"
-    local version="3.0.3-${commit}"
+    local version="${TELEMT_MIN_VERSION}-${commit}"
 
     # Skip if image already exists (unless forced)
     if [ "$force" != "true" ] && docker image inspect "${DOCKER_IMAGE_BASE}:${version}" &>/dev/null; then
@@ -908,13 +902,13 @@ build_telemt_image() {
 
     cat > "${build_dir}/Dockerfile" << 'DOCKERFILE_EOF'
 FROM rust:1-bookworm AS builder
-ARG TELEMT_REPO
 ARG TELEMT_COMMIT
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
-RUN git clone "https://github.com/${TELEMT_REPO}.git" /build
+RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
 RUN git checkout "${TELEMT_COMMIT}"
+ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release && \
     strip target/release/telemt 2>/dev/null || true && \
     cp target/release/telemt /telemt
@@ -931,7 +925,6 @@ DOCKERFILE_EOF
 
     log_info "Compiling from source (first build takes a few minutes)..."
     if docker build \
-        --build-arg "TELEMT_REPO=${TELEMT_REPO}" \
         --build-arg "TELEMT_COMMIT=${commit}" \
         -t "${DOCKER_IMAGE_BASE}:${version}" "$build_dir"; then
         docker tag "${DOCKER_IMAGE_BASE}:${version}" "${DOCKER_IMAGE_BASE}:latest" 2>/dev/null || true
@@ -969,25 +962,6 @@ get_docker_image() {
     else
         echo "${DOCKER_IMAGE_BASE}:${ver}"
     fi
-}
-
-# Check if telemt has a newer release available
-check_telemt_update() {
-    local current
-    current=$(get_telemt_version)
-    # Strip commit suffix for comparison (3.0.3-cf71703 → 3.0.3)
-    local current_base="${current%%-*}"
-    local latest
-    latest=$(curl -sL --max-time 10 \
-        "https://api.github.com/repos/${TELEMT_REPO}/releases/latest" \
-        2>/dev/null | grep '"tag_name"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^"]*')
-
-    # Only notify if release is strictly newer than our base version
-    if [ -n "$latest" ] && [ "$latest" != "$current_base" ] && version_gte "$latest" "$current_base"; then
-        echo "$latest"
-        return 0
-    fi
-    return 1
 }
 
 # ── Section 7: Telemt Engine ─────────────────────────────────
@@ -1059,7 +1033,7 @@ metrics_port = ${metrics_port}
 metrics_whitelist = ["127.0.0.1", "::1"]
 
 [timeouts]
-client_handshake = 15
+client_handshake = 30
 tg_connect = 10
 client_keepalive = 60
 client_ack = 300
@@ -2626,30 +2600,21 @@ self_update() {
         fi
     fi
 
-    # Telemt engine update check
+    # Telemt engine update — pull image matching the script's pinned version
     echo ""
-    local _telemt_latest
-    _telemt_latest=$(check_telemt_update 2>/dev/null) && {
-        local _telemt_cur
-        _telemt_cur=$(get_telemt_version)
-        log_info "Telemt engine update available: v${_telemt_cur} -> v${_telemt_latest}"
-        echo -en "  ${BOLD}Update telemt engine? [y/N]:${NC} "
-        local _tconfirm; read -r _tconfirm
-        if [ "$_tconfirm" = "y" ] || [ "$_tconfirm" = "Y" ]; then
-            build_telemt_image true
-            if is_proxy_running; then
-                load_secrets
-                restart_proxy_container
-            fi
+    local _expected_ver="${TELEMT_MIN_VERSION}-${TELEMT_COMMIT}"
+    local _current_ver
+    _current_ver=$(get_telemt_version)
+    if [ "$_current_ver" != "$_expected_ver" ]; then
+        log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
+        build_telemt_image true
+        if is_proxy_running; then
+            load_secrets
+            restart_proxy_container
         fi
-    } || {
-        local _tver; _tver=$(get_telemt_version)
-        if [ "$_tver" = "unknown" ]; then
-            log_warn "Telemt version unknown — try rebuilding with: mtproxymax rebuild"
-        else
-            log_success "Telemt engine is up to date (v${_tver})"
-        fi
-    }
+    else
+        log_success "Telemt engine is up to date (v${_current_ver})"
+    fi
 }
 
 # ── Section 14: Telegram Integration ────────────────────────
@@ -3956,6 +3921,11 @@ show_cli_help() {
     echo -e "    ${GREEN}firewall${NC}                Show firewall setup guide"
     echo -e "    ${GREEN}portforward${NC}             Show port forwarding guide"
     echo ""
+    echo -e "  ${BOLD}Engine:${NC}"
+    echo -e "    ${GREEN}engine status${NC}           Show current engine version"
+    echo -e "    ${GREEN}engine rebuild${NC}          Force rebuild engine image"
+    echo -e "    ${GREEN}rebuild${NC}                 Force rebuild from source"
+    echo ""
     echo -e "  ${BOLD}System:${NC}"
     echo -e "    ${GREEN}install${NC}                 Run installation wizard"
     echo -e "    ${GREEN}menu${NC}                    Open interactive menu"
@@ -4374,7 +4344,7 @@ cli_main() {
             check_root
             load_settings
             log_info "Force-rebuilding telemt engine from source (commit ${TELEMT_COMMIT})..."
-            build_telemt_image true
+            build_telemt_image source
             if is_proxy_running; then
                 load_secrets
                 restart_proxy_container
@@ -4390,95 +4360,35 @@ cli_main() {
                     echo -e "  ${BOLD}Telemt Engine${NC}"
                     echo -e "  ${DIM}Installed:${NC}  v$(get_telemt_version)"
                     echo -e "  ${DIM}Pinned to:${NC}  commit ${TELEMT_COMMIT}"
-                    echo -e "  ${DIM}Repo:${NC}       https://github.com/${TELEMT_REPO}"
                     echo ""
-                    log_info "Checking latest commits..."
-                    local head_sha head_msg
-                    head_sha=$(curl -sL --max-time 10 \
-                        "https://api.github.com/repos/${TELEMT_REPO}/commits/main" 2>/dev/null \
-                        | grep '"sha"' | head -1 | cut -d'"' -f4)
-                    head_msg=$(curl -sL --max-time 10 \
-                        "https://api.github.com/repos/${TELEMT_REPO}/commits/main" 2>/dev/null \
-                        | grep '"message"' | head -1 | cut -d'"' -f4)
-                    if [ -n "$head_sha" ]; then
-                        local head_short="${head_sha:0:7}"
-                        if [ "$head_short" = "${TELEMT_COMMIT:0:7}" ]; then
-                            log_success "You are on the latest commit"
-                        else
-                            echo -e "  ${YELLOW}Latest on main:${NC} ${head_short} — ${head_msg}"
-                            echo -e "  ${DIM}To update: mtproxymax engine switch ${head_short}${NC}"
-                        fi
+                    local _expected="${TELEMT_MIN_VERSION}-${TELEMT_COMMIT}"
+                    local _current; _current=$(get_telemt_version)
+                    if [ "$_current" = "$_expected" ]; then
+                        log_success "Engine is up to date"
                     else
-                        log_warn "Could not reach GitHub API"
+                        log_info "Update available: v${_current} -> v${_expected}"
+                        echo -e "  ${DIM}Run: mtproxymax update${NC}"
                     fi
                     ;;
-                switch)
+                rebuild)
                     check_root
-                    local new_commit="$1"
-                    if [ -z "$new_commit" ]; then
-                        log_error "Usage: mtproxymax engine switch <commit-hash>"
-                        log_info "Example: mtproxymax engine switch 43990c9"
-                        return 1
-                    fi
-                    # Validate commit exists on the repo
-                    log_info "Verifying commit ${new_commit}..."
-                    local verify
-                    verify=$(curl -sL --max-time 10 \
-                        "https://api.github.com/repos/${TELEMT_REPO}/commits/${new_commit}" 2>/dev/null \
-                        | grep '"sha"' | head -1 | cut -d'"' -f4)
-                    if [ -z "$verify" ]; then
-                        log_error "Commit '${new_commit}' not found on ${TELEMT_REPO}"
-                        return 1
-                    fi
-                    local verify_short="${verify:0:7}"
-                    log_info "Switching engine to commit ${verify_short}..."
-                    TELEMT_COMMIT="${verify_short}"
-                    # Remove old image so build_telemt_image creates a new one
-                    docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
-                    mkdir -p "$INSTALL_DIR"
-                    echo "3.0.3-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
-                    build_telemt_image true
-                    if is_proxy_running; then
-                        load_secrets
-                        restart_proxy_container
-                    fi
-                    log_success "Engine switched to commit ${verify_short}"
-                    log_info "To make this permanent, update TELEMT_COMMIT in the script"
-                    ;;
-                latest)
-                    check_root
-                    log_info "Fetching latest commit from main..."
-                    local latest_sha
-                    latest_sha=$(curl -sL --max-time 10 \
-                        "https://api.github.com/repos/${TELEMT_REPO}/commits/main" 2>/dev/null \
-                        | grep '"sha"' | head -1 | cut -d'"' -f4)
-                    if [ -z "$latest_sha" ]; then
-                        log_error "Cannot reach GitHub API"
-                        return 1
-                    fi
-                    local latest_short="${latest_sha:0:7}"
-                    if [ "$latest_short" = "${TELEMT_COMMIT:0:7}" ]; then
-                        log_success "Already on the latest commit (${latest_short})"
+                    echo -en "  ${DIM}Force rebuild engine from commit ${TELEMT_COMMIT}? [Y/n]:${NC} "
+                    local confirm; read -r confirm
+                    if [[ "$confirm" =~ ^[nN] ]]; then
                         return 0
                     fi
-                    log_info "Switching to latest: ${latest_short}..."
-                    TELEMT_COMMIT="${latest_short}"
-                    docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
-                    mkdir -p "$INSTALL_DIR"
-                    echo "3.0.3-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
                     build_telemt_image true
                     if is_proxy_running; then
                         load_secrets
                         restart_proxy_container
                     fi
-                    log_success "Engine updated to latest commit (${latest_short})"
+                    log_success "Engine rebuilt"
                     ;;
                 *)
                     echo -e "  ${BOLD}Usage:${NC} mtproxymax engine <command>"
                     echo ""
-                    echo -e "  ${DIM}status${NC}            Show current engine version and check for updates"
-                    echo -e "  ${DIM}switch <commit>${NC}   Switch to a specific commit"
-                    echo -e "  ${DIM}latest${NC}            Switch to the latest commit on main"
+                    echo -e "  ${DIM}status${NC}     Show current engine version"
+                    echo -e "  ${DIM}rebuild${NC}    Force rebuild engine image"
                     ;;
             esac
             ;;
@@ -5075,110 +4985,23 @@ show_engine_menu() {
         echo ""
         echo -e "  ${BOLD}Engine:${NC}    telemt v$(get_telemt_version)"
         echo -e "  ${BOLD}Pinned to:${NC} commit ${TELEMT_COMMIT}"
-        echo -e "  ${BOLD}Repo:${NC}      ${DIM}github.com/${TELEMT_REPO}${NC}"
         echo ""
-        echo -e "  ${DIM}[1]${NC} Check for new commits"
-        echo -e "  ${DIM}[2]${NC} Update to latest commit"
-        echo -e "  ${DIM}[3]${NC} Switch to specific commit"
-        echo -e "  ${DIM}[4]${NC} Force rebuild current"
+        local _expected="${TELEMT_MIN_VERSION}-${TELEMT_COMMIT}"
+        local _current; _current=$(get_telemt_version)
+        if [ "$_current" = "$_expected" ]; then
+            echo -e "  ${GREEN}${SYM_OK} Engine is up to date${NC}"
+        else
+            echo -e "  ${YELLOW}Update available: v${_current} -> v${_expected}${NC}"
+            echo -e "  ${DIM}Run: mtproxymax update${NC}"
+        fi
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Force rebuild engine"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
         choice=$(read_choice "Choice" "0")
         case "$choice" in
             1)
-                log_info "Checking latest commit on main..."
-                local head_info
-                head_info=$(curl -sL --max-time 10 \
-                    "https://api.github.com/repos/${TELEMT_REPO}/commits/main" 2>/dev/null)
-                local head_sha head_msg
-                head_sha=$(echo "$head_info" | grep '"sha"' | head -1 | cut -d'"' -f4)
-                head_msg=$(echo "$head_info" | grep '"message"' | head -1 | cut -d'"' -f4)
-                if [ -n "$head_sha" ]; then
-                    local head_short="${head_sha:0:7}"
-                    echo ""
-                    echo -e "  ${BOLD}Latest:${NC}  ${head_short} — ${head_msg}"
-                    echo -e "  ${BOLD}Current:${NC} ${TELEMT_COMMIT}"
-                    echo ""
-                    if [ "$head_short" = "${TELEMT_COMMIT:0:7}" ]; then
-                        log_success "You are on the latest commit"
-                    else
-                        echo -e "  ${YELLOW}New commit available!${NC}"
-                        echo -e "  ${DIM}Use option [2] to update${NC}"
-                    fi
-                else
-                    log_error "Could not reach GitHub API"
-                fi
-                press_any_key
-                ;;
-            2)
-                log_info "Fetching latest commit from main..."
-                local latest_sha
-                latest_sha=$(curl -sL --max-time 10 \
-                    "https://api.github.com/repos/${TELEMT_REPO}/commits/main" 2>/dev/null \
-                    | grep '"sha"' | head -1 | cut -d'"' -f4)
-                if [ -z "$latest_sha" ]; then
-                    log_error "Cannot reach GitHub API"
-                    press_any_key; continue
-                fi
-                local latest_short="${latest_sha:0:7}"
-                if [ "$latest_short" = "${TELEMT_COMMIT:0:7}" ]; then
-                    log_success "Already on the latest commit (${latest_short})"
-                    press_any_key; continue
-                fi
-                echo -e "  ${BOLD}Update engine to commit ${latest_short}?${NC}"
-                echo -en "  ${DIM}This will rebuild and restart the proxy [Y/n]:${NC} "
-                local confirm; read -r confirm
-                if [[ "$confirm" =~ ^[nN] ]]; then
-                    press_any_key; continue
-                fi
-                TELEMT_COMMIT="${latest_short}"
-                docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
-                mkdir -p "$INSTALL_DIR"
-                echo "3.0.3-${latest_short}" > "${INSTALL_DIR}/.telemt_version"
-                build_telemt_image true
-                if is_proxy_running; then
-                    load_secrets
-                    restart_proxy_container || true
-                fi
-                log_success "Engine updated to commit ${latest_short}"
-                press_any_key
-                ;;
-            3)
-                echo -en "  ${BOLD}Enter commit hash:${NC} "
-                local new_commit; read -r new_commit
-                if [ -z "$new_commit" ]; then
-                    press_any_key; continue
-                fi
-                log_info "Verifying commit ${new_commit}..."
-                local verify
-                verify=$(curl -sL --max-time 10 \
-                    "https://api.github.com/repos/${TELEMT_REPO}/commits/${new_commit}" 2>/dev/null \
-                    | grep '"sha"' | head -1 | cut -d'"' -f4)
-                if [ -z "$verify" ]; then
-                    log_error "Commit '${new_commit}' not found on ${TELEMT_REPO}"
-                    press_any_key; continue
-                fi
-                local verify_short="${verify:0:7}"
-                echo -e "  ${BOLD}Switch engine to commit ${verify_short}?${NC}"
-                echo -en "  ${DIM}This will rebuild and restart the proxy [Y/n]:${NC} "
-                local confirm; read -r confirm
-                if [[ "$confirm" =~ ^[nN] ]]; then
-                    press_any_key; continue
-                fi
-                TELEMT_COMMIT="${verify_short}"
-                docker rmi "${DOCKER_IMAGE_BASE}:$(get_telemt_version)" 2>/dev/null || true
-                mkdir -p "$INSTALL_DIR"
-                echo "3.0.3-${verify_short}" > "${INSTALL_DIR}/.telemt_version"
-                build_telemt_image true
-                if is_proxy_running; then
-                    load_secrets
-                    restart_proxy_container || true
-                fi
-                log_success "Engine switched to commit ${verify_short}"
-                press_any_key
-                ;;
-            4)
                 echo -en "  ${DIM}Force rebuild from commit ${TELEMT_COMMIT}? [Y/n]:${NC} "
                 local confirm; read -r confirm
                 if [[ "$confirm" =~ ^[nN] ]]; then

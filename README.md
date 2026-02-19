@@ -273,13 +273,12 @@ Get your ad-tag from [@MTProxyBot](https://t.me/MTProxyBot). Users see a pinned 
 ### ⚙️ Engine Management
 
 ```bash
-mtproxymax engine status              # Current version + available updates
-mtproxymax engine latest              # Update to newest commit
-mtproxymax engine switch abc1234      # Pin to specific commit
+mtproxymax engine status              # Current engine version
+mtproxymax engine rebuild             # Force rebuild engine image
 mtproxymax rebuild                    # Force rebuild from source
 ```
 
-Pre-built multi-arch Docker images (amd64 + arm64) are pulled automatically. Source compilation is the automatic fallback.
+Engine updates are delivered through `mtproxymax update`. Pre-built multi-arch Docker images (amd64 + arm64) are pulled automatically. Source compilation is the automatic fallback.
 
 ---
 
@@ -448,11 +447,10 @@ mtproxymax health                       # Run diagnostics
 <summary><b>Engine & Updates</b></summary>
 
 ```bash
-mtproxymax engine status                # Show version + check updates
-mtproxymax engine latest                # Update to latest commit
-mtproxymax engine switch <commit>       # Switch to specific commit
+mtproxymax engine status                # Show current engine version
+mtproxymax engine rebuild               # Force rebuild engine image
 mtproxymax rebuild                      # Force rebuild from source
-mtproxymax update                       # Check for script updates
+mtproxymax update                       # Check for script + engine updates
 ```
 
 </details>
@@ -497,7 +495,7 @@ mtproxymax telegram remove              # Remove bot completely
 
 ## 🙏 Credits
 
-Built on top of **[telemt](https://github.com/telemt/telemt)** — a high-performance MTProto proxy engine written in Rust/Tokio. All proxy protocol handling, FakeTLS, traffic masking, and per-user enforcement is powered by telemt.
+Built on top of **telemt** — a high-performance MTProto proxy engine written in Rust/Tokio. All proxy protocol handling, FakeTLS, traffic masking, and per-user enforcement is powered by telemt.
 
 ---
 
