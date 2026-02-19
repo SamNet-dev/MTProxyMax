@@ -3639,7 +3639,7 @@ run_installer() {
     # Resource limits
     echo ""
     echo -e "  ${BOLD}Resource limits${NC}"
-    echo -en "  ${DIM}Enter CPU cores [1]:${NC} "
+    echo -en "  ${DIM}Enter CPU cores [unlimited]:${NC} "
     local cpu_input
     read -r cpu_input
     if [ -n "$cpu_input" ]; then
@@ -3648,14 +3648,14 @@ run_installer() {
             if awk "BEGIN{exit ($cpu_input < 0.1)}" 2>/dev/null; then
                 PROXY_CPUS="$cpu_input"
             else
-                log_warn "CPU must be at least 0.1, keeping ${PROXY_CPUS:-1}"
+                log_warn "CPU must be at least 0.1, keeping ${PROXY_CPUS:-unlimited}"
             fi
         else
-            log_warn "Invalid CPU value (must be a number, e.g. 1, 2, 0.5), keeping ${PROXY_CPUS:-1}"
+            log_warn "Invalid CPU value (must be a number, e.g. 1, 2, 0.5), keeping ${PROXY_CPUS:-unlimited}"
         fi
     fi
 
-    echo -en "  ${DIM}Enter memory limit [256m]:${NC} "
+    echo -en "  ${DIM}Enter memory limit [unlimited]:${NC} "
     local mem_input
     read -r mem_input
     if [ -n "$mem_input" ]; then
@@ -3664,7 +3664,7 @@ run_installer() {
             [[ "$mem_input" =~ ^[0-9]+$ ]] && mem_input="${mem_input}m"
             PROXY_MEMORY="$mem_input"
         else
-            log_warn "Invalid memory value (e.g. 256m, 1g), keeping ${PROXY_MEMORY:-256m}"
+            log_warn "Invalid memory value (e.g. 256m, 1g), keeping ${PROXY_MEMORY:-unlimited}"
         fi
     fi
 
@@ -4922,8 +4922,8 @@ show_settings_menu() {
         echo ""
         echo -e "  ${BOLD}Port:${NC}        ${PROXY_PORT}"
         echo -e "  ${BOLD}Domain:${NC}      ${PROXY_DOMAIN}"
-        echo -e "  ${BOLD}CPU:${NC}         ${PROXY_CPUS} cores"
-        echo -e "  ${BOLD}Memory:${NC}      ${PROXY_MEMORY}"
+        echo -e "  ${BOLD}CPU:${NC}         ${PROXY_CPUS:-unlimited}"
+        echo -e "  ${BOLD}Memory:${NC}      ${PROXY_MEMORY:-unlimited}"
         echo -e "  ${BOLD}Masking:${NC}     ${MASKING_ENABLED}"
         echo -e "  ${BOLD}Ad-tag:${NC}      ${AD_TAG:-${DIM}not set${NC}}"
         echo -e "  ${BOLD}Auto-update:${NC} ${AUTO_UPDATE_ENABLED}"
@@ -4991,7 +4991,7 @@ show_settings_menu() {
                 press_any_key
                 ;;
             3)
-                echo -en "  ${BOLD}CPU cores [${PROXY_CPUS}]:${NC} "
+                echo -en "  ${BOLD}CPU cores [${PROXY_CPUS:-unlimited}]:${NC} "
                 local c; read -r c
                 local _res_changed=false
                 if [ -n "$c" ]; then
@@ -5001,7 +5001,7 @@ show_settings_menu() {
                         log_error "Invalid CPU value (must be a number >= 0.1, e.g. 1, 2, 0.5)"
                     fi
                 fi
-                echo -en "  ${BOLD}Memory [${PROXY_MEMORY}]:${NC} "
+                echo -en "  ${BOLD}Memory [${PROXY_MEMORY:-unlimited}]:${NC} "
                 local m; read -r m
                 if [ -n "$m" ]; then
                     if [[ "$m" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
