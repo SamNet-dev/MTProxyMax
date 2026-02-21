@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.0-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.2.0-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -17,7 +17,8 @@
     <a href="#-features">Features</a> &bull;
     <a href="#-comparison">Comparison</a> &bull;
     <a href="#-telegram-bot-17-commands">Telegram Bot</a> &bull;
-    <a href="#-cli-reference">CLI Reference</a>
+    <a href="#-cli-reference">CLI Reference</a> &bull;
+    <a href="#-changelog">Changelog</a>
   </p>
 </p>
 
@@ -76,9 +77,9 @@ mtproxymax status    # Check proxy health
 
 ## ✨ Features
 
-### 🛡️ FakeTLS Obfuscation
+### 🛡️ FakeTLS V2 Obfuscation
 
-Your proxy traffic looks identical to normal HTTPS traffic. The TLS handshake SNI points to a cover domain (e.g., `cloudflare.com`), making it indistinguishable from regular web browsing to any DPI system.
+Your proxy traffic looks identical to normal HTTPS traffic. The **Fake TLS V2** engine mirrors real TLS 1.3 sessions — per-domain profiles, real cipher suites, dynamic certificate lengths, and realistic record fragmentation. The TLS handshake SNI points to a cover domain (e.g., `cloudflare.com`), making it indistinguishable from regular web browsing to any DPI system.
 
 **Traffic masking** goes further — when a non-Telegram client probes your server, the connection is forwarded to the real cover domain. Your server responds exactly like cloudflare.com would.
 
@@ -227,9 +228,12 @@ mtproxymax upstream add warp socks5 127.0.0.1:40000 - - 20
 
 # Route through a backup VPS
 mtproxymax upstream add backup socks5 203.0.113.50:1080 user pass 80
+
+# Hostnames are supported (resolved by the engine)
+mtproxymax upstream add remote socks5 my-proxy.example.com:1080 user pass 50
 ```
 
-Supports **SOCKS5** (with auth), **SOCKS4**, and **direct** routing with weight-based load balancing.
+Supports **SOCKS5** (with auth), **SOCKS4**, and **direct** routing with weight-based load balancing. Addresses can be IPs or hostnames.
 
 ---
 
@@ -426,7 +430,7 @@ mtproxymax geoblock add <CC>            # Block country
 mtproxymax geoblock remove <CC>         # Unblock country
 mtproxymax geoblock list                # List blocked countries
 mtproxymax upstream list                # List upstreams
-mtproxymax upstream add <name> <type> <addr> [user] [pass] [weight]
+mtproxymax upstream add <name> <type> <host:port> [user] [pass] [weight]
 mtproxymax upstream remove <name>       # Remove upstream
 mtproxymax upstream test <name>         # Test connectivity
 ```
@@ -491,6 +495,52 @@ mtproxymax telegram remove              # Remove bot completely
 | `/opt/mtproxymax/secrets.conf` | User keys, limits, expiry dates |
 | `/opt/mtproxymax/upstreams.conf` | Upstream routing rules |
 | `/opt/mtproxymax/mtproxy/config.toml` | Generated telemt engine config |
+
+---
+
+## 📋 Changelog
+
+### v1.2.0 — Engine v3.0.7 + Custom IP
+
+**Engine Upgrade (v3.0.4 → v3.0.7):**
+
+- **Fake TLS V2** — Complete rewrite of the TLS front. Handshakes now mirror real TLS 1.3 sessions with per-domain profiles, dynamic certificate lengths, and realistic record fragmentation. Significantly harder to fingerprint via DPI
+- **ME Pool V2** — Middle-end connections now use keepalive padding frames, staggered warmup, and exponential backoff reconnects for better stability under load
+- **Dynamic config reload** — Engine picks up config.toml changes without a restart
+- **SOCKS proxy hostname support** — Upstream SOCKS4/SOCKS5 proxies now accept hostnames in addition to IPs
+- **Frame size fixes** — Resolved "frame too large" errors on middle-end connections
+- **Extended handshake timeout** — `client_handshake` raised from 15s to 30s for slow networks
+
+**New Features:**
+
+- **Custom IP** — Set a custom IP for proxy links when behind NAT, CDN, or multi-IP setups. The proxy still binds to all interfaces — this only affects link/QR generation
+  ```bash
+  mtproxymax ip 203.0.113.50    # Set custom IP
+  mtproxymax ip auto             # Reset to auto-detect
+  ```
+  Also available in the setup wizard and TUI settings menu
+
+**Performance:**
+
+- **LTO builds** — Engine compiled with Link-Time Optimization (`LTO=true`, `codegen-units=1`) for ~10-20% faster throughput
+- **No default resource caps** — Docker CPU/memory limits now default to unlimited instead of 1 core / 256MB
+
+### v1.1.0 — Per-User Limits + Telegram Bot
+
+- Per-user connection, IP, quota, and expiry limits
+- Telegram bot with 17 commands for remote management
+- Proxy chaining via SOCKS5/SOCKS4 upstreams
+- Geo-blocking with CIDR blocklists
+- Auto-recovery with Telegram alerts
+
+### v1.0.0 — Initial Release
+
+- Full MTProto proxy management with telemt 3.x Rust engine
+- Interactive TUI + complete CLI
+- Multi-user secret management with QR codes
+- FakeTLS obfuscation with traffic masking
+- Prometheus metrics endpoint
+- Auto-update system
 
 ---
 

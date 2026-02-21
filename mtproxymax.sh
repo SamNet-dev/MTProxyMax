@@ -3919,7 +3919,7 @@ show_cli_help() {
     echo ""
     echo -e "  ${BOLD}Upstream Routing:${NC}"
     echo -e "    ${GREEN}upstream list${NC}                  List upstreams"
-    echo -e "    ${GREEN}upstream add${NC} <name> <type> <addr> [user] [pass] [weight] [iface]"
+    echo -e "    ${GREEN}upstream add${NC} <name> <type> <host:port> [user] [pass] [weight] [iface]"
     echo -e "    ${GREEN}upstream remove${NC} <name>      Remove upstream"
     echo -e "    ${GREEN}upstream enable${NC} <name>      Enable upstream"
     echo -e "    ${GREEN}upstream disable${NC} <name>     Disable upstream"
