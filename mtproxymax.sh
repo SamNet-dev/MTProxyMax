@@ -22,8 +22,8 @@ UPSTREAMS_FILE="${INSTALL_DIR}/upstreams.conf"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.0.4"
-TELEMT_COMMIT="f7a7fb9"  # Pinned: v3.0.4 — ME Pool V2, keepalives, staggered warmup, reconnect policy
+TELEMT_MIN_VERSION="3.0.7"
+TELEMT_COMMIT="1a525f7"  # Pinned: v3.0.7 — Fake TLS V2, config reload, ME frame fixes
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 

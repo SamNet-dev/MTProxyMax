@@ -6,11 +6,11 @@ on:
       telemt_commit:
         description: 'Telemt commit hash to build from'
         required: true
-        default: 'f7a7fb9'
+        default: '1a525f7'
       version_tag:
-        description: 'Version tag (e.g. 3.0.4-f7a7fb9)'
+        description: 'Version tag (e.g. 3.0.7-1a525f7)'
         required: true
-        default: '3.0.4-f7a7fb9'
+        default: '3.0.7-1a525f7'
 
 env:
   REGISTRY: ghcr.io
