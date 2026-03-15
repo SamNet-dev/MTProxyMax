@@ -516,16 +516,20 @@ mtproxymax telegram remove              # Remove bot completely
 - **`--no-restart` flag** — `secret add/remove/add-batch/remove-batch --no-restart` for scripting and automation
 - **TUI options** — Interactive menu options [6] and [7] for batch operations
 
-### v1.0.0 — Engine v3.3.14
+### v1.0.0 — Engine v3.3.18
 
-**Engine Upgrade (v3.3.3 → v3.3.14):**
+**Engine Upgrade (v3.3.3 → v3.3.18):**
 
 - **Event-Driven ME** — Pool switches from busy-polling to event-driven, reducing CPU usage on idle/low-traffic servers
 - **CPU/RAM Hot-Path Optimization** — Removed hot-path obstacles for lower resource usage under load
+- **Hot-Reload Debounce** — Config reload requires 2 stable snapshots, preventing partial-write races during secret changes
+- **ME Writer Rebinding** — Lifecycle and consistency fixes: proper cleanup of stale writers, faster recovery after drops
+- **Source-IP ME Routing** — Routing decisions now factor in source IP for better multi-homed server support
+- **ME Gate Fixes** — Dead writer bindings cleaned up immediately instead of silently wasting resources
 - **ME Writer Selection** — Smarter active-by-endpoint writer picking for better DC routing
 - **DC-to-Client Tuning** — Fine-tuned data path from datacenter to client connections
 - **ME/DC Reroute** — Dynamic rerouting when preferred datacenter path degrades
-- **Adaptive Floor Planner** — Smarter idle writer management with upper-limit caps
+- **Per-Upstream Runtime Selftest** — Built-in diagnostics for upstream connectivity
 - **PROXY Real IP in Logs** — Real client IP now visible in PROXY protocol logs
 
 ### v1.0.0 — Per-User Limits + Telegram Bot

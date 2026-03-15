@@ -22,8 +22,8 @@ UPSTREAMS_FILE="${INSTALL_DIR}/upstreams.conf"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.3.14"
-TELEMT_COMMIT="d99df37"  # Pinned: v3.3.14 — Event-driven ME, CPU/RAM hot-path optimization, DC reroute, writer selection
+TELEMT_MIN_VERSION="3.3.18"
+TELEMT_COMMIT="2be3e4a"  # Pinned: v3.3.18 — Hot-reload debounce, ME writer rebinding fixes, src-IP routing, TPL-3 license
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
