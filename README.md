@@ -516,21 +516,22 @@ mtproxymax telegram remove              # Remove bot completely
 - **`--no-restart` flag** — `secret add/remove/add-batch/remove-batch --no-restart` for scripting and automation
 - **TUI options** — Interactive menu options [6] and [7] for batch operations
 
-### v1.0.0 — Engine v3.3.18
+### v1.0.0 — Engine v3.3.22
 
-**Engine Upgrade (v3.3.3 → v3.3.18):**
+**Engine Upgrade (v3.3.3 → v3.3.22):**
 
-- **Event-Driven ME** — Pool switches from busy-polling to event-driven, reducing CPU usage on idle/low-traffic servers
+- **Adaptive Buffers** — Dynamic buffer sizing: less RAM at low load, more throughput at high load
+- **Session Eviction** — Smarter cleanup of idle/dead connections under memory pressure
+- **Flow Performance** — 3x faster D2C flush (1500μs → 500μs) + immediate ACK flushing for lower latency
+- **Tighter Timeouts** — Keepalive 60s → 15s, ACK 300s → 90s for faster dead-connection cleanup
+- **Hot-Reload Fixes** — More reliable config reload without restart
+- **Configurable max_connections** — New option to cap total connections (default: 10000)
+- **Event-Driven ME** — Pool switches from busy-polling to event-driven, reducing CPU on idle servers
 - **CPU/RAM Hot-Path Optimization** — Removed hot-path obstacles for lower resource usage under load
-- **Hot-Reload Debounce** — Config reload requires 2 stable snapshots, preventing partial-write races during secret changes
-- **ME Writer Rebinding** — Lifecycle and consistency fixes: proper cleanup of stale writers, faster recovery after drops
-- **Source-IP ME Routing** — Routing decisions now factor in source IP for better multi-homed server support
-- **ME Gate Fixes** — Dead writer bindings cleaned up immediately instead of silently wasting resources
-- **ME Writer Selection** — Smarter active-by-endpoint writer picking for better DC routing
-- **DC-to-Client Tuning** — Fine-tuned data path from datacenter to client connections
+- **ME Writer Rebinding** — Lifecycle fixes: proper cleanup of stale writers, faster recovery after drops
+- **Source-IP ME Routing** — Routing decisions factor in source IP for multi-homed servers
 - **ME/DC Reroute** — Dynamic rerouting when preferred datacenter path degrades
 - **Per-Upstream Runtime Selftest** — Built-in diagnostics for upstream connectivity
-- **PROXY Real IP in Logs** — Real client IP now visible in PROXY protocol logs
 
 ### v1.0.0 — Per-User Limits + Telegram Bot
 

@@ -22,8 +22,8 @@ UPSTREAMS_FILE="${INSTALL_DIR}/upstreams.conf"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.3.18"
-TELEMT_COMMIT="2be3e4a"  # Pinned: v3.3.18 — Hot-reload debounce, ME writer rebinding fixes, src-IP routing, TPL-3 license
+TELEMT_MIN_VERSION="3.3.22"
+TELEMT_COMMIT="1544e3f"  # Pinned: v3.3.22 — Adaptive buffers, session eviction, flow perf, hot-reload fixes
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -1042,8 +1042,8 @@ metrics_whitelist = ["127.0.0.1", "::1"]
 [timeouts]
 client_handshake = 30
 tg_connect = 10
-client_keepalive = 60
-client_ack = 300
+client_keepalive = 15
+client_ack = 90
 
 [censorship]
 tls_domain = "${domain}"
