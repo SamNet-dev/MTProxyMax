@@ -405,6 +405,19 @@ escape_md() {
     echo "$text"
 }
 
+# Compare version strings: returns 0 if v1 >= v2 (semver part only, ignores commit hash)
+_version_gte() {
+    local v1="${1%%-*}" v2="${2%%-*}"  # strip commit hash
+    local IFS='.'; local a=($v1) b=($v2)
+    local i
+    for i in 0 1 2; do
+        local n1=${a[$i]:-0} n2=${b[$i]:-0}
+        (( n1 > n2 )) && return 0
+        (( n1 < n2 )) && return 1
+    done
+    return 0
+}
+
 # Get public IP address
 _PUBLIC_IP_CACHE=""
 _PUBLIC_IP_CACHE_AGE=0
@@ -3003,15 +3016,17 @@ self_update() {
     local _expected_ver="${TELEMT_MIN_VERSION}-${TELEMT_COMMIT}"
     local _current_ver
     _current_ver=$(get_telemt_version)
-    if [ "$_current_ver" != "$_expected_ver" ]; then
+    if [ "$_current_ver" = "$_expected_ver" ]; then
+        log_success "Telemt engine is up to date (v${_current_ver})"
+    elif _version_gte "$_current_ver" "$_expected_ver"; then
+        log_success "Telemt engine is up to date (v${_current_ver})"
+    else
         log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
         build_telemt_image true
         if is_proxy_running; then
             load_secrets
             restart_proxy_container
         fi
-    else
-        log_success "Telemt engine is up to date (v${_current_ver})"
     fi
 }
 
@@ -4871,6 +4886,8 @@ cli_main() {
                     local _current; _current=$(get_telemt_version)
                     if [ "$_current" = "$_expected" ]; then
                         log_success "Engine is up to date"
+                    elif _version_gte "$_current" "$_expected"; then
+                        log_success "Engine is up to date (v${_current}, ahead of pinned v${_expected})"
                     else
                         log_info "Update available: v${_current} -> v${_expected}"
                         echo -e "  ${DIM}Run: mtproxymax update${NC}"
@@ -5555,6 +5572,8 @@ show_engine_menu() {
         local _current; _current=$(get_telemt_version)
         if [ "$_current" = "$_expected" ]; then
             echo -e "  ${GREEN}${SYM_OK} Engine is up to date${NC}"
+        elif _version_gte "$_current" "$_expected"; then
+            echo -e "  ${GREEN}${SYM_OK} Engine is up to date (ahead of pinned)${NC}"
         else
             echo -e "  ${YELLOW}Update available: v${_current} -> v${_expected}${NC}"
             echo -e "  ${DIM}Run: mtproxymax update${NC}"
