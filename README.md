@@ -40,6 +40,7 @@ Most MTProxy tools give you a proxy and a link. That's it. MTProxyMax gives you 
 
 - 🔐 **Multi-user secrets** with individual bandwidth quotas, device limits, and expiry dates
 - 🤖 **Telegram bot** with 17 commands — manage everything from your phone
+- 🗂️ **Replication** — sync config to slave servers automatically via rsync+SSH
 - 🖥️ **Interactive TUI** — no need to memorize commands, menu-driven setup
 - 📊 **Prometheus metrics** — real per-user traffic stats, not just iptables guesses
 - 🔗 **Proxy chaining** — route through SOCKS5 upstreams for extra privacy
@@ -411,6 +412,16 @@ Telegram Client
           │
           ▼
    Telegram Servers
+
+
+Master-Slave Replication (optional):
+
+  Master Server              Slave Server(s)
+  ┌──────────────┐           ┌──────────────┐
+  │ mtproxymax   │──rsync──▶ │ mtproxymax   │
+  │ (systemd     │   +SSH    │ (receives    │
+  │  timer 60s)  │           │  config)     │
+  └──────────────┘           └──────────────┘
 ```
 
 | Component | Role |
@@ -418,6 +429,7 @@ Telegram Client
 | **mtproxymax.sh** | Single bash script: CLI, TUI, config manager |
 | **telemt** | Rust MTProto engine running inside Docker |
 | **Telegram bot service** | Independent systemd service polling Bot API |
+| **Replication sync service** | systemd timer pushing config to slave servers |
 | **Prometheus endpoint** | `/metrics` on port 9090 (localhost only) |
 
 ---
@@ -471,6 +483,8 @@ mtproxymax adtag remove                 # Remove ad-tag
 
 </details>
 
+
+<details>
 <summary><b>Replication</b></summary>
 
 ```bash
@@ -565,7 +579,6 @@ mtproxymax telegram remove              # Remove bot completely
 | `/opt/mtproxymax/settings.conf` | Proxy settings (port, domain, limits) |
 | `/opt/mtproxymax/secrets.conf` | User keys, limits, expiry dates |
 | `/opt/mtproxymax/upstreams.conf` | Upstream routing rules |
-| `/opt/mtproxymax/replication.conf` | Slave server list (master only) |
 | `/opt/mtproxymax/mtproxy/config.toml` | Generated telemt engine config |
 
 ---
