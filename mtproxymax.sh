@@ -284,7 +284,7 @@ read_choice() {
     local prompt="${1:-choice}"
     local default="${2:-}"
     # Drain any stale input (e.g., leftover escape-sequence bytes)
-    read -rsn 256 -t 0.05 _ 2>/dev/null || true
+    read -rn 256 -t 0.05 _ 2>/dev/null || true
     echo -en "\n  ${DIM}Enter ${prompt,,}${NC}" >&2
     [ -n "$default" ] && echo -en " ${DIM}[${default}]${NC}" >&2
     echo -en "${DIM}:${NC} " >&2
@@ -311,7 +311,7 @@ press_any_key() {
     echo -en "  ${DIM}Press any key to continue...${NC}"
     read -rsn1
     # Drain leftover bytes from multi-byte keys (arrow/function keys send escape sequences)
-    read -rsn 256 -t 0.05 _ 2>/dev/null || true
+    read -rn 256 -t 0.05 _ 2>/dev/null || true
     echo ""
 }
 
@@ -4546,7 +4546,7 @@ run_installer() {
     echo ""
     echo -en "  ${DIM}Press any key to open the management menu...${NC}"
     read -rsn1
-    read -rsn 256 -t 0.05 _ 2>/dev/null || true
+    read -rn 256 -t 0.05 _ 2>/dev/null || true
     load_settings
     load_secrets
     show_main_menu
