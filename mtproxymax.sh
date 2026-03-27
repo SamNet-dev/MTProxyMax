@@ -22,6 +22,8 @@ UPSTREAMS_FILE="${INSTALL_DIR}/upstreams.conf"
 BACKUP_DIR="${INSTALL_DIR}/backups"
 CONNECTION_LOG="${INSTALL_DIR}/connection.log"
 INSTANCES_FILE="${INSTALL_DIR}/instances.conf"
+REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
+REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
 TELEMT_MIN_VERSION="3.3.32"
@@ -122,6 +124,16 @@ TELEGRAM_INTERVAL=6
 TELEGRAM_ALERTS_ENABLED="true"
 TELEGRAM_SERVER_LABEL="MTProxyMax"
 AUTO_UPDATE_ENABLED="true"
+
+# Replication / HA
+REPLICATION_ENABLED="false"
+REPLICATION_ROLE="standalone"
+REPLICATION_SYNC_INTERVAL=60
+REPLICATION_SSH_PORT=22
+REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
+REPLICATION_EXCLUDE="relay_stats,backups,connection.log,.ssh,settings.conf,replication.conf,mtproxymax-telegram.sh,mtproxymax-sync.sh"
+REPLICATION_RESTART_ON_CHANGE="true"
+REPLICATION_LOG="/var/log/mtproxymax-sync.log"
 
 # Terminal width
 TERM_WIDTH=$(tput cols 2>/dev/null || echo 60)
@@ -602,6 +614,16 @@ TELEGRAM_SERVER_LABEL='${TELEGRAM_SERVER_LABEL}'
 
 # Auto-Update
 AUTO_UPDATE_ENABLED='${AUTO_UPDATE_ENABLED}'
+
+# Replication / HA
+REPLICATION_ENABLED='${REPLICATION_ENABLED}'
+REPLICATION_ROLE='${REPLICATION_ROLE}'
+REPLICATION_SYNC_INTERVAL='${REPLICATION_SYNC_INTERVAL}'
+REPLICATION_SSH_PORT='${REPLICATION_SSH_PORT}'
+REPLICATION_SSH_KEY_PATH='${REPLICATION_SSH_KEY_PATH}'
+REPLICATION_EXCLUDE='${REPLICATION_EXCLUDE}'
+REPLICATION_RESTART_ON_CHANGE='${REPLICATION_RESTART_ON_CHANGE}'
+REPLICATION_LOG='${REPLICATION_LOG}'
 SETTINGS_EOF
 
     chmod 600 "$tmp"
@@ -635,7 +657,10 @@ load_settings() {
             MASKING_ENABLED|MASKING_HOST|MASKING_PORT|UNKNOWN_SNI_ACTION|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
-            AUTO_UPDATE_ENABLED)
+            AUTO_UPDATE_ENABLED|\
+            REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
+            REPLICATION_SSH_PORT|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
+            REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG)
                 printf -v "$key" '%s' "$val"
                 ;;
         esac
@@ -652,6 +677,17 @@ load_settings() {
     [[ "$UNKNOWN_SNI_ACTION" == "drop" ]] || UNKNOWN_SNI_ACTION="mask"
     [[ "$TELEGRAM_INTERVAL" =~ ^[0-9]+$ ]] || TELEGRAM_INTERVAL=6
     [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || TELEGRAM_CHAT_ID=""
+
+    # Replication validation
+    [[ "$REPLICATION_ROLE" =~ ^(standalone|master|slave)$ ]] || REPLICATION_ROLE="standalone"
+    [[ "$REPLICATION_SYNC_INTERVAL" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SYNC_INTERVAL" -ge 10 ] || REPLICATION_SYNC_INTERVAL=60
+    [[ "$REPLICATION_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SSH_PORT" -ge 1 ] && [ "$REPLICATION_SSH_PORT" -le 65535 ] || REPLICATION_SSH_PORT=22
+    [[ "$REPLICATION_ENABLED" == "true" ]] || REPLICATION_ENABLED="false"
+    [[ "$REPLICATION_RESTART_ON_CHANGE" == "false" ]] || REPLICATION_RESTART_ON_CHANGE="true"
+
+    # Migration: ensure settings.conf and replication.conf are always excluded
+    [[ "$REPLICATION_EXCLUDE" == *"settings.conf"* ]]   || REPLICATION_EXCLUDE="${REPLICATION_EXCLUDE},settings.conf"
+    [[ "$REPLICATION_EXCLUDE" == *"replication.conf"* ]] || REPLICATION_EXCLUDE="${REPLICATION_EXCLUDE},replication.conf"
 }
 
 # Save secrets database
@@ -3154,6 +3190,15 @@ health_check() {
         echo -e "  Telegram:    $(draw_status disabled 'Disabled')"
     fi
 
+    # Replication
+    if [ "$REPLICATION_ROLE" != "standalone" ]; then
+        if [ "$REPLICATION_ENABLED" = "true" ]; then
+            echo -e "  Replication: $(draw_status running "${REPLICATION_ROLE^}")"
+        else
+            echo -e "  Replication: $(draw_status disabled "${REPLICATION_ROLE^} (disabled)")"
+        fi
+    fi
+
     echo ""
 }
 
@@ -4288,6 +4333,778 @@ SERVICE_EOF
     fi
 }
 
+
+# ── Section 14b: Replication / HA ────────────────────────────
+
+# Slave registry arrays
+declare -a REPL_HOSTS=()
+declare -a REPL_PORTS=()
+declare -a REPL_LABELS=()
+declare -a REPL_ENABLED=()
+declare -a REPL_LAST_SYNC=()
+declare -a REPL_STATUS=()
+
+# Save replication.conf
+save_replication() {
+    mkdir -p "$INSTALL_DIR"
+    local tmp
+    tmp=$(_mktemp) || { log_error "Cannot create temp file"; return 1; }
+
+    {
+        echo "# MTProxyMax Replication Slaves — v${VERSION}"
+        echo "# Format: HOST|PORT|LABEL|ENABLED|LAST_SYNC|STATUS"
+        echo "# DO NOT EDIT MANUALLY — use 'mtproxymax replication' commands"
+        local i
+        for i in "${!REPL_HOSTS[@]}"; do
+            echo "${REPL_HOSTS[$i]}|${REPL_PORTS[$i]}|${REPL_LABELS[$i]}|${REPL_ENABLED[$i]}|${REPL_LAST_SYNC[$i]}|${REPL_STATUS[$i]}"
+        done
+    } > "$tmp"
+
+    chmod 600 "$tmp"
+    # Serialise with sync-timer flock to prevent lost-update races with save_sync_status()
+    exec 201>"/var/lock/mtproxymax-sync.lock"
+    flock -w 5 201 2>/dev/null
+    mv "$tmp" "$REPLICATION_FILE"
+    exec 201>&-
+}
+
+# Load replication.conf
+load_replication() {
+    REPL_HOSTS=()
+    REPL_PORTS=()
+    REPL_LABELS=()
+    REPL_ENABLED=()
+    REPL_LAST_SYNC=()
+    REPL_STATUS=()
+
+    [ -f "$REPLICATION_FILE" ] || return 0
+
+    while IFS='|' read -r _rl_h _rl_p _rl_l _rl_e _rl_ls _rl_st; do
+        [[ "$_rl_h" =~ ^[[:space:]]*# ]] && continue
+        [[ "$_rl_h" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$_rl_h" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        [[ "$_rl_p" =~ ^[0-9]+$ ]] && [ "$_rl_p" -ge 1 ] && [ "$_rl_p" -le 65535 ] || _rl_p=22
+        [ "$_rl_e" = "false" ] || _rl_e="true"
+        [[ "$_rl_ls" =~ ^[0-9]+$ ]] || _rl_ls=0
+        [[ "$_rl_st" =~ ^(ok|error|unknown)$ ]] || _rl_st="unknown"
+
+        REPL_HOSTS+=("$_rl_h")
+        REPL_PORTS+=("$_rl_p")
+        REPL_LABELS+=("${_rl_l:-$_rl_h}")
+        REPL_ENABLED+=("$_rl_e")
+        REPL_LAST_SYNC+=("$_rl_ls")
+        REPL_STATUS+=("$_rl_st")
+    done < "$REPLICATION_FILE"
+}
+
+# Add a slave server
+replication_add() {
+    local host="${1:-}" port="${2:-22}" label="${3:-}"
+
+    if [ "${REPLICATION_ROLE}" = "slave" ]; then
+        log_error "This server is a slave — only a master can register peers"
+        log_info "Run: mtproxymax replication setup  to change role"
+        return 1
+    fi
+
+    if [ -z "$host" ]; then
+        log_error "Usage: replication add <host> [port] [label]"
+        return 1
+    fi
+
+    if [[ ! "$host" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        log_error "Invalid host format. Use IP or FQDN (letters, digits, dots, hyphens only)"
+        return 1
+    fi
+
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        log_error "Port must be 1-65535"
+        return 1
+    fi
+
+    load_replication
+    local i
+    for i in "${!REPL_HOSTS[@]}"; do
+        if [ "${REPL_HOSTS[$i]}" = "$host" ]; then
+            log_error "Slave '${host}' already registered"
+            return 1
+        fi
+    done
+
+    [ -z "$label" ] && label="$host"
+
+    REPL_HOSTS+=("$host")
+    REPL_PORTS+=("$port")
+    REPL_LABELS+=("$label")
+    REPL_ENABLED+=("true")
+    REPL_LAST_SYNC+=("0")
+    REPL_STATUS+=("unknown")
+
+    save_replication
+    log_success "Slave '${label}' (${host}:${port}) added"
+}
+
+# Remove slave by host or label
+replication_remove() {
+    local target="${1:-}"
+
+    if [ "${REPLICATION_ROLE}" = "slave" ]; then
+        log_error "This server is a slave — only a master manages the slave list"
+        return 1
+    fi
+
+    if [ -z "$target" ]; then
+        log_error "Usage: replication remove <host_or_label>"
+        return 1
+    fi
+
+    load_replication
+
+    local idx=-1 i
+    for i in "${!REPL_HOSTS[@]}"; do
+        if [ "${REPL_HOSTS[$i]}" = "$target" ] || [ "${REPL_LABELS[$i]}" = "$target" ]; then
+            idx=$i; break
+        fi
+    done
+
+    if [ $idx -eq -1 ]; then
+        log_error "Slave '${target}' not found"
+        return 1
+    fi
+
+    local label="${REPL_LABELS[$idx]}"
+    local new_hosts=() new_ports=() new_labels=() new_enabled=() new_last_sync=() new_status=()
+    for i in "${!REPL_HOSTS[@]}"; do
+        [ "$i" -eq "$idx" ] && continue
+        new_hosts+=("${REPL_HOSTS[$i]}")
+        new_ports+=("${REPL_PORTS[$i]}")
+        new_labels+=("${REPL_LABELS[$i]}")
+        new_enabled+=("${REPL_ENABLED[$i]}")
+        new_last_sync+=("${REPL_LAST_SYNC[$i]}")
+        new_status+=("${REPL_STATUS[$i]}")
+    done
+
+    REPL_HOSTS=("${new_hosts[@]+"${new_hosts[@]}"}")
+    REPL_PORTS=("${new_ports[@]+"${new_ports[@]}"}")
+    REPL_LABELS=("${new_labels[@]+"${new_labels[@]}"}")
+    REPL_ENABLED=("${new_enabled[@]+"${new_enabled[@]}"}")
+    REPL_LAST_SYNC=("${new_last_sync[@]+"${new_last_sync[@]}"}")
+    REPL_STATUS=("${new_status[@]+"${new_status[@]}"}")
+
+    save_replication
+    log_success "Slave '${label}' removed"
+}
+
+# List all slaves
+replication_list() {
+    load_replication
+
+    if [ ${#REPL_HOSTS[@]} -eq 0 ]; then
+        log_info "No slaves configured. Run: mtproxymax replication add <host>"
+        return 0
+    fi
+
+    echo ""
+    printf "  %-4s %-22s %-6s %-14s %-8s %-12s %s\n" \
+        "No." "Host" "Port" "Label" "Enabled" "Last Sync" "Status"
+    printf "  %-4s %-22s %-6s %-14s %-8s %-12s %s\n" \
+        "---" "--------------------" "----" "------------" "-------" "---------" "------"
+
+    local i
+    for i in "${!REPL_HOSTS[@]}"; do
+        local ts="${REPL_LAST_SYNC[$i]:-0}"
+        local sync_fmt="never"
+        if [[ "$ts" =~ ^[0-9]+$ ]] && [ "$ts" -gt 0 ]; then
+            local now; now=$(date +%s)
+            local ago=$(( now - ts ))
+            if   [ $ago -lt 120 ];  then sync_fmt="${ago}s ago"
+            elif [ $ago -lt 3600 ]; then sync_fmt="$((ago/60))m ago"
+            else                         sync_fmt="$((ago/3600))h ago"
+            fi
+        fi
+
+        printf "  %-4s %-22s %-6s %-14s %-8s %-12s %s\n" \
+            "$((i+1))" "${REPL_HOSTS[$i]}" "${REPL_PORTS[$i]}" \
+            "${REPL_LABELS[$i]}" "${REPL_ENABLED[$i]}" \
+            "$sync_fmt" "${REPL_STATUS[$i]}"
+    done
+    echo ""
+}
+
+# Generate the self-contained sync daemon script
+replication_generate_sync_script() {
+    local script_path="${INSTALL_DIR}/mtproxymax-sync.sh"
+
+    cat > "$script_path" << 'SYNC_SCRIPT_EOF'
+#!/bin/bash
+# MTProxyMax Replication Sync Script
+# Auto-generated — do not edit manually
+# Managed by: mtproxymax replication
+
+INSTALL_DIR="/opt/mtproxymax"
+SETTINGS_FILE="${INSTALL_DIR}/settings.conf"
+REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
+LOCK_FILE="/var/lock/mtproxymax-sync.lock"
+
+# Defaults (overridden by load_sync_settings)
+REPLICATION_ENABLED="false"
+REPLICATION_ROLE="standalone"
+REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
+REPLICATION_SSH_PORT="22"
+REPLICATION_EXCLUDE="relay_stats,backups,connection.log,.ssh,settings.conf,replication.conf,mtproxymax-telegram.sh,mtproxymax-sync.sh"
+REPLICATION_RESTART_ON_CHANGE="true"
+REPLICATION_LOG="/var/log/mtproxymax-sync.log"
+
+load_sync_settings() {
+    [ -f "$SETTINGS_FILE" ] || return
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)=\'([^\']*)\'$ ]]; then
+            local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+            case "$key" in
+                REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SSH_KEY_PATH|\
+                REPLICATION_SSH_PORT|REPLICATION_EXCLUDE|REPLICATION_RESTART_ON_CHANGE|\
+                REPLICATION_LOG)
+                    printf -v "$key" '%s' "$val" ;;
+            esac
+        fi
+    done < "$SETTINGS_FILE"
+    # Migration: ensure these files are never synced regardless of stored value
+    [[ "$REPLICATION_EXCLUDE" == *"settings.conf"* ]]   || REPLICATION_EXCLUDE="${REPLICATION_EXCLUDE},settings.conf"
+    [[ "$REPLICATION_EXCLUDE" == *"replication.conf"* ]] || REPLICATION_EXCLUDE="${REPLICATION_EXCLUDE},replication.conf"
+}
+
+declare -a REPL_HOSTS=()
+declare -a REPL_PORTS=()
+declare -a REPL_LABELS=()
+declare -a REPL_ENABLED=()
+declare -a REPL_LAST_SYNC=()
+declare -a REPL_STATUS=()
+
+load_sync_replication() {
+    REPL_HOSTS=(); REPL_PORTS=(); REPL_LABELS=()
+    REPL_ENABLED=(); REPL_LAST_SYNC=(); REPL_STATUS=()
+    [ -f "$REPLICATION_FILE" ] || return
+    while IFS='|' read -r host port label enabled last_sync status; do
+        [[ "$host" =~ ^[[:space:]]*# ]] && continue
+        [[ "$host" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$host" =~ ^[a-zA-Z0-9._-]+$ ]] || continue
+        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || port=22
+        [ "$enabled" = "false" ] || enabled="true"
+        [[ "$last_sync" =~ ^[0-9]+$ ]] || last_sync=0
+        REPL_HOSTS+=("$host")
+        REPL_PORTS+=("$port")
+        REPL_LABELS+=("${label:-$host}")
+        REPL_ENABLED+=("$enabled")
+        REPL_LAST_SYNC+=("$last_sync")
+        REPL_STATUS+=("${status:-unknown}")
+    done < "$REPLICATION_FILE"
+}
+
+save_sync_status() {
+    local tmp; tmp=$(mktemp /tmp/.mtproxymax-sync.XXXXXX 2>/dev/null) || return 1
+    chmod 600 "$tmp"
+    {
+        echo "# MTProxyMax Replication Slaves"
+        echo "# Format: HOST|PORT|LABEL|ENABLED|LAST_SYNC|STATUS"
+        local i
+        for i in "${!REPL_HOSTS[@]}"; do
+            echo "${REPL_HOSTS[$i]}|${REPL_PORTS[$i]}|${REPL_LABELS[$i]}|${REPL_ENABLED[$i]}|${REPL_LAST_SYNC[$i]}|${REPL_STATUS[$i]}"
+        done
+    } > "$tmp"
+    mv "$tmp" "$REPLICATION_FILE"
+}
+
+log_sync() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "${REPLICATION_LOG}"
+}
+
+do_sync() {
+    local host="$1" port="$2" label="$3"
+    local ssh_key="${REPLICATION_SSH_KEY_PATH}"
+    local ssh_opts="-i ${ssh_key} -p ${port} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
+
+    # Build rsync exclude args from comma-separated REPLICATION_EXCLUDE
+    local exclude_args=()
+    local ex
+    IFS=',' read -ra _excludes <<< "${REPLICATION_EXCLUDE}"
+    for ex in "${_excludes[@]}"; do
+        ex="${ex#"${ex%%[! ]*}"}"  # ltrim spaces
+        [ -n "$ex" ] && exclude_args+=(--exclude="${ex}")
+    done
+    # Always exclude these critical files — must never be overwritten on slave
+    exclude_args+=(--exclude="settings.conf" --exclude="replication.conf")
+
+    local output rc
+    output=$(rsync -az --delete --itemize-changes "${exclude_args[@]}" \
+        --timeout=30 \
+        -e "ssh ${ssh_opts}" \
+        "${INSTALL_DIR}/" \
+        "root@${host}:${INSTALL_DIR}/" 2>&1)
+    rc=$?
+
+    if [ $rc -ne 0 ]; then
+        log_sync "ERROR [${label}/${host}]: rsync failed (exit ${rc}): $(echo "$output" | tail -1)"
+        return 1
+    fi
+
+    # itemize-changes: '<' prefix means file was sent to remote
+    if echo "$output" | grep -qE '^[<>]'; then
+        log_sync "CHANGE [${label}/${host}]: Files synced"
+        if [ "${REPLICATION_RESTART_ON_CHANGE}" = "true" ]; then
+            local r_out r_rc
+            r_out=$(ssh -i "${ssh_key}" -p "${port}" \
+                -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+                "root@${host}" "docker restart mtproxymax 2>&1" 2>&1)
+            r_rc=$?
+            if [ $r_rc -eq 0 ]; then
+                log_sync "RESTART [${label}/${host}]: Container restarted"
+            else
+                log_sync "WARN [${label}/${host}]: Docker restart failed: $(echo "$r_out" | tail -1)"
+            fi
+        fi
+    else
+        log_sync "NOOP [${label}/${host}]: No changes"
+    fi
+
+    return 0
+}
+
+main() {
+    # Prevent overlapping sync runs
+    exec 200>"${LOCK_FILE}"
+    flock -n 200 || {
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: Another sync already running" >> "${REPLICATION_LOG}"
+        exit 0
+    }
+
+    load_sync_settings
+
+    [ "${REPLICATION_ENABLED}" = "true" ] || exit 0
+    [ "${REPLICATION_ROLE}" = "master" ]  || exit 0
+
+    load_sync_replication
+    [ ${#REPL_HOSTS[@]} -gt 0 ] || exit 0
+
+    log_sync "=== Sync start (${#REPL_HOSTS[@]} slave(s)) ==="
+
+    local overall=0 i
+    for i in "${!REPL_HOSTS[@]}"; do
+        [ "${REPL_ENABLED[$i]}" = "true" ] || continue
+        if do_sync "${REPL_HOSTS[$i]}" "${REPL_PORTS[$i]}" "${REPL_LABELS[$i]}"; then
+            REPL_LAST_SYNC[$i]=$(date +%s)
+            REPL_STATUS[$i]="ok"
+        else
+            REPL_STATUS[$i]="error"
+            overall=1
+        fi
+    done
+
+    save_sync_status
+    log_sync "=== Sync done (exit ${overall}) ==="
+    exit $overall
+}
+
+main
+SYNC_SCRIPT_EOF
+
+    chmod 750 "$script_path"
+    log_success "Sync script generated: ${script_path}"
+}
+
+# Setup systemd service + timer
+setup_replication_service() {
+    replication_generate_sync_script
+
+    if ! command -v systemctl &>/dev/null; then
+        log_warn "systemd not found. Add cron manually:"
+        echo "  * * * * * /bin/bash ${INSTALL_DIR}/mtproxymax-sync.sh"
+        return 1
+    fi
+
+    cat > /etc/systemd/system/mtproxymax-sync.service << 'REPL_SERVICE_EOF'
+[Unit]
+Description=MTProxyMax Replication Sync
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/mtproxymax/mtproxymax-sync.sh
+StandardOutput=journal
+StandardError=journal
+REPL_SERVICE_EOF
+
+    cat > /etc/systemd/system/mtproxymax-sync.timer << REPL_TIMER_EOF
+[Unit]
+Description=MTProxyMax Replication Sync Timer
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=${REPLICATION_SYNC_INTERVAL}s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
+REPL_TIMER_EOF
+
+    systemctl daemon-reload
+    systemctl enable mtproxymax-sync.timer 2>/dev/null
+    systemctl start mtproxymax-sync.timer 2>/dev/null
+    log_success "Replication timer started (every ${REPLICATION_SYNC_INTERVAL}s)"
+}
+
+stop_replication_service() {
+    if command -v systemctl &>/dev/null; then
+        systemctl stop mtproxymax-sync.timer 2>/dev/null || true
+        systemctl disable mtproxymax-sync.timer 2>/dev/null || true
+        log_info "Replication timer stopped"
+    fi
+}
+
+remove_replication_service() {
+    stop_replication_service
+    rm -f /etc/systemd/system/mtproxymax-sync.service
+    rm -f /etc/systemd/system/mtproxymax-sync.timer
+    rm -f "${INSTALL_DIR}/mtproxymax-sync.sh"
+    command -v systemctl &>/dev/null && systemctl daemon-reload 2>/dev/null || true
+}
+
+# Interactive setup wizard
+replication_setup_wizard() {
+    load_settings
+    clear_screen
+    draw_header "REPLICATION SETUP"
+    echo ""
+    echo -e "  Configures Master-Slave config sync via rsync+SSH."
+    echo -e "  Changes on the ${BOLD}Master${NC} auto-push to all Slaves."
+    echo ""
+    draw_line
+
+    echo ""
+    echo -e "  ${BOLD}Step 1: Role for this server${NC}"
+    echo ""
+    echo -e "  [1] ${BRIGHT_GREEN}Master${NC}     — Push config to slave(s)"
+    echo -e "  [2] ${BRIGHT_CYAN}Slave${NC}      — Receive config from master"
+    echo -e "  [3] ${DIM}Standalone${NC} — Disable replication"
+    echo ""
+    local role_choice
+    role_choice=$(read_choice "choice" "1")
+
+    case "$role_choice" in
+        2)
+            REPLICATION_ROLE="slave"
+            REPLICATION_ENABLED="false"
+            save_settings
+            stop_replication_service
+            # Slave has no peers — clear any stale replication.conf from a previous master setup
+            > "${REPLICATION_FILE}" 2>/dev/null || true
+            echo ""
+            log_success "Role set to: Slave"
+            echo ""
+            echo -e "  On the Master server, run:"
+            echo -e "    ${CYAN}mtproxymax replication add $(hostname -I 2>/dev/null | awk '{print $1}') 22$(hostname -s 2>/dev/null | xargs -I{} echo ' {}')${NC}"
+            echo ""
+            echo -e "  Ensure Master's SSH public key is in: ${DIM}~/.ssh/authorized_keys${NC}"
+            echo ""
+            press_any_key
+            return 0
+            ;;
+        3)
+            REPLICATION_ROLE="standalone"
+            REPLICATION_ENABLED="false"
+            save_settings
+            log_info "Replication disabled (standalone)"
+            press_any_key
+            return 0
+            ;;
+    esac
+
+    # Master flow
+    REPLICATION_ROLE="master"
+    echo ""
+    echo -e "  ${BOLD}Step 2: SSH Key${NC}"
+    echo ""
+
+    local key_path="${REPLICATION_SSH_KEY_PATH}"
+    if [ -f "${key_path}" ]; then
+        echo -e "  ${GREEN}${SYM_CHECK}${NC} Key exists: ${DIM}${key_path}${NC}"
+        echo -en "  Regenerate? [y/N]: "
+        local regen; read -r regen
+        [[ "$regen" =~ ^[Yy]$ ]] && rm -f "${key_path}" "${key_path}.pub"
+    fi
+
+    if [ ! -f "${key_path}" ]; then
+        mkdir -p "${REPLICATION_SSH_DIR}"
+        chmod 700 "${REPLICATION_SSH_DIR}"
+        ssh-keygen -t ed25519 -f "${key_path}" -N "" -C "mtproxymax-replication" &>/dev/null
+        chmod 600 "${key_path}"
+        log_success "ed25519 key generated"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Public key${NC} (add to slave ~/.ssh/authorized_keys if needed):"
+    echo ""
+    echo -e "  ${DIM}$(cat "${key_path}.pub" 2>/dev/null)${NC}"
+    echo ""
+    draw_line
+
+    echo ""
+    echo -e "  ${BOLD}Step 3: Add Slave Server(s)${NC}"
+    echo ""
+
+    load_replication
+    local add_more="y"
+    while [[ "$add_more" =~ ^[Yy]$ ]]; do
+        echo -en "  Slave host (IP or domain): "
+        local slave_host; read -r slave_host
+        [ -z "$slave_host" ] && break
+
+        local slave_port
+        slave_port=$(read_choice "SSH port" "22")
+        local slave_label
+        slave_label=$(read_choice "label" "$slave_host")
+
+        echo ""
+        echo -e "  Copying SSH key to ${slave_host}..."
+        if command -v ssh-copy-id &>/dev/null; then
+            if ssh-copy-id -i "${key_path}.pub" -p "${slave_port}" \
+                -o StrictHostKeyChecking=accept-new \
+                "root@${slave_host}" 2>/dev/null; then
+                log_success "Key copied to ${slave_host}"
+            else
+                log_warn "ssh-copy-id failed — add the public key manually to root@${slave_host}:~/.ssh/authorized_keys"
+            fi
+        else
+            log_warn "ssh-copy-id not found — add the public key manually"
+        fi
+
+        echo -en "  Testing SSH connection... "
+        if ssh -i "${key_path}" -p "${slave_port}" \
+            -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "root@${slave_host}" "echo ok" &>/dev/null; then
+            echo -e "${GREEN}OK${NC}"
+            replication_add "$slave_host" "$slave_port" "$slave_label"
+        else
+            echo -e "${RED}FAILED${NC}"
+            log_error "SSH failed — slave not added. Fix and run: mtproxymax replication add ${slave_host} ${slave_port} ${slave_label}"
+        fi
+
+        echo ""
+        echo -en "  Add another slave? [y/N]: "
+        read -r add_more
+    done
+
+    echo ""
+    echo -e "  ${BOLD}Step 4: Sync Interval${NC}"
+    local interval
+    interval=$(read_choice "sync interval in seconds" "${REPLICATION_SYNC_INTERVAL}")
+    if [[ "$interval" =~ ^[0-9]+$ ]] && [ "$interval" -ge 10 ]; then
+        REPLICATION_SYNC_INTERVAL="$interval"
+    fi
+
+    # Dry-run test
+    load_replication
+    if [ ${#REPL_HOSTS[@]} -gt 0 ]; then
+        echo ""
+        echo -e "  ${BOLD}Step 5: Dry-run test to ${REPL_LABELS[0]}${NC}"
+        echo ""
+        local exclude_args=() ex
+        IFS=',' read -ra _ex <<< "${REPLICATION_EXCLUDE}"
+        for ex in "${_ex[@]}"; do
+            ex="${ex#"${ex%%[! ]*}"}"
+            [ -n "$ex" ] && exclude_args+=(--exclude="${ex}")
+        done
+        exclude_args+=(--exclude="settings.conf" --exclude="replication.conf")
+        rsync -az --dry-run --itemize-changes "${exclude_args[@]}" \
+            --timeout=10 \
+            -e "ssh -i ${REPLICATION_SSH_KEY_PATH} -p ${REPL_PORTS[0]} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+            "${INSTALL_DIR}/" \
+            "root@${REPL_HOSTS[0]}:${INSTALL_DIR}/" 2>&1 | head -20
+        echo ""
+    fi
+
+    REPLICATION_ENABLED="true"
+    save_settings
+    setup_replication_service
+
+    echo ""
+    log_success "Replication configured!"
+    echo -e "  Role: ${BRIGHT_GREEN}Master${NC} | Interval: ${REPLICATION_SYNC_INTERVAL}s | Slaves: ${#REPL_HOSTS[@]}"
+    echo ""
+    press_any_key
+}
+
+# Show replication status
+replication_status() {
+    load_settings
+    load_replication
+
+    echo ""
+    echo -e "  ${BOLD}Replication Status${NC}"
+    echo ""
+
+    local role_color="$DIM"
+    case "$REPLICATION_ROLE" in
+        master) role_color="$BRIGHT_GREEN" ;;
+        slave)  role_color="$BRIGHT_CYAN" ;;
+    esac
+
+    echo -e "  Role:     ${role_color}${REPLICATION_ROLE}${NC}"
+    echo -e "  Enabled:  $([ "$REPLICATION_ENABLED" = "true" ] && echo "${GREEN}yes${NC}" || echo "${DIM}no${NC}")"
+    [ "${REPLICATION_ROLE}" = "master" ] && \
+        echo -e "  Interval: ${REPLICATION_SYNC_INTERVAL}s"
+    echo -e "  SSH Key:  $([ -f "${REPLICATION_SSH_KEY_PATH}" ] && echo "${GREEN}present${NC}" || echo "${RED}missing${NC}")"
+
+    local t_state="inactive"
+    if command -v systemctl &>/dev/null; then
+        t_state=$(systemctl is-active mtproxymax-sync.timer 2>/dev/null)
+        t_state="${t_state:-inactive}"
+        echo -e "  Timer:    $([ "$t_state" = "active" ] && echo "${GREEN}${t_state}${NC}" || echo "${DIM}${t_state}${NC}")"
+    fi
+
+    if [ "${REPLICATION_ROLE}" = "master" ] && [ ${#REPL_HOSTS[@]} -gt 0 ]; then
+        echo ""
+        replication_list
+    elif [ "${REPLICATION_ROLE}" = "slave" ]; then
+        echo ""
+        echo -e "  ${DIM}Receiving config from master. All changes must be made on the master.${NC}"
+    fi
+
+    if [ -f "${REPLICATION_LOG}" ]; then
+        echo ""
+        echo -e "  ${BOLD}Recent log:${NC}"
+        tail -5 "${REPLICATION_LOG}" | while IFS= read -r line; do
+            echo -e "  ${DIM}${line}${NC}"
+        done
+    fi
+    echo ""
+}
+
+# Test SSH connectivity
+replication_test() {
+    local target="${1:-}"
+    load_replication
+
+    if [ ${#REPL_HOSTS[@]} -eq 0 ]; then
+        log_error "No slaves configured"
+        return 1
+    fi
+
+    echo ""
+    local i
+    for i in "${!REPL_HOSTS[@]}"; do
+        [ -n "$target" ] && [ "${REPL_HOSTS[$i]}" != "$target" ] && \
+            [ "${REPL_LABELS[$i]}" != "$target" ] && continue
+
+        local host="${REPL_HOSTS[$i]}" port="${REPL_PORTS[$i]}" label="${REPL_LABELS[$i]}"
+        echo -en "  ${label} (${host}:${port}) ... "
+
+        local result
+        result=$(ssh -i "${REPLICATION_SSH_KEY_PATH}" -p "${port}" \
+            -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "root@${host}" \
+            "docker ps --filter name=mtproxymax --format '{{.Status}}' 2>/dev/null; echo ssh_ok" 2>&1)
+
+        if echo "$result" | grep -q "ssh_ok"; then
+            local docker_status
+            docker_status=$(echo "$result" | grep -v "ssh_ok" | head -1)
+            echo -e "${GREEN}SSH OK${NC} | docker: ${docker_status:-not running}"
+        else
+            echo -e "${RED}FAILED${NC} ($(echo "$result" | tail -1))"
+        fi
+    done
+    echo ""
+}
+
+# Trigger immediate sync
+replication_sync_now() {
+    echo ""
+    if [ "${REPLICATION_ROLE}" != "master" ]; then
+        log_warn "This server is '${REPLICATION_ROLE}' — only master initiates sync"
+        echo ""
+        return 1
+    fi
+    # Always regenerate sync script to ensure it reflects the current version
+    replication_generate_sync_script
+    if command -v systemctl &>/dev/null && \
+        systemctl is-active mtproxymax-sync.timer &>/dev/null; then
+        echo -e "  Triggering sync via systemd..."
+        systemctl start mtproxymax-sync.service
+        echo -e "  ${GREEN}Done.${NC}"
+        echo -e "  View logs: ${DIM}mtproxymax replication logs${NC}"
+    elif [ -f "${INSTALL_DIR}/mtproxymax-sync.sh" ]; then
+        echo -e "  Running sync script directly..."
+        bash "${INSTALL_DIR}/mtproxymax-sync.sh"
+    else
+        log_error "Sync script not found. Run: mtproxymax replication setup"
+        return 1
+    fi
+    echo ""
+}
+
+# Show sync logs
+replication_show_logs() {
+    echo ""
+    if [ -f "${REPLICATION_LOG}" ]; then
+        echo -e "  ${BOLD}Sync log (${REPLICATION_LOG}):${NC}"
+        echo ""
+        tail -50 "${REPLICATION_LOG}"
+    else
+        echo -e "  ${DIM}No log file yet.${NC}"
+    fi
+
+    if command -v journalctl &>/dev/null; then
+        echo ""
+        echo -e "  ${BOLD}Systemd journal (last 10 entries):${NC}"
+        echo ""
+        journalctl -u mtproxymax-sync.service --no-pager -n 10 2>/dev/null || true
+    fi
+    echo ""
+}
+
+# Remove all replication config
+replication_reset() {
+    echo ""
+    echo -e "  ${RED}${BOLD}Remove all replication config, SSH keys, and sync service?${NC}"
+    echo -en "  Confirm [y/N]: "
+    local confirm; read -r confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { log_info "Cancelled"; return 0; }
+
+    remove_replication_service
+    REPLICATION_ENABLED="false"
+    REPLICATION_ROLE="standalone"
+    save_settings
+    rm -f "${REPLICATION_FILE}"
+    rm -rf "${REPLICATION_SSH_DIR}"
+    log_success "Replication config removed"
+}
+
+# Promote slave to master
+replication_promote() {
+    load_settings
+    if [ "${REPLICATION_ROLE}" = "master" ]; then
+        log_warn "Already a master"
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Promote this server from Slave to Master?${NC}"
+    echo -e "  ${DIM}Disable the old master first to avoid config conflicts.${NC}"
+    echo ""
+    echo -en "  Confirm [y/N]: "
+    local confirm; read -r confirm
+    [[ "$confirm" =~ ^[Yy]$ ]] || { log_info "Cancelled"; return 0; }
+
+    REPLICATION_ROLE="master"
+    save_settings
+    log_success "Role changed to: Master"
+    log_info "Add slaves:  mtproxymax replication add <host>"
+    log_info "Enable sync: mtproxymax replication enable"
+}
+
+
 # ── Section 15: Installation Wizard ──────────────────────────
 
 run_installer() {
@@ -4988,6 +5805,20 @@ show_cli_help() {
     echo -e "    ${GREEN}telegram test${NC}           Send test message"
     echo -e "    ${GREEN}telegram disable${NC}        Disable Telegram"
     echo -e "    ${GREEN}telegram remove${NC}         Remove Telegram bot"
+    echo ""
+    echo -e "  ${BOLD}Replication:${NC}"
+    echo -e "    ${GREEN}replication setup${NC}       Run replication wizard"
+    echo -e "    ${GREEN}replication status${NC}      Show replication status"
+    echo -e "    ${GREEN}replication add${NC} <host> [port] [label]  Add slave"
+    echo -e "    ${GREEN}replication remove${NC} <label>  Remove slave"
+    echo -e "    ${GREEN}replication list${NC}        List slaves"
+    echo -e "    ${GREEN}replication enable${NC}      Enable sync"
+    echo -e "    ${GREEN}replication disable${NC}     Disable sync"
+    echo -e "    ${GREEN}replication sync${NC}        Sync now"
+    echo -e "    ${GREEN}replication test${NC} [label] Test connectivity"
+    echo -e "    ${GREEN}replication logs${NC}        Show sync log"
+    echo -e "    ${GREEN}replication reset${NC}       Reset to standalone"
+    echo -e "    ${GREEN}replication promote${NC}     Promote slave to master"
     echo ""
     echo -e "  ${BOLD}Info & Help:${NC}"
     echo -e "    ${GREEN}info${NC}                    Open feature info guide"
@@ -5767,6 +6598,61 @@ cli_main() {
             esac
             ;;
 
+
+        replication)
+            load_settings
+            case "${1:-status}" in
+                setup)   check_root; replication_setup_wizard ;;
+                status|"") replication_status ;;
+                add)
+                    check_root
+                    shift; replication_add "$@"
+                    ;;
+                remove)
+                    check_root
+                    shift; replication_remove "${1:-}"
+                    ;;
+                list)
+                    replication_list
+                    ;;
+                enable)
+                    check_root
+                    REPLICATION_ENABLED="true"
+                    save_settings
+                    setup_replication_service
+                    log_success "Replication enabled"
+                    ;;
+                disable)
+                    check_root
+                    REPLICATION_ENABLED="false"
+                    save_settings
+                    stop_replication_service
+                    log_success "Replication disabled"
+                    ;;
+                sync)
+                    check_root
+                    replication_sync_now
+                    ;;
+                test)
+                    shift; replication_test "${1:-}"
+                    ;;
+                logs)
+                    replication_show_logs
+                    ;;
+                reset)
+                    check_root; replication_reset
+                    ;;
+                promote)
+                    check_root; replication_promote
+                    ;;
+                *)
+                    log_error "Unknown: replication ${1}"
+                    echo "  Usage: mtproxymax replication [setup|status|add|remove|list|enable|disable|sync|test|logs|reset|promote]"
+                    return 1
+                    ;;
+            esac
+            ;;
+
         info)
             load_settings
             show_info_menu
@@ -6074,6 +6960,7 @@ show_main_menu() {
         draw_box_line "  ${BRIGHT_CYAN}[7]${NC}  Logs & Traffic" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[8]${NC}  Info & Help" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[9]${NC}  About & Update" "$w"
+        draw_box_line "  ${BRIGHT_CYAN}[r]${NC}  Replication" "$w"
         draw_box_empty "$w"
         draw_box_line "  ${BRIGHT_RED}[u]${NC}  Uninstall" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[0]${NC}  Exit" "$w"
@@ -6095,6 +6982,7 @@ show_main_menu() {
             7) show_traffic_menu ;;
             8) show_info_menu ;;
             9) show_about ;;
+            r|R) show_replication_menu ;;
             u|U) uninstall; exit 0 ;;
             0|q|Q) echo ""; exit 0 ;;
             *) ;;
@@ -7384,6 +8272,115 @@ show_about() {
                 press_any_key
                 ;;
             4) list_backups; press_any_key ;;
+            0|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+
+show_replication_menu() {
+    while true; do
+        clear_screen
+        draw_header "REPLICATION"
+        echo ""
+        load_settings
+        load_replication
+
+        # Status bar
+        local role_color="$DIM"
+        case "$REPLICATION_ROLE" in
+            master) role_color="$BRIGHT_GREEN" ;;
+            slave)  role_color="$BRIGHT_CYAN" ;;
+        esac
+
+        local timer_state="inactive"
+        if command -v systemctl &>/dev/null; then
+            timer_state=$(systemctl is-active mtproxymax-sync.timer 2>/dev/null)
+            timer_state="${timer_state:-inactive}"
+        fi
+
+        echo -e "  Role:   ${role_color}${REPLICATION_ROLE}${NC}   Enabled: $([ "$REPLICATION_ENABLED" = "true" ] && echo "${GREEN}yes${NC}" || echo "${DIM}no${NC}")   Timer: $([ "$timer_state" = "active" ] && echo "${GREEN}active${NC}" || echo "${DIM}${timer_state}${NC}")"
+        if [ "${REPLICATION_ROLE}" = "master" ]; then
+            echo -e "  Slaves: ${#REPL_HOSTS[@]} configured   Interval: ${REPLICATION_SYNC_INTERVAL}s"
+        else
+            echo -e "  Receiving config from master"
+        fi
+        echo ""
+        draw_line
+        echo ""
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Setup wizard"
+        echo -e "  ${BRIGHT_CYAN}[2]${NC} Add slave"
+        echo -e "  ${BRIGHT_CYAN}[3]${NC} Remove slave"
+        echo -e "  ${BRIGHT_CYAN}[4]${NC} List slaves"
+        echo -e "  ${BRIGHT_CYAN}[5]${NC} Test connectivity"
+        echo -e "  ${BRIGHT_CYAN}[6]${NC} Sync now"
+        echo -e "  ${BRIGHT_CYAN}[7]${NC} View sync logs"
+        echo -e "  ${BRIGHT_CYAN}[8]${NC} $([ "$REPLICATION_ENABLED" = "true" ] && echo 'Disable replication' || echo 'Enable replication')"
+        echo -e "  ${BRIGHT_CYAN}[9]${NC} Change sync interval"
+        echo -e "  ${BRIGHT_CYAN}[p]${NC} Promote slave → master"
+        echo -e "  ${BRIGHT_CYAN}[x]${NC} Reset / remove all"
+        echo -e "  ${BRIGHT_CYAN}[0]${NC} Back"
+        echo ""
+
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1) check_root; replication_setup_wizard ;;
+            2)
+                check_root
+                echo -en "  Slave host: "; read -r _h
+                echo -en "  Port [22]: "; read -r _p; _p="${_p:-22}"
+                echo -en "  Label [${_h}]: "; read -r _l; _l="${_l:-${_h}}"
+                replication_add "$_h" "$_p" "$_l"
+                press_any_key
+                ;;
+            3)
+                check_root
+                replication_list
+                echo -en "  Host or label to remove: "; read -r _t
+                [ -n "$_t" ] && replication_remove "$_t"
+                press_any_key
+                ;;
+            4) replication_list; press_any_key ;;
+            5)
+                echo -en "  Test specific slave (leave blank for all): "; read -r _t
+                replication_test "$_t"
+                press_any_key
+                ;;
+            6) check_root; replication_sync_now; press_any_key ;;
+            7) replication_show_logs; press_any_key ;;
+            8)
+                check_root
+                if [ "$REPLICATION_ENABLED" = "true" ]; then
+                    REPLICATION_ENABLED="false"
+                    save_settings
+                    stop_replication_service
+                    log_success "Replication disabled"
+                else
+                    REPLICATION_ENABLED="true"
+                    save_settings
+                    setup_replication_service
+                    log_success "Replication enabled"
+                fi
+                press_any_key
+                ;;
+            9)
+                check_root
+                local new_interval
+                new_interval=$(read_choice "Sync interval in seconds (min 10)" "${REPLICATION_SYNC_INTERVAL}")
+                if [[ "$new_interval" =~ ^[0-9]+$ ]] && [ "$new_interval" -ge 10 ]; then
+                    REPLICATION_SYNC_INTERVAL="$new_interval"
+                    save_settings
+                    [ "$REPLICATION_ENABLED" = "true" ] && setup_replication_service
+                    log_success "Interval set to ${new_interval}s"
+                else
+                    log_error "Invalid interval (must be >= 10)"
+                fi
+                press_any_key
+                ;;
+            p|P) check_root; replication_promote; press_any_key ;;
+            x|X) check_root; replication_reset; press_any_key ;;
             0|"") return ;;
             *) ;;
         esac
