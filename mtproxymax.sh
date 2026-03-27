@@ -114,6 +114,7 @@ BLOCKLIST_COUNTRIES=""
 MASKING_ENABLED="true"
 MASKING_HOST=""
 MASKING_PORT=443
+UNKNOWN_SNI_ACTION="mask"
 TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -589,6 +590,7 @@ BLOCKLIST_COUNTRIES='${BLOCKLIST_COUNTRIES}'
 MASKING_ENABLED='${MASKING_ENABLED}'
 MASKING_HOST='${MASKING_HOST}'
 MASKING_PORT='${MASKING_PORT}'
+UNKNOWN_SNI_ACTION='${UNKNOWN_SNI_ACTION}'
 
 # Telegram Integration
 TELEGRAM_ENABLED='${TELEGRAM_ENABLED}'
@@ -630,7 +632,7 @@ load_settings() {
         case "$key" in
             PROXY_PORT|PROXY_METRICS_PORT|PROXY_DOMAIN|PROXY_CONCURRENCY|\
             PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|FAKE_CERT_LEN|PROXY_PROTOCOL|PROXY_PROTOCOL_TRUSTED_CIDRS|AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|\
-            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
+            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|UNKNOWN_SNI_ACTION|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
             AUTO_UPDATE_ENABLED)
@@ -647,6 +649,7 @@ load_settings() {
     [[ "$PROXY_CONCURRENCY" =~ ^[0-9]+$ ]] || PROXY_CONCURRENCY=8192
     [[ "$PROXY_PROTOCOL" == "true" ]] || PROXY_PROTOCOL="false"
     [[ "$GEOBLOCK_MODE" == "whitelist" ]] || GEOBLOCK_MODE="blacklist"
+    [[ "$UNKNOWN_SNI_ACTION" == "drop" ]] || UNKNOWN_SNI_ACTION="mask"
     [[ "$TELEGRAM_INTERVAL" =~ ^[0-9]+$ ]] || TELEGRAM_INTERVAL=6
     [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || TELEGRAM_CHAT_ID=""
 }
@@ -1082,7 +1085,7 @@ client_ack = 90
 
 [censorship]
 tls_domain = "${domain}"
-unknown_sni_action = "mask"
+unknown_sni_action = "${UNKNOWN_SNI_ACTION:-mask}"
 mask = ${mask_enabled}
 mask_port = ${mask_port}
 $([ "$mask_enabled" = "true" ] && [ -n "$mask_host" ] && echo "mask_host = \"${mask_host}\"")
@@ -4970,6 +4973,7 @@ show_cli_help() {
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}adtag${NC} [set <hex>|remove|view] Manage ad-tag"
     echo -e "    ${GREEN}geoblock${NC} [add|remove|list|clear] Manage geo-blocking"
+    echo -e "    ${GREEN}sni-policy${NC} [mask|drop]       Unknown SNI action (mask=permissive, drop=strict)"
     echo ""
     echo -e "  ${BOLD}Monitoring:${NC}"
     echo -e "    ${GREEN}traffic${NC}                 Show traffic stats"
@@ -5592,6 +5596,28 @@ cli_main() {
             esac
             ;;
 
+        sni-policy)
+            load_settings
+            case "$1" in
+                mask)
+                    check_root
+                    UNKNOWN_SNI_ACTION="mask"; save_settings; reload_proxy_config
+                    log_success "Unknown SNI policy set to Mask (permissive)"
+                    ;;
+                drop)
+                    check_root
+                    UNKNOWN_SNI_ACTION="drop"; save_settings; reload_proxy_config
+                    log_success "Unknown SNI policy set to Drop (strict)"
+                    ;;
+                "")
+                    echo -e "  ${BOLD}Unknown SNI policy:${NC} ${UNKNOWN_SNI_ACTION}"
+                    ;;
+                *)
+                    log_error "Usage: mtproxymax sni-policy [mask|drop]"; return 1
+                    ;;
+            esac
+            ;;
+
         traffic)
             load_settings
             load_secrets
@@ -5859,8 +5885,15 @@ show_security_menu() {
         clear_screen
         draw_header "SECURITY & ROUTING"
         echo ""
+        local sni_label
+        if [ "$UNKNOWN_SNI_ACTION" = "drop" ]; then
+            sni_label="${RED}Drop${NC} (strict)"
+        else
+            sni_label="${GREEN}Mask${NC} (permissive)"
+        fi
         echo -e "  ${DIM}[1]${NC} Geo-Blocking"
         echo -e "  ${DIM}[2]${NC} Proxy Chaining (Upstreams)"
+        echo -e "  ${DIM}[3]${NC} Unknown SNI Policy: ${sni_label}"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -5868,6 +5901,27 @@ show_security_menu() {
         case "$choice" in
             1) show_geoblock_menu ;;
             2) show_upstream_menu ;;
+            3)
+                echo ""
+                echo -e "  ${BOLD}Unknown SNI Policy${NC}"
+                echo -e "  Controls how the engine handles TLS connections whose SNI"
+                echo -e "  doesn't match your configured domain."
+                echo ""
+                echo -e "  ${DIM}[1]${NC} ${GREEN}Mask${NC}  — redirect to mask backend (recommended)"
+                echo -e "        Keeps old proxy links working after domain changes."
+                echo -e "  ${DIM}[2]${NC} ${RED}Drop${NC}  — reject immediately (strict)"
+                echo -e "        More secure, but old proxy links with a previous"
+                echo -e "        domain will stop working."
+                echo ""
+                local sni_choice
+                sni_choice=$(read_choice "Choice" "0")
+                case "$sni_choice" in
+                    1) UNKNOWN_SNI_ACTION="mask"; save_settings; reload_proxy_config; log_success "Unknown SNI policy set to Mask" ;;
+                    2) UNKNOWN_SNI_ACTION="drop"; save_settings; reload_proxy_config; log_success "Unknown SNI policy set to Drop" ;;
+                    *) ;;
+                esac
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac
