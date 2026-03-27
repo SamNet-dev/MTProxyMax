@@ -130,6 +130,8 @@ REPLICATION_ENABLED="false"
 REPLICATION_ROLE="standalone"
 REPLICATION_SYNC_INTERVAL=60
 REPLICATION_SSH_PORT=22
+REPLICATION_SSH_USER="root"
+REPLICATION_DELETE_EXTRA="true"
 REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
 REPLICATION_EXCLUDE="relay_stats,backups,connection.log,.ssh,settings.conf,replication.conf,mtproxymax-telegram.sh,mtproxymax-sync.sh"
 REPLICATION_RESTART_ON_CHANGE="true"
@@ -620,6 +622,8 @@ REPLICATION_ENABLED='${REPLICATION_ENABLED}'
 REPLICATION_ROLE='${REPLICATION_ROLE}'
 REPLICATION_SYNC_INTERVAL='${REPLICATION_SYNC_INTERVAL}'
 REPLICATION_SSH_PORT='${REPLICATION_SSH_PORT}'
+REPLICATION_SSH_USER='${REPLICATION_SSH_USER}'
+REPLICATION_DELETE_EXTRA='${REPLICATION_DELETE_EXTRA}'
 REPLICATION_SSH_KEY_PATH='${REPLICATION_SSH_KEY_PATH}'
 REPLICATION_EXCLUDE='${REPLICATION_EXCLUDE}'
 REPLICATION_RESTART_ON_CHANGE='${REPLICATION_RESTART_ON_CHANGE}'
@@ -659,7 +663,7 @@ load_settings() {
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
             AUTO_UPDATE_ENABLED|\
             REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
-            REPLICATION_SSH_PORT|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
+            REPLICATION_SSH_PORT|REPLICATION_SSH_USER|REPLICATION_DELETE_EXTRA|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
             REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG)
                 printf -v "$key" '%s' "$val"
                 ;;
@@ -682,6 +686,8 @@ load_settings() {
     [[ "$REPLICATION_ROLE" =~ ^(standalone|master|slave)$ ]] || REPLICATION_ROLE="standalone"
     [[ "$REPLICATION_SYNC_INTERVAL" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SYNC_INTERVAL" -ge 10 ] || REPLICATION_SYNC_INTERVAL=60
     [[ "$REPLICATION_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SSH_PORT" -ge 1 ] && [ "$REPLICATION_SSH_PORT" -le 65535 ] || REPLICATION_SSH_PORT=22
+    [[ "$REPLICATION_SSH_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || REPLICATION_SSH_USER="root"
+    [[ "$REPLICATION_DELETE_EXTRA" == "false" ]] || REPLICATION_DELETE_EXTRA="true"
     [[ "$REPLICATION_ENABLED" == "true" ]] || REPLICATION_ENABLED="false"
     [[ "$REPLICATION_RESTART_ON_CHANGE" == "false" ]] || REPLICATION_RESTART_ON_CHANGE="true"
 
@@ -4385,7 +4391,7 @@ save_replication() {
     chmod 600 "$tmp"
     # Serialise with sync-timer flock to prevent lost-update races with save_sync_status()
     exec 201>"/var/lock/mtproxymax-sync.lock"
-    flock -w 5 201 2>/dev/null
+    flock -w 5 201 2>/dev/null || { log_error "Could not acquire lock for replication config"; rm -f "$tmp"; exec 201>&-; return 1; }
     mv "$tmp" "$REPLICATION_FILE"
     exec 201>&-
 }
@@ -4435,7 +4441,7 @@ replication_add() {
     fi
 
     if [[ ! "$host" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-        log_error "Invalid host format. Use IP or FQDN (letters, digits, dots, hyphens only)"
+        log_error "Invalid host format. Use IPv4 or FQDN (letters, digits, dots, hyphens). IPv6 is not supported — use IPv4 or a domain name instead."
         return 1
     fi
 
@@ -4573,6 +4579,8 @@ REPLICATION_ENABLED="false"
 REPLICATION_ROLE="standalone"
 REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
 REPLICATION_SSH_PORT="22"
+REPLICATION_SSH_USER="root"
+REPLICATION_DELETE_EXTRA="true"
 REPLICATION_EXCLUDE="relay_stats,backups,connection.log,.ssh,settings.conf,replication.conf,mtproxymax-telegram.sh,mtproxymax-sync.sh"
 REPLICATION_RESTART_ON_CHANGE="true"
 REPLICATION_LOG="/var/log/mtproxymax-sync.log"
@@ -4586,7 +4594,7 @@ load_sync_settings() {
             local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
             case "$key" in
                 REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SSH_KEY_PATH|\
-                REPLICATION_SSH_PORT|REPLICATION_EXCLUDE|REPLICATION_RESTART_ON_CHANGE|\
+                REPLICATION_SSH_PORT|REPLICATION_SSH_USER|REPLICATION_DELETE_EXTRA|REPLICATION_EXCLUDE|REPLICATION_RESTART_ON_CHANGE|\
                 REPLICATION_LOG)
                     printf -v "$key" '%s' "$val" ;;
             esac
@@ -4625,7 +4633,7 @@ load_sync_replication() {
 }
 
 save_sync_status() {
-    local tmp; tmp=$(mktemp /tmp/.mtproxymax-sync.XXXXXX 2>/dev/null) || return 1
+    local tmp; tmp=$(mktemp "${INSTALL_DIR}/.mtproxymax-sync.XXXXXX" 2>/dev/null) || return 1
     chmod 600 "$tmp"
     {
         echo "# MTProxyMax Replication Slaves"
@@ -4644,6 +4652,15 @@ log_sync() {
 
 do_sync() {
     local host="$1" port="$2" label="$3"
+    # Verify dependencies at runtime (may be absent on minimal images)
+    if ! command -v rsync &>/dev/null; then
+        log_sync "ERROR: rsync not found — install rsync on this host"
+        return 1
+    fi
+    if ! command -v ssh &>/dev/null; then
+        log_sync "ERROR: ssh not found — install openssh-client on this host"
+        return 1
+    fi
     local ssh_key="${REPLICATION_SSH_KEY_PATH}"
     local ssh_opts="-i ${ssh_key} -p ${port} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=5 -o ServerAliveCountMax=2"
 
@@ -4658,12 +4675,15 @@ do_sync() {
     # Always exclude these critical files — must never be overwritten on slave
     exclude_args+=(--exclude="settings.conf" --exclude="replication.conf")
 
+    local delete_flag=""
+    [ "${REPLICATION_DELETE_EXTRA:-true}" = "true" ] && delete_flag="--delete"
+
     local output rc
-    output=$(rsync -az --delete --itemize-changes "${exclude_args[@]}" \
+    output=$(rsync -az ${delete_flag:+"$delete_flag"} --itemize-changes "${exclude_args[@]}" \
         --timeout=30 \
         -e "ssh ${ssh_opts}" \
         "${INSTALL_DIR}/" \
-        "root@${host}:${INSTALL_DIR}/" 2>&1)
+        "${REPLICATION_SSH_USER}@${host}:${INSTALL_DIR}/" 2>&1)
     rc=$?
 
     if [ $rc -ne 0 ]; then
@@ -4678,7 +4698,7 @@ do_sync() {
             local r_out r_rc
             r_out=$(ssh -i "${ssh_key}" -p "${port}" \
                 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-                "root@${host}" "docker restart mtproxymax 2>&1" 2>&1)
+                "${REPLICATION_SSH_USER}@${host}" "docker restart mtproxymax 2>&1" 2>&1)
             r_rc=$?
             if [ $r_rc -eq 0 ]; then
                 log_sync "RESTART [${label}/${host}]: Container restarted"
@@ -4796,6 +4816,16 @@ remove_replication_service() {
 # Interactive setup wizard
 replication_setup_wizard() {
     load_settings
+    # Verify required dependencies are present
+    local _missing_deps=()
+    command -v rsync      &>/dev/null || _missing_deps+=(rsync)
+    command -v ssh        &>/dev/null || _missing_deps+=("openssh-client")
+    command -v ssh-keygen &>/dev/null || _missing_deps+=("openssh-keygen")
+    if [ ${#_missing_deps[@]} -gt 0 ]; then
+        log_error "Missing required tools: ${_missing_deps[*]}"
+        log_info  "Install them first, e.g.: apt install ${_missing_deps[*]}"
+        return 1
+    fi
     clear_screen
     draw_header "REPLICATION SETUP"
     echo ""
@@ -4826,7 +4856,11 @@ replication_setup_wizard() {
             log_success "Role set to: Slave"
             echo ""
             echo -e "  On the Master server, run:"
-            echo -e "    ${CYAN}mtproxymax replication add $(hostname -I 2>/dev/null | awk '{print $1}') 22$(hostname -s 2>/dev/null | xargs -I{} echo ' {}')${NC}"
+            local _hint_ip _hint_host
+            _hint_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+            [ -z "$_hint_ip" ] && _hint_ip=$(ip -4 route get 1 2>/dev/null | awk '{print $7; exit}')
+            _hint_host=$(hostname -s 2>/dev/null)
+            echo -e "    ${CYAN}mtproxymax replication add ${_hint_ip:-<YOUR_IP>} 22${_hint_host:+ ${_hint_host}}${NC}"
             echo ""
             echo -e "  Ensure Master's SSH public key is in: ${DIM}~/.ssh/authorized_keys${NC}"
             echo ""
@@ -4873,6 +4907,21 @@ replication_setup_wizard() {
     draw_line
 
     echo ""
+    echo -e "  ${BOLD}Step 2b: SSH User${NC}"
+    echo ""
+    echo -e "  ${DIM}User account on slave servers for SSH/rsync (default: root)${NC}"
+    echo -en "  SSH user [${REPLICATION_SSH_USER:-root}]: "
+    local ssh_user_input; read -r ssh_user_input
+    if [ -n "$ssh_user_input" ]; then
+        if [[ "$ssh_user_input" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]; then
+            REPLICATION_SSH_USER="$ssh_user_input"
+        else
+            log_warn "Invalid username — keeping '${REPLICATION_SSH_USER:-root}'"
+        fi
+    fi
+    draw_line
+
+    echo ""
     echo -e "  ${BOLD}Step 3: Add Slave Server(s)${NC}"
     echo ""
 
@@ -4889,14 +4938,18 @@ replication_setup_wizard() {
         slave_label=$(read_choice "label" "$slave_host")
 
         echo ""
+        echo -e "  ${YELLOW}${SYM_WARN} Note:${NC} The first connection uses Trust-On-First-Use (TOFU)."
+        echo -e "  ${DIM}The slave's SSH host key will be automatically accepted and saved.${NC}"
+        echo -e "  ${DIM}For maximum security, verify the fingerprint manually beforehand.${NC}"
+        echo ""
         echo -e "  Copying SSH key to ${slave_host}..."
         if command -v ssh-copy-id &>/dev/null; then
             if ssh-copy-id -i "${key_path}.pub" -p "${slave_port}" \
                 -o StrictHostKeyChecking=accept-new \
-                "root@${slave_host}" 2>/dev/null; then
+                "${REPLICATION_SSH_USER}@${slave_host}" 2>/dev/null; then
                 log_success "Key copied to ${slave_host}"
             else
-                log_warn "ssh-copy-id failed — add the public key manually to root@${slave_host}:~/.ssh/authorized_keys"
+                log_warn "ssh-copy-id failed — add the public key manually to ${REPLICATION_SSH_USER}@${slave_host}:~/.ssh/authorized_keys"
             fi
         else
             log_warn "ssh-copy-id not found — add the public key manually"
@@ -4905,7 +4958,7 @@ replication_setup_wizard() {
         echo -en "  Testing SSH connection... "
         if ssh -i "${key_path}" -p "${slave_port}" \
             -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-            "root@${slave_host}" "echo ok" &>/dev/null; then
+            "${REPLICATION_SSH_USER}@${slave_host}" "echo ok" &>/dev/null; then
             echo -e "${GREEN}OK${NC}"
             replication_add "$slave_host" "$slave_port" "$slave_label"
         else
@@ -4943,7 +4996,7 @@ replication_setup_wizard() {
             --timeout=10 \
             -e "ssh -i ${REPLICATION_SSH_KEY_PATH} -p ${REPL_PORTS[0]} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
             "${INSTALL_DIR}/" \
-            "root@${REPL_HOSTS[0]}:${INSTALL_DIR}/" 2>&1 | head -20
+            "${REPLICATION_SSH_USER}@${REPL_HOSTS[0]}:${INSTALL_DIR}/" 2>&1 | head -20
         echo ""
     fi
 
@@ -5026,7 +5079,7 @@ replication_test() {
         local result
         result=$(ssh -i "${REPLICATION_SSH_KEY_PATH}" -p "${port}" \
             -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-            "root@${host}" \
+            "${REPLICATION_SSH_USER}@${host}" \
             "docker ps --filter name=mtproxymax --format '{{.Status}}' 2>/dev/null; echo ssh_ok" 2>&1)
 
         if echo "$result" | grep -q "ssh_ok"; then
@@ -5122,6 +5175,10 @@ replication_promote() {
     REPLICATION_ROLE="master"
     save_settings
     log_success "Role changed to: Master"
+    if [ ! -f "${REPLICATION_SSH_KEY_PATH}" ]; then
+        log_warn "No SSH key found at ${REPLICATION_SSH_KEY_PATH}"
+        log_info "Run 'mtproxymax replication setup' to generate a key and configure slaves"
+    fi
     log_info "Add slaves:  mtproxymax replication add <host>"
     log_info "Enable sync: mtproxymax replication enable"
 }
@@ -6639,6 +6696,12 @@ cli_main() {
                     ;;
                 enable)
                     check_root
+                    load_settings
+                    if [ "${REPLICATION_ROLE}" != "master" ]; then
+                        log_error "Only a master can enable replication sync. Current role: ${REPLICATION_ROLE}"
+                        log_info "Run: mtproxymax replication setup"
+                        return 1
+                    fi
                     REPLICATION_ENABLED="true"
                     save_settings
                     setup_replication_service

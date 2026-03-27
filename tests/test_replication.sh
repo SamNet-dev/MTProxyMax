@@ -287,6 +287,7 @@ BLOCKLIST_COUNTRIES=""
 MASKING_ENABLED="true"
 MASKING_HOST=""
 MASKING_PORT=443
+UNKNOWN_SNI_ACTION="mask"
 TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -331,6 +332,7 @@ BLOCKLIST_COUNTRIES='${BLOCKLIST_COUNTRIES}'
 MASKING_ENABLED='${MASKING_ENABLED}'
 MASKING_HOST='${MASKING_HOST}'
 MASKING_PORT='${MASKING_PORT}'
+UNKNOWN_SNI_ACTION='${UNKNOWN_SNI_ACTION}'
 
 # Telegram Integration
 TELEGRAM_ENABLED='${TELEGRAM_ENABLED}'
@@ -348,6 +350,8 @@ REPLICATION_ENABLED='${REPLICATION_ENABLED}'
 REPLICATION_ROLE='${REPLICATION_ROLE}'
 REPLICATION_SYNC_INTERVAL='${REPLICATION_SYNC_INTERVAL}'
 REPLICATION_SSH_PORT='${REPLICATION_SSH_PORT}'
+REPLICATION_SSH_USER='${REPLICATION_SSH_USER}'
+REPLICATION_DELETE_EXTRA='${REPLICATION_DELETE_EXTRA}'
 REPLICATION_SSH_KEY_PATH='${REPLICATION_SSH_KEY_PATH}'
 REPLICATION_EXCLUDE='${REPLICATION_EXCLUDE}'
 REPLICATION_RESTART_ON_CHANGE='${REPLICATION_RESTART_ON_CHANGE}'
@@ -379,12 +383,12 @@ load_settings() {
         case "$key" in
             PROXY_PORT|PROXY_METRICS_PORT|PROXY_DOMAIN|PROXY_CONCURRENCY|\
             PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|FAKE_CERT_LEN|PROXY_PROTOCOL|PROXY_PROTOCOL_TRUSTED_CIDRS|AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|\
-            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
+            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|UNKNOWN_SNI_ACTION|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
             AUTO_UPDATE_ENABLED|\
             REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
-            REPLICATION_SSH_PORT|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
+            REPLICATION_SSH_PORT|REPLICATION_SSH_USER|REPLICATION_DELETE_EXTRA|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
             REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG)
                 printf -v "$key" '%s' "$val"
                 ;;
@@ -395,6 +399,7 @@ load_settings() {
     [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] && [ "$PROXY_PORT" -ge 1 ] && [ "$PROXY_PORT" -le 65535 ] || PROXY_PORT=443
     [[ "$PROXY_METRICS_PORT" =~ ^[0-9]+$ ]] && [ "$PROXY_METRICS_PORT" -ge 1 ] && [ "$PROXY_METRICS_PORT" -le 65535 ] || PROXY_METRICS_PORT=9090
     [[ "$MASKING_PORT" =~ ^[0-9]+$ ]] && [ "$MASKING_PORT" -ge 1 ] && [ "$MASKING_PORT" -le 65535 ] || MASKING_PORT=443
+    [[ "$UNKNOWN_SNI_ACTION" == "drop" ]] || UNKNOWN_SNI_ACTION="mask"
     [[ "$FAKE_CERT_LEN" =~ ^[0-9]+$ ]] && [ "$FAKE_CERT_LEN" -ge 512 ] || FAKE_CERT_LEN=2048
     [[ "$PROXY_CONCURRENCY" =~ ^[0-9]+$ ]] || PROXY_CONCURRENCY=8192
     [[ "$PROXY_PROTOCOL" == "true" ]] || PROXY_PROTOCOL="false"
@@ -405,6 +410,8 @@ load_settings() {
     [[ "$REPLICATION_ROLE" =~ ^(standalone|master|slave)$ ]] || REPLICATION_ROLE="standalone"
     [[ "$REPLICATION_SYNC_INTERVAL" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SYNC_INTERVAL" -ge 10 ] || REPLICATION_SYNC_INTERVAL=60
     [[ "$REPLICATION_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$REPLICATION_SSH_PORT" -ge 1 ] && [ "$REPLICATION_SSH_PORT" -le 65535 ] || REPLICATION_SSH_PORT=22
+    [[ "$REPLICATION_SSH_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || REPLICATION_SSH_USER="root"
+    [[ "$REPLICATION_DELETE_EXTRA" == "false" ]] || REPLICATION_DELETE_EXTRA="true"
     [[ "$REPLICATION_ENABLED" == "true" ]] || REPLICATION_ENABLED="false"
     [[ "$REPLICATION_RESTART_ON_CHANGE" == "false" ]] || REPLICATION_RESTART_ON_CHANGE="true"
 }
@@ -631,12 +638,6 @@ assert_eq "2.13 new entry status=unknown"   "${REPL_STATUS[0]}"    "unknown"
 assert_eq "2.13 new entry last_sync=0"      "${REPL_LAST_SYNC[0]}" "0"
 
 # 2.14  Duplicate host is rejected.
-# KNOWN BUG: These assertions fail due to bash dynamic scoping. Inside
-# replication_add, calling load_replication clobbers the `host` local via the
-# inner `while IFS='|' read -r host port ...` loop. After load_replication
-# returns, `host` is empty, so the duplicate check compares "" vs "10.0.0.1"
-# and no duplicate is found. Root fix: rename the while-read variable in
-# load_replication (e.g. _rl_host) to avoid clobbering the caller's locals.
 _reset_replication
 replication_add "10.0.0.1" 22 "first"
 replication_add "10.0.0.1" 22 "second" 2>/dev/null
@@ -647,8 +648,6 @@ load_replication
 assert_eq "2.14 only one entry in file" "${#REPL_HOSTS[@]}" "1"
 
 # 2.15  Adding a second different host increases count to 2.
-# KNOWN BUG: Same bash scoping issue as 2.14 — second replication_add saves
-# an empty-host entry because `host` is clobbered by load_replication.
 _reset_replication
 replication_add "10.0.0.1" 22 "alpha"
 replication_add "10.0.0.2" 22 "beta"
@@ -680,10 +679,6 @@ assert_eq "3.2  not-found returns 1" "$?" "1"
 assert_true "3.2  error mentions not found" contains "$_LAST_ERROR" "not found"
 
 # 3.3  Remove by host address.
-# KNOWN BUG: Fails because replication_add's internal load_replication call
-# clobbers the `host` local variable (same bash scoping issue as 2.14).
-# Both add calls save an empty-host entry; the second overwrites the first.
-# After removal there are 0 entries, not 1.
 _reset_replication
 replication_add "10.0.0.1" 22 "node1"
 replication_add "10.0.0.2" 22 "node2"
@@ -694,7 +689,6 @@ assert_eq "3.3  one entry remains"    "${#REPL_HOSTS[@]}" "1"
 assert_eq "3.3  remaining host"       "${REPL_HOSTS[0]}"  "10.0.0.2"
 
 # 3.4  Remove by label.
-# KNOWN BUG: Same root cause as 3.3.
 _reset_replication
 replication_add "10.0.0.1" 22 "alpha"
 replication_add "10.0.0.2" 22 "beta"
@@ -713,9 +707,6 @@ load_replication
 assert_eq "3.5  no entries remain" "${#REPL_HOSTS[@]}" "0"
 
 # 3.6  Remove middle entry of three — order of survivors preserved.
-# KNOWN BUG: Same root cause as 3.3 — all three replication_add calls save an
-# empty-host entry (overwriting each other). After the three adds, the file
-# has a single entry. replication_remove "beta" finds nothing, returns 1.
 _reset_replication
 replication_add "10.0.0.1" 22 "alpha"
 replication_add "10.0.0.2" 22 "beta"
@@ -964,9 +955,6 @@ replication_add "10.9.9.9" "   " "label" 2>/dev/null
 assert_eq "6.4  spaces-only port rejected" "$?" "1"
 
 # 6.5  Remove targets are matched by exact host, not substring.
-# KNOWN BUG: Same root cause as 2.14/3.3 — both replication_add calls clobber
-# their `host` local, so both entries are saved with empty host. After removal
-# of "" (which matches the empty entry), 0 entries remain instead of 1.
 _reset_replication
 replication_add "10.0.0.10"  22 "ten"
 replication_add "10.0.0.100" 22 "hundred"
