@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.3-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.0.4-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -109,7 +109,7 @@ Fine-grained limits enforced at the engine level:
 
 > **Tip: Use `conns` for device limits, not `ips`.** Each Telegram app opens exactly 1 connection (multiplexed internally), so `conns 3` = max 3 devices. IP limits are less reliable because mobile users roam between cell towers (briefly showing 2 IPs for 1 device), and multiple devices behind the same WiFi share 1 IP. Use `ips` as a secondary anti-sharing measure.
 >
-> **Traffic and quotas are lifetime (cumulative)**, not monthly. They don't auto-reset. To reset a user's traffic, rotate their secret.
+> **Traffic and quotas are lifetime (cumulative)**, not monthly. They don't auto-reset. Use `mtproxymax secret reset-traffic <label>` to manually reset counters, or rotate the secret.
 
 ```bash
 mtproxymax secret setlimits alice 100 5 10G 2026-12-31
@@ -411,6 +411,7 @@ mtproxymax secret link [label]          # Show proxy link
 mtproxymax secret qr [label]            # Show QR code
 mtproxymax secret setlimit <label> <type> <value>  # Set individual limit
 mtproxymax secret setlimits <label> <conns> <ips> <quota> [expires]  # Set all limits
+mtproxymax secret reset-traffic <label|all>  # Reset traffic counters
 ```
 
 </details>
@@ -439,6 +440,7 @@ mtproxymax upstream list                # List upstreams
 mtproxymax upstream add <name> <type> <host:port> [user] [pass] [weight]
 mtproxymax upstream remove <name>       # Remove upstream
 mtproxymax upstream test <name>         # Test connectivity
+mtproxymax sni-policy [mask|drop]      # Unknown SNI action (mask=permissive, drop=strict)
 ```
 
 </details>
@@ -448,6 +450,8 @@ mtproxymax upstream test <name>         # Test connectivity
 
 ```bash
 mtproxymax traffic                      # Per-user traffic breakdown
+mtproxymax metrics                      # Engine metrics dashboard
+mtproxymax metrics live [seconds]       # Auto-refresh metrics (default: 5s)
 mtproxymax logs                         # Stream live logs
 mtproxymax health                       # Run diagnostics
 ```
@@ -505,6 +509,28 @@ mtproxymax telegram remove              # Remove bot completely
 ---
 
 ## 📋 Changelog
+
+### v1.0.4 — Engine v3.3.32, SNI Policy & Metrics Dashboard
+
+**Engine Upgrade (v3.3.31 → v3.3.32):**
+
+- **Bounded Hybrid Routing Loop** — Hard timeout on ME no-writer recovery, prevents infinite-spin edge case
+- **ArcSwap Snapshots** — Lock-free concurrent reads on writer pools, endpoints, and family state for less contention
+- **Parallel Health Checks** — Reduced latency during writer recovery
+- **Refined Quarantine** — Draining writers no longer needlessly quarantine healthy endpoints
+- **New Backpressure Model** — Tiered base/high watermark for better overload handling
+
+**New Features:**
+
+- **Unknown SNI Policy** — Configurable `mask` (permissive, default) or `drop` (strict) for TLS connections with non-matching SNI. TUI: Security & Routing > Unknown SNI Policy. CLI: `mtproxymax sni-policy [mask|drop]` ([#40](https://github.com/SamNet-dev/MTProxyMax/issues/40))
+- **Engine Metrics Dashboard** — `mtproxymax metrics` shows connections, upstream routing, per-user stats, and ME pool status. `mtproxymax metrics live` for auto-refresh
+- **Reset Traffic Counters** — `mtproxymax secret reset-traffic <label|all>` to manually reset per-user cumulative traffic
+
+**Bug Fixes:**
+
+- **Fix broken pipe on Alpine** — Replaced process-substitution FIFOs with here-strings to avoid SIGPIPE race ([#37](https://github.com/SamNet-dev/MTProxyMax/issues/37))
+- **Fix double-input on Alpine** — Drain leftover escape-sequence bytes from multi-byte key presses in TUI menus ([#38](https://github.com/SamNet-dev/MTProxyMax/issues/38))
+- **Fix SNI rejection after engine upgrade** — `unknown_sni_action` default changed to `drop` in telemt v3.3.31+, now explicitly set to `mask` for backward compatibility ([#40](https://github.com/SamNet-dev/MTProxyMax/issues/40))
 
 ### v1.0.3 — Notes, Quota Enforcement, Multi-Port & More
 
