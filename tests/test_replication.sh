@@ -265,6 +265,8 @@ REPLICATION_ENABLED="false"
 REPLICATION_ROLE="standalone"
 REPLICATION_SYNC_INTERVAL=60
 REPLICATION_SSH_PORT=22
+REPLICATION_SSH_USER="root"
+REPLICATION_DELETE_EXTRA="true"
 REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
 REPLICATION_EXCLUDE="relay_stats,backups,connection.log,.ssh,mtproxymax-telegram.sh,mtproxymax-sync.sh"
 REPLICATION_RESTART_ON_CHANGE="true"
@@ -443,6 +445,8 @@ _clear_settings_vars() {
     REPLICATION_ROLE="standalone"
     REPLICATION_SYNC_INTERVAL=60
     REPLICATION_SSH_PORT=22
+    REPLICATION_SSH_USER="root"
+    REPLICATION_DELETE_EXTRA="true"
     REPLICATION_SSH_KEY_PATH="/opt/mtproxymax/.ssh/id_ed25519"
     REPLICATION_EXCLUDE="relay_stats,backups"
     REPLICATION_RESTART_ON_CHANGE="true"
@@ -743,6 +747,8 @@ REPLICATION_ENABLED="true"
 REPLICATION_ROLE="master"
 REPLICATION_SYNC_INTERVAL=120
 REPLICATION_SSH_PORT=2222
+REPLICATION_SSH_USER="syncuser"
+REPLICATION_DELETE_EXTRA="false"
 REPLICATION_SSH_KEY_PATH="/home/user/.ssh/id_ed25519"
 REPLICATION_EXCLUDE="backups,connection.log"
 REPLICATION_RESTART_ON_CHANGE="false"
@@ -759,6 +765,8 @@ assert_eq "4.1  REPLICATION_SYNC_INTERVAL"    "$REPLICATION_SYNC_INTERVAL"    "1
 assert_eq "4.1  REPLICATION_SSH_PORT"         "$REPLICATION_SSH_PORT"         "2222"
 assert_eq "4.1  REPLICATION_SSH_KEY_PATH"     "$REPLICATION_SSH_KEY_PATH"     "/home/user/.ssh/id_ed25519"
 assert_eq "4.1  REPLICATION_EXCLUDE"          "$REPLICATION_EXCLUDE"          "backups,connection.log"
+assert_eq "4.1  REPLICATION_SSH_USER"          "$REPLICATION_SSH_USER"          "syncuser"
+assert_eq "4.1  REPLICATION_DELETE_EXTRA"     "$REPLICATION_DELETE_EXTRA"     "false"
 assert_eq "4.1  REPLICATION_RESTART_ON_CHANGE" "$REPLICATION_RESTART_ON_CHANGE" "false"
 assert_eq "4.1  REPLICATION_LOG"              "$REPLICATION_LOG"              "/tmp/sync.log"
 
