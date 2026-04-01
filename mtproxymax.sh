@@ -5846,7 +5846,7 @@ restore_backup() {
 
 list_backups() {
     mkdir -p "$BACKUP_DIR"
-    local files; files=$(ls -1t "${BACKUP_DIR}"/mtproxymax-*.tar.gz 2>/dev/null)
+    local files; files=$(ls -1t "${BACKUP_DIR}"/mtproxymax-*.tar.gz 2>/dev/null) || true
     if [ -z "$files" ]; then
         log_info "No backups found in ${BACKUP_DIR}"
         return
