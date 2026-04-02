@@ -103,12 +103,12 @@ Fine-grained limits enforced at the engine level:
 
 | Limit | Description | Example | Best For |
 |-------|-------------|---------|----------|
-| **Max Connections** | Concurrent connections (1 app = 1 conn) | `3` | **Device limiting** |
+| **Max Connections** | Concurrent TCP connections (~3 per device) | `15` | **Device limiting** |
 | **Max IPs** | Unique IP addresses allowed | `5` | Anti-sharing / abuse |
 | **Data Quota** | Lifetime bandwidth cap | `10G`, `500M` | Fair usage |
 | **Expiry Date** | Auto-disable after date | `2026-12-31` | Temporary access |
 
-> **Tip: Use `conns` for device limits, not `ips`.** Each Telegram app opens exactly 1 connection (multiplexed internally), so `conns 3` = max 3 devices. IP limits are less reliable because mobile users roam between cell towers (briefly showing 2 IPs for 1 device), and multiple devices behind the same WiFi share 1 IP. Use `ips` as a secondary anti-sharing measure.
+> **Tip:** Each Telegram app opens **~3 TCP connections** (one per DC). So for device limiting, multiply by 3: `conns 15` ≈ max 5 devices. Setting below 5 will likely break even a single device. IP limits are less reliable because mobile users roam between cell towers (briefly showing 2 IPs for 1 device), and multiple devices behind the same WiFi share 1 IP. Use `ips` as a secondary anti-sharing measure.
 >
 > **Traffic and quotas are lifetime (cumulative)**, not monthly. They don't auto-reset. Use `mtproxymax secret reset-traffic <label>` to manually reset counters, or rotate the secret.
 
@@ -124,11 +124,11 @@ mtproxymax secret setlimits alice 100 5 10G 2026-12-31
 <summary><b>Limit Devices Per User (Recommended)</b></summary>
 
 ```bash
-mtproxymax secret setlimit alice conns 1    # Single device only
-mtproxymax secret setlimit family conns 5   # Family — up to 5 devices
+mtproxymax secret setlimit alice conns 5    # Single device (~3 conns per device, with headroom)
+mtproxymax secret setlimit family conns 15  # Family — up to 5 devices
 ```
 
-If someone with `conns 1` shares their link, the second device can't connect. Each Telegram app = exactly 1 connection.
+Each Telegram app opens ~3 TCP connections. Setting `conns 5` allows one device with headroom. If someone shares their link, the second device will hit the limit.
 
 </details>
 
@@ -168,9 +168,9 @@ mtproxymax secret add bob
 mtproxymax secret add charlie
 
 # Each person gets their own link — revoke individually
-mtproxymax secret setlimit alice conns 2    # 2 devices
-mtproxymax secret setlimit bob conns 1      # 1 device
-mtproxymax secret setlimit charlie conns 3  # 3 devices
+mtproxymax secret setlimit alice conns 10   # ~3 devices
+mtproxymax secret setlimit bob conns 5     # 1 device
+mtproxymax secret setlimit charlie conns 15 # ~5 devices
 ```
 
 </details>
