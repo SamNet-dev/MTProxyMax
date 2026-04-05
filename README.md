@@ -585,7 +585,7 @@ mtproxymax telegram remove              # Remove bot completely
 
 ## 📋 Changelog
 
-### v1.0.4 — Replication, Engine v3.3.36, SNI Policy & Metrics Dashboard
+### v1.0.4 — Replication, Engine v3.3.38, SNI Policy & Metrics Dashboard
 
 - **Replication** — sync config from master to slave servers via rsync+SSH with systemd timer
 - **Auto-exclude** — `settings.conf` and `replication.conf` are never synced to slaves, preserving their role and local state
@@ -595,14 +595,17 @@ mtproxymax telegram remove              # Remove bot completely
 - **Role guards** — `replication add/remove/sync` are blocked with a clear error on slave servers
 - **Sync script auto-update** — manual `sync` always regenerates the script from current binary
 
-**Engine Upgrade (v3.3.31 → v3.3.36):**
+**Engine Upgrade (v3.3.31 → v3.3.38):**
 
 - **Apple/XNU Connectivity Fixes** — Resolves connection issues for iOS/macOS Telegram clients
 - **ME Rewrite** — Hybrid routing loop, ArcSwap snapshots, parallel health checks, refined quarantine, tiered backpressure
+- **Conntrack Control** — Automatic conntrack table management under connection pressure with configurable watermarks
+- **New Relay Methods** — Improved middle/direct relay with adaptive buffers
+- **ME2DC Fast Init** — Faster startup, unstoppable initialization (now enabled by default)
 - **Memory Optimizations** — Buffer pool trim, session vec shrink, reduced stats memory footprint
 - **Upstream Timeout Tuning** — `tg_connect` timeout now applied to DC TCP connect attempts, prevents hanging connections
 - **Active IPs API** — New `/v1/stats/users/active-ips` endpoint
-- **Configurable `listen_backlog`** — Tunable TCP listen queue for high-connection servers
+- **Config Fallback** — Engine gracefully falls back if primary config fails to load
 
 **New Features:**
 

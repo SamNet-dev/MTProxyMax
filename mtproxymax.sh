@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.3.36"
-TELEMT_COMMIT="8ac1a00"  # Pinned: v3.3.36 — Apple/XNU fixes, memory optimizations, upstream timeout tuning
+TELEMT_MIN_VERSION="3.3.38"
+TELEMT_COMMIT="e630ea0"  # Pinned: v3.3.38 — conntrack control, new relay methods, ME2DC fast init
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
