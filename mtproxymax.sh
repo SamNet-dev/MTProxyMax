@@ -899,13 +899,20 @@ install_docker() {
             curl -fsSL https://get.docker.com | sh
             ;;
         rhel)
+            # Determine Docker repo URL: Fedora has its own repo, others use CentOS
+            local _distro_id _repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
+            [ -f /etc/os-release ] && . /etc/os-release && _distro_id="$ID"
+            [ "$_distro_id" = "fedora" ] && _repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"
+
             if command -v dnf &>/dev/null; then
-                dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>/dev/null ||
-                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                # dnf5 (Fedora 41+) uses --addrepo, older dnf uses --add-repo
+                dnf config-manager --add-repo "$_repo_url" 2>/dev/null ||
+                dnf config-manager --addrepo "$_repo_url" 2>/dev/null ||
+                yum-config-manager --add-repo "$_repo_url"
                 dnf install -y docker-ce docker-ce-cli containerd.io
             else
                 yum install -y yum-utils
-                yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+                yum-config-manager --add-repo "$_repo_url"
                 yum install -y docker-ce docker-ce-cli containerd.io
             fi
             ;;
