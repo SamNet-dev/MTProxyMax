@@ -30,7 +30,7 @@ MTProxyMax is a full-featured Telegram MTProto proxy manager powered by the **te
 <img src="main.png" width="600" alt="MTProxyMax Main Menu"/>
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/SamNet-dev/MTProxyMax/main/install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nellimonix/MTProxyMax/main/install.sh)"
 ```
 
 ---
@@ -55,7 +55,7 @@ Most MTProxy tools give you a proxy and a link. That's it. MTProxyMax gives you 
 ### One-Line Install
 
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/SamNet-dev/MTProxyMax/main/install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/nellimonix/MTProxyMax/main/install.sh)"
 ```
 
 The interactive wizard walks you through everything: port, domain, first user secret, and optional Telegram bot setup.
@@ -63,7 +63,7 @@ The interactive wizard walks you through everything: port, domain, first user se
 ### Manual Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/SamNet-dev/MTProxyMax/main/mtproxymax.sh -o mtproxymax
+curl -fsSL https://raw.githubusercontent.com/nellimonix/MTProxyMax/main/mtproxymax.sh -o mtproxymax
 chmod +x mtproxymax
 sudo ./mtproxymax install
 ```
