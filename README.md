@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.4-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.0.5-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -585,6 +585,18 @@ mtproxymax telegram remove              # Remove bot completely
 ---
 
 ## 📋 Changelog
+
+### v1.0.5 — Clone, Bulk-Extend, Doctor, Stats & More
+
+- `secret clone <src> <new>` — duplicate a secret with all its limits
+- `secret bulk-extend <days>` — extend all secrets' expiry at once
+- `secret extend <label> <days>` — extend a single secret's expiry
+- `secret rename`, `secret export/import`, `secret disable-expired`, `secret sort`, `secret stats`
+- `connections` — live active connections per user
+- `doctor` — comprehensive diagnostics (port, TLS, secrets, disk, Telegram bot)
+- Auto-rotate secrets on domain change, startup warnings for expired/near-expiry secrets
+- QR code shown inline after `secret add` (if qrencode installed)
+- Fedora 41+ Docker install fix (dnf5 `--addrepo`, Fedora repo URL)
 
 ### v1.0.4 — Replication, Engine v3.3.39, Metrics Dashboard
 

@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.0.4"
+VERSION="1.0.5"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="/opt/mtproxymax"
 CONFIG_DIR="${INSTALL_DIR}/mtproxy"
@@ -2365,6 +2365,88 @@ secret_rename() {
     save_secrets
     reload_proxy_config
     log_success "Secret renamed: '${old_label}' → '${new_label}'"
+}
+
+# Clone a secret with all its limits
+secret_clone() {
+    local src_label="$1" new_label="$2"
+    [ -z "$src_label" ] || [ -z "$new_label" ] && { log_error "Usage: mtproxymax secret clone <source-label> <new-label>"; return 1; }
+
+    # Validate new label
+    [[ "$new_label" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Label must be alphanumeric (a-z, 0-9, _, -)"; return 1; }
+    [ ${#new_label} -gt 32 ] && { log_error "Label must be 32 characters or less"; return 1; }
+
+    # Find source
+    local idx=-1 i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$src_label" ] && { idx=$i; break; }
+    done
+    [ $idx -eq -1 ] && { log_error "Secret '${src_label}' not found"; return 1; }
+
+    # Check new label doesn't exist
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$new_label" ] && { log_error "Secret '${new_label}' already exists"; return 1; }
+    done
+
+    SECRETS_LABELS+=("$new_label")
+    SECRETS_KEYS+=("$(generate_secret)")
+    SECRETS_CREATED+=("$(date +%s)")
+    SECRETS_ENABLED+=("true")
+    SECRETS_MAX_CONNS+=("${SECRETS_MAX_CONNS[$idx]:-0}")
+    SECRETS_MAX_IPS+=("${SECRETS_MAX_IPS[$idx]:-0}")
+    SECRETS_QUOTA+=("${SECRETS_QUOTA[$idx]:-0}")
+    SECRETS_EXPIRES+=("${SECRETS_EXPIRES[$idx]:-0}")
+    SECRETS_NOTES+=("${SECRETS_NOTES[$idx]:-}")
+
+    save_secrets
+    reload_proxy_config
+
+    local full_secret server_ip
+    full_secret=$(build_faketls_secret "${SECRETS_KEYS[-1]}")
+    server_ip=$(get_public_ip)
+    log_success "Secret '${new_label}' cloned from '${src_label}'"
+    echo -e "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}"
+    echo ""
+}
+
+# Extend all secrets' expiry by N days
+secret_bulk_extend() {
+    local days="$1"
+    [ -z "$days" ] && { log_error "Usage: mtproxymax secret bulk-extend <days>"; return 1; }
+    [[ "$days" =~ ^[0-9]+$ ]] && [ "$days" -gt 0 ] || { log_error "Days must be a positive number"; return 1; }
+
+    local now_epoch extended=0
+    now_epoch=$(date +%s)
+
+    local i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        local exp="${SECRETS_EXPIRES[$i]:-0}"
+        [ "$exp" = "0" ] && continue
+
+        local base_epoch
+        base_epoch=$(_iso_to_epoch "$exp")
+        [ "$base_epoch" -le "$now_epoch" ] && base_epoch=$now_epoch
+
+        local new_epoch=$((base_epoch + days * 86400))
+        local new_date
+        new_date=$(date -u -d "@${new_epoch}" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
+        new_date=$(date -u -r "$new_epoch" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
+        new_date=$(python3 -c "import datetime;print(datetime.datetime.utcfromtimestamp(${new_epoch}).strftime('%Y-%m-%dT23:59:59Z'))" 2>/dev/null)
+        [ -z "$new_date" ] && continue
+
+        SECRETS_EXPIRES[$i]="$new_date"
+        [ "${SECRETS_ENABLED[$i]}" = "false" ] && SECRETS_ENABLED[$i]="true"
+        extended=$((extended + 1))
+        log_info "${SECRETS_LABELS[$i]} → ${new_date%%T*}"
+    done
+
+    if [ $extended -gt 0 ]; then
+        save_secrets
+        reload_proxy_config
+        log_success "Extended ${extended} secret(s) by ${days} days"
+    else
+        log_info "No secrets with expiry dates to extend"
+    fi
 }
 
 # Export secrets to CSV (stdout)
@@ -6400,6 +6482,8 @@ show_cli_help() {
     echo -e "    ${GREEN}secret setlimits${NC} <label> <conns> <ips> <quota> [expires] [--no-restart]"
     echo -e "    ${GREEN}secret reset-traffic${NC} <label|all>  Reset traffic counters"
     echo -e "    ${GREEN}secret rename${NC} <old> <new>     Rename a secret"
+    echo -e "    ${GREEN}secret clone${NC} <src> <new>      Clone a secret with all its limits"
+    echo -e "    ${GREEN}secret bulk-extend${NC} <days>     Extend all secrets' expiry by N days"
     echo -e "    ${GREEN}secret export${NC}                 Export secrets to CSV (stdout)"
     echo -e "    ${GREEN}secret import${NC} <file>          Import secrets from CSV file"
     echo -e "    ${GREEN}secret disable-expired${NC}        Disable all expired secrets"
@@ -6851,6 +6935,16 @@ cli_main() {
                     check_root
                     [ -z "$1" ] || [ -z "$2" ] && { log_error "Usage: mtproxymax secret rename <old> <new>"; return 1; }
                     secret_rename "$1" "$2"
+                    ;;
+                clone)
+                    check_root
+                    [ -z "$1" ] || [ -z "$2" ] && { log_error "Usage: mtproxymax secret clone <source> <new-label>"; return 1; }
+                    secret_clone "$1" "$2"
+                    ;;
+                bulk-extend)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax secret bulk-extend <days>"; return 1; }
+                    secret_bulk_extend "$1"
                     ;;
                 export)
                     load_secrets
