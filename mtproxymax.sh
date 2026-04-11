@@ -4389,10 +4389,12 @@ is_running() {
 get_stats() {
     local m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
     [ -z "$m" ] && echo "0 0 0" && return
-    local i=$(echo "$m"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-    local o=$(echo "$m"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
-    local c=$(echo "$m"|awk '/^telemt_user_connections_current\{/{s+=$NF}END{printf "%.0f",s}')
-    echo "${i:-0} ${o:-0} ${c:-0}"
+    echo "$m" | awk '
+        /^telemt_user_octets_from_client\{/ {i+=$NF}
+        /^telemt_user_octets_to_client\{/   {o+=$NF}
+        /^telemt_user_connections_current\{/ {c+=$NF}
+        END {printf "%.0f %.0f %.0f\n",i+0,o+0,c+0}
+    '
 }
 
 get_uptime() {
@@ -4501,12 +4503,24 @@ update_traffic() {
     _prev_total_in=$cur_in
     _prev_total_out=$cur_out
 
-    # Per-user delta tracking (reuse already-fetched metrics)
+    # Per-user delta tracking — single awk pass for all users
+    local _user_parsed=""
+    if [ -n "$_metrics" ]; then
+        _user_parsed=$(echo "$_metrics" | awk '
+            function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
+            /^telemt_user_octets_from_client\{/ { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+            /^telemt_user_octets_to_client\{/   { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+            END { for(u in rx) printf "%s|%.0f|%.0f\n",u,rx[u]+0,tx[u]+0 }
+        ')
+    fi
     while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
         [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
         [ "$enabled" != "true" ] && continue
-        local ui=0 uo=0 _uc=0
-        read -r ui uo _uc <<< "$(get_user_stats_tg "$label" "$_metrics")"
+        local ui=0 uo=0
+        if [ -n "$_user_parsed" ]; then
+            local _uline; _uline=$(echo "$_user_parsed" | awk -F'|' -v u="$label" '$1==u{print $2"|"$3}')
+            [ -n "$_uline" ] && IFS='|' read -r ui uo <<< "$_uline"
+        fi
         local prev_ui=${_prev_user_in["$label"]:-0}
         local prev_uo=${_prev_user_out["$label"]:-0}
         local du=$((ui - prev_ui))
@@ -4530,9 +4544,9 @@ process_commands() {
     [[ "$offset" =~ ^[0-9]+$ ]] || offset="0"
     local _cfg=$(mktemp /tmp/.mtproxymax-tg.XXXXXX)
     chmod 600 "$_cfg"
-    printf 'url = "https://api.telegram.org/bot%s/getUpdates?offset=%s&timeout=1"\n' "$TELEGRAM_BOT_TOKEN" "$offset" > "$_cfg"
+    printf 'url = "https://api.telegram.org/bot%s/getUpdates?offset=%s&timeout=25"\n' "$TELEGRAM_BOT_TOKEN" "$offset" > "$_cfg"
     local updates
-    updates=$(curl -s --max-time 15 -K "$_cfg" 2>/dev/null)
+    updates=$(curl -s --max-time 30 -K "$_cfg" 2>/dev/null)
     rm -f "$_cfg"
     [ -z "$updates" ] && return
 
@@ -4582,26 +4596,31 @@ _process_cmd() {
                 tg_send "📱 *MTProxy Status*\n\n🔴 Status: Stopped"
                 return
             fi
-            local stats=$(get_stats)
-            local conns=$(echo "$stats"|awk '{print $3}')
+            local _si _so _sc; read -r _si _so _sc <<< "$(get_stats)"
             local up=$(get_uptime)
-            local cum=$(get_cum_traffic)
-            local ct_in=$(echo "$cum"|awk '{print $1}')
-            local ct_out=$(echo "$cum"|awk '{print $2}')
-            tg_send "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${conns}\n📊 Traffic: ↓ $(format_bytes $ct_in) ↑ $(format_bytes $ct_out)\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}"
+            tg_send "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${_sc}\n📊 Traffic: ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}"
             ;;
         /mp_secrets|/mp_secrets@*)
             load_tg_settings
             [ ! -f "$SECRETS_FILE" ] && tg_send "📋 No secrets configured." && return
             local msg="📋 *Secrets*\n\n"
-            local _sec_metrics
+            # Single awk pass for all user metrics
+            local _sec_metrics _parsed_users=""
             _sec_metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
+            if [ -n "$_sec_metrics" ]; then
+                _parsed_users=$(echo "$_sec_metrics" | awk '
+                    function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
+                    /^telemt_user_connections_current\{/ { u=lbl($0,"user"); if(u) uc[u]+=$NF }
+                    END { for(u in uc) printf "%s|%d\n",u,uc[u]+0 }
+                ')
+            fi
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 local icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
-                local us=$(get_user_stats_tg "$label" "$_sec_metrics")
-                local uc=$(echo "$us"|awk '{print $3}')
+                local uc=0
+                [ -n "$_parsed_users" ] && uc=$(echo "$_parsed_users" | awk -F'|' -v u="$label" '$1==u{print $2}')
+                uc=${uc:-0}
                 local cum_u=$(get_cum_user_traffic "$label")
                 local cui=$(echo "$cum_u"|awk '{print $1}')
                 local cuo=$(echo "$cum_u"|awk '{print $2}')
@@ -4614,13 +4633,14 @@ _process_cmd() {
             local ip; ip=$(get_cached_ip)
             [ -z "$ip" ] && tg_send "❌ Cannot detect server IP" && return
             local msg="🔗 *Proxy Details*\n\n"
-            local _first_fs=""
+            local _first_fs="" _dh=""
+            [ "${MASKING_ENABLED:-true}" != "false" ] && _dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 [ "$enabled" != "true" ] && continue
-                local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
-                local fs="ee${secret}${dh}"
+                local fs
+                [ -n "$_dh" ] && fs="ee${secret}${_dh}" || fs="dd${secret}"
                 [ -z "$_first_fs" ] && _first_fs="$fs"
                 msg+="🏷 *$(_esc "$label")*\n🔗 [Connect](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\` | 🔑 \`${fs}\`\n\n"
             done < "$SECRETS_FILE"
@@ -4725,14 +4745,10 @@ _process_cmd() {
             ;;
         /mp_traffic|/mp_traffic@*)
             load_tg_settings
-            local cum=$(get_cum_traffic)
-            local ct_in=$(echo "$cum"|awk '{print $1}')
-            local ct_out=$(echo "$cum"|awk '{print $2}')
-            local stats=$(get_stats)
-            local conns=$(echo "$stats"|awk '{print $3}')
+            local _ti _to _tc; read -r _ti _to _tc <<< "$(get_stats)"
             local msg="📊 *Traffic Report*\n\n"
-            msg+="Total: ↓ $(format_bytes $ct_in) ↑ $(format_bytes $ct_out)\n"
-            msg+="Active connections: ${conns}\n\n"
+            msg+="Total: ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})\n"
+            msg+="Active connections: ${_tc}\n\n"
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
                 [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
                 [ "$enabled" != "true" ] && continue
@@ -4920,7 +4936,7 @@ while true; do
 
     [ "$TELEGRAM_ENABLED" != "true" ] && sleep 30 && continue
 
-    # Process bot commands
+    # Process bot commands (long-poll: blocks up to 25s waiting for messages, returns immediately when one arrives)
     process_commands 2>/dev/null
 
     # Health check every 5 minutes
@@ -4942,17 +4958,13 @@ while true; do
     if [ $((_now - _last_report)) -ge $_report_interval ]; then
         _last_report=$_now
         if is_running; then
-            stats=$(get_stats)
-            conns=$(echo "$stats"|awk '{print $3}')
-            up=$(get_uptime)
-            cum=$(get_cum_traffic)
-            ct_in=$(echo "$cum"|awk '{print $1}')
-            ct_out=$(echo "$cum"|awk '{print $2}')
-            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration $up)\n👥 Connections: ${conns}\n📊 ↓ $(format_bytes $ct_in) ↑ $(format_bytes $ct_out)"
+            local _ri _ro _rc; read -r _ri _ro _rc <<< "$(get_stats)"
+            local up=$(get_uptime)
+            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration $up)\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})"
         fi
     fi
 
-    sleep 30
+    sleep 1
 done
 TELEGRAM_SCRIPT
 
