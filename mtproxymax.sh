@@ -3076,8 +3076,8 @@ upstream_list() {
     echo ""
     draw_header "UPSTREAMS"
     echo ""
-    printf "  ${BOLD}%-4s %-18s %-8s %-24s %-8s %-10s${NC}\n" "#" "NAME" "TYPE" "ADDRESS" "WEIGHT" "STATUS"
-    echo -e "  ${DIM}$(_repeat '─' 76)${NC}"
+    printf "  ${BOLD}%-4s %-18s %-8s %-28s %-8s %-10s${NC}\n" "#" "NAME" "TYPE" "ADDRESS" "WEIGHT" "STATUS"
+    echo -e "  ${DIM}$(_repeat '─' 80)${NC}"
 
     local i
     for i in "${!UPSTREAM_NAMES[@]}"; do
@@ -3087,19 +3087,21 @@ upstream_list() {
         local weight="${UPSTREAM_WEIGHTS[$i]}"
         local iface="${UPSTREAM_IFACES[$i]}"
         local enabled="${UPSTREAM_ENABLED[$i]}"
-        local status_icon addr_fmt
 
-        [ -z "$addr" ] && addr_fmt="${DIM}—${NC}" || addr_fmt="$addr"
-        [ -n "$iface" ] && addr_fmt="${addr_fmt} ${DIM}(${iface})${NC}"
+        local addr_plain
+        [ -z "$addr" ] && addr_plain="—" || addr_plain="$addr"
+        [ -n "$iface" ] && addr_plain="${addr_plain} (${iface})"
 
+        local status_str
         if [ "$enabled" = "true" ]; then
-            status_icon="${GREEN}${SYM_OK} active${NC}"
+            status_str="${GREEN}${SYM_OK} active${NC}"
         else
-            status_icon="${RED}${SYM_CROSS} disabled${NC}"
+            status_str="${RED}${SYM_CROSS} disabled${NC}"
         fi
 
-        printf "  %-4s %-18s %-8s %-24b %-8s %-10b\n" \
-            "$((i+1))" "$name" "$type" "$addr_fmt" "$weight" "$status_icon"
+        printf "  %-4s %-18s %-8s %-28s %-8s " \
+            "$((i+1))" "$name" "$type" "$addr_plain" "$weight"
+        echo -e "$status_str"
     done
     echo ""
 }
