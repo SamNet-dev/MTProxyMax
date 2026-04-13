@@ -299,9 +299,9 @@ read_choice() {
     local default="${2:-}"
     # Drain any stale input (e.g., leftover escape-sequence bytes)
     read -rn 256 -t 0.05 _ 2>/dev/null || true
-    echo -en "\n  ${DIM}Enter ${prompt,,}${NC}" >&2
-    [ -n "$default" ] && echo -en " ${DIM}[${default}]${NC}" >&2
-    echo -en "${DIM}:${NC} " >&2
+    echo -en "\n  Enter ${prompt,,}" >&2
+    [ -n "$default" ] && echo -en " [${default}]" >&2
+    echo -en ": " >&2
     local choice
     read -r choice
     [ -z "$choice" ] && choice="$default"
