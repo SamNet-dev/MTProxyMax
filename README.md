@@ -586,8 +586,9 @@ mtproxymax telegram remove              # Remove bot completely
 
 ## 📋 Changelog
 
-### v1.0.5 — Clone, Bulk-Extend, Doctor, Stats & More
+### v1.0.5 — Engine v3.4.0, Clone, Bulk-Extend, Doctor, Stats & More
 
+- Engine v3.4.0 — mask relay timeouts (anti slow-loris), RST-on-close for scanners, single-endpoint DC recovery fix
 - `secret clone <src> <new>` — duplicate a secret with all its limits
 - `secret bulk-extend <days>` — extend all secrets' expiry at once
 - `secret extend <label> <days>` — extend a single secret's expiry
@@ -595,8 +596,9 @@ mtproxymax telegram remove              # Remove bot completely
 - `connections` — live active connections per user
 - `doctor` — comprehensive diagnostics (port, TLS, secrets, disk, Telegram bot)
 - Auto-rotate secrets on domain change, startup warnings for expired/near-expiry secrets
-- QR code shown inline after `secret add` (if qrencode installed)
-- Fedora 41+ Docker install fix (dnf5 `--addrepo`, Fedora repo URL)
+- Telegram bot: instant response (long-polling), single awk pass, no temp files
+- Metrics bound to localhost only ([#65](https://github.com/SamNet-dev/MTProxyMax/issues/65))
+- Fedora 41+ Docker install fix ([#61](https://github.com/SamNet-dev/MTProxyMax/issues/61))
 
 ### v1.0.4 — Replication, Engine v3.3.39, Metrics Dashboard
 

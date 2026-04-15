@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.3.39"
-TELEMT_COMMIT="bc69153"  # Pinned: v3.3.39 — TLS fronting fix, memory hard-bounds, bounded retries
+TELEMT_MIN_VERSION="3.4.0"
+TELEMT_COMMIT="32d5cee"  # Pinned: v3.4.0 — mask timeouts, RST-on-close, single-endpoint DC recovery
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
