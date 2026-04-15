@@ -2912,6 +2912,408 @@ _startup_warnings() {
     done
 }
 
+# Full info for a single secret
+secret_info() {
+    local label="${1:-}"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret info <label>"; return 1; }
+
+    local idx=-1 i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
+    done
+    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+
+    local enabled="${SECRETS_ENABLED[$idx]}"
+    local created="${SECRETS_CREATED[$idx]}"
+    local conns="${SECRETS_MAX_CONNS[$idx]:-0}"
+    local ips="${SECRETS_MAX_IPS[$idx]:-0}"
+    local quota="${SECRETS_QUOTA[$idx]:-0}"
+    local exp="${SECRETS_EXPIRES[$idx]:-0}"
+    local notes="${SECRETS_NOTES[$idx]:-}"
+
+    echo ""
+    draw_header "SECRET: ${label}"
+    echo ""
+    echo -e "  ${BOLD}Status:${NC}      $([ "$enabled" = "true" ] && echo "${GREEN}active${NC}" || echo "${RED}disabled${NC}")"
+    echo -e "  ${BOLD}Created:${NC}     $(date -d "@${created}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$created" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$created")"
+    [ -n "$notes" ] && echo -e "  ${BOLD}Notes:${NC}       ${notes}"
+    echo ""
+    echo -e "  ${BOLD}Limits:${NC}"
+    echo -e "    Connections: $([ "$conns" = "0" ] && echo "unlimited" || echo "$conns")"
+    echo -e "    IPs:         $([ "$ips" = "0" ] && echo "unlimited" || echo "$ips")"
+    echo -e "    Quota:       $([ "$quota" = "0" ] && echo "unlimited" || echo "$(format_bytes "$quota")")"
+    if [ "$exp" != "0" ]; then
+        local exp_epoch; exp_epoch=$(_iso_to_epoch "$exp")
+        local now_epoch; now_epoch=$(date +%s)
+        local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+        if [ $days_left -lt 0 ]; then
+            echo -e "    Expires:     ${RED}expired${NC} (${exp%%T*})"
+        else
+            echo -e "    Expires:     ${exp%%T*} (${days_left}d left)"
+        fi
+    else
+        echo -e "    Expires:     never"
+    fi
+
+    # Live metrics
+    local m; m=$(_fetch_metrics 2>/dev/null) || true
+    if [ -n "$m" ]; then
+        local live; live=$(echo "$m" | awk -v u="$label" '
+            function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
+            /^telemt_user_connections_current\{/ { if(lbl($0,"user")==u) c+=$NF }
+            /^telemt_user_octets_from_client\{/  { if(lbl($0,"user")==u) rx+=$NF }
+            /^telemt_user_octets_to_client\{/    { if(lbl($0,"user")==u) tx+=$NF }
+            /^telemt_user_unique_ips_current\{/  { if(lbl($0,"user")==u) ip+=$NF }
+            END { printf "%.0f|%.0f|%.0f|%.0f", c+0, rx+0, tx+0, ip+0 }
+        ')
+        local lc lrx ltx lip
+        IFS='|' read -r lc lrx ltx lip <<< "$live"
+        echo ""
+        echo -e "  ${BOLD}Live:${NC}"
+        echo -e "    Active conns: ${lc}   IPs: ${lip}"
+        echo -e "    Traffic:      ${SYM_DOWN} $(format_bytes "$lrx")  ${SYM_UP} $(format_bytes "$ltx")"
+    fi
+
+    # Link
+    local full_secret server_ip
+    full_secret=$(build_faketls_secret "${SECRETS_KEYS[$idx]}")
+    server_ip=$(get_public_ip)
+    echo ""
+    echo -e "  ${BOLD}Link:${NC}"
+    echo -e "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}"
+    if command -v qrencode &>/dev/null; then
+        echo ""
+        qrencode -t ANSIUTF8 "tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}" 2>/dev/null | sed 's/^/  /'
+    fi
+    echo ""
+}
+
+# Bulk export all proxy links to file
+secret_generate_links() {
+    local fmt="${1:-txt}" outfile="${2:-}"
+    local server_ip; server_ip=$(get_public_ip)
+    [ -z "$server_ip" ] && { log_error "Cannot detect server IP"; return 1; }
+
+    if [ "$fmt" = "html" ]; then
+        [ -z "$outfile" ] && outfile="/tmp/mtproxymax-links-$(date +%Y%m%d).html"
+        {
+            echo "<html><head><meta charset='utf-8'><title>MTProxyMax Links</title>"
+            echo "<style>body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:20px}a{color:#4fc3f7}.user{margin:20px 0;padding:15px;border:1px solid #333;border-radius:8px}img{margin:10px 0}</style></head><body>"
+            echo "<h1>MTProxyMax Proxy Links</h1><p>Generated: $(date -u '+%Y-%m-%d %H:%M UTC')</p>"
+            local i
+            for i in "${!SECRETS_LABELS[@]}"; do
+                [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+                local label="${SECRETS_LABELS[$i]}"
+                local fs; fs=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
+                local link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${fs}"
+                local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$(printf '%s' "$link" | sed 's/:/%3A/g;s|/|%2F|g;s/?/%3F/g;s/=/%3D/g;s/&/%26/g')"
+                echo "<div class='user'><h2>${label}</h2><a href='${link}'>${link}</a><br><img src='${qr_url}' alt='QR'></div>"
+            done
+            echo "</body></html>"
+        } > "$outfile"
+    else
+        [ -z "$outfile" ] && outfile="/tmp/mtproxymax-links-$(date +%Y%m%d).txt"
+        {
+            echo "# MTProxyMax Proxy Links — $(date -u '+%Y-%m-%d %H:%M UTC')"
+            echo ""
+            local i
+            for i in "${!SECRETS_LABELS[@]}"; do
+                [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+                local label="${SECRETS_LABELS[$i]}"
+                local fs; fs=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
+                echo "${label}:"
+                echo "  tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${fs}"
+                echo ""
+            done
+        } > "$outfile"
+    fi
+    log_success "Links exported to ${outfile}"
+}
+
+# Search secrets by partial label or note content
+secret_search() {
+    local query="$1"
+    [ -z "$query" ] && { log_error "Usage: mtproxymax secret search <query>"; return 1; }
+
+    local found=0 i
+    local query_lower; query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
+    for i in "${!SECRETS_LABELS[@]}"; do
+        local label="${SECRETS_LABELS[$i]}"
+        local notes="${SECRETS_NOTES[$i]:-}"
+        local label_lower; label_lower=$(echo "$label" | tr '[:upper:]' '[:lower:]')
+        local notes_lower; notes_lower=$(echo "$notes" | tr '[:upper:]' '[:lower:]')
+        if [[ "$label_lower" == *"$query_lower"* ]] || [[ "$notes_lower" == *"$query_lower"* ]]; then
+            local icon="🟢"; [ "${SECRETS_ENABLED[$i]}" != "true" ] && icon="🔴"
+            echo -e "  ${icon} ${BOLD}${label}${NC}$([ -n "$notes" ] && echo " — ${DIM}${notes}${NC}")"
+            found=$((found + 1))
+        fi
+    done
+    [ $found -eq 0 ] && log_info "No secrets matching '${query}'"
+    [ $found -gt 0 ] && echo -e "\n  ${DIM}${found} result(s)${NC}"
+}
+
+# Archive a secret (soft-delete, restorable)
+secret_archive() {
+    local label="$1"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret archive <label>"; return 1; }
+
+    local idx=-1 i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
+    done
+    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+
+    # Prevent archiving the last secret
+    [ ${#SECRETS_LABELS[@]} -le 1 ] && { log_error "Cannot archive the last secret"; return 1; }
+
+    local archive_file="${INSTALL_DIR}/secrets_archive.conf"
+    echo "${SECRETS_LABELS[$idx]}|${SECRETS_KEYS[$idx]}|${SECRETS_CREATED[$idx]}|${SECRETS_ENABLED[$idx]}|${SECRETS_MAX_CONNS[$idx]:-0}|${SECRETS_MAX_IPS[$idx]:-0}|${SECRETS_QUOTA[$idx]:-0}|${SECRETS_EXPIRES[$idx]:-0}|${SECRETS_NOTES[$idx]:-}" >> "$archive_file"
+    chmod 600 "$archive_file"
+
+    # Remove from active arrays (inline, no log output)
+    local -a _new=() _nk=() _nc=() _ne=() _nmc=() _nmi=() _nq=() _nex=() _nn=()
+    local j
+    for j in "${!SECRETS_LABELS[@]}"; do
+        [ "$j" -eq "$idx" ] && continue
+        _new+=("${SECRETS_LABELS[$j]}"); _nk+=("${SECRETS_KEYS[$j]}"); _nc+=("${SECRETS_CREATED[$j]}")
+        _ne+=("${SECRETS_ENABLED[$j]}"); _nmc+=("${SECRETS_MAX_CONNS[$j]:-0}"); _nmi+=("${SECRETS_MAX_IPS[$j]:-0}")
+        _nq+=("${SECRETS_QUOTA[$j]:-0}"); _nex+=("${SECRETS_EXPIRES[$j]:-0}"); _nn+=("${SECRETS_NOTES[$j]:-}")
+    done
+    SECRETS_LABELS=("${_new[@]}"); SECRETS_KEYS=("${_nk[@]}"); SECRETS_CREATED=("${_nc[@]}")
+    SECRETS_ENABLED=("${_ne[@]}"); SECRETS_MAX_CONNS=("${_nmc[@]}"); SECRETS_MAX_IPS=("${_nmi[@]}")
+    SECRETS_QUOTA=("${_nq[@]}"); SECRETS_EXPIRES=("${_nex[@]}"); SECRETS_NOTES=("${_nn[@]}")
+    save_secrets
+    reload_proxy_config
+    log_success "Secret '${label}' archived (restore with: mtproxymax secret unarchive ${label})"
+}
+
+# Unarchive (restore) a secret
+secret_unarchive() {
+    local label="$1"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret unarchive <label>"; return 1; }
+
+    local archive_file="${INSTALL_DIR}/secrets_archive.conf"
+    [ -f "$archive_file" ] || { log_error "No archived secrets"; return 1; }
+
+    local line; line=$(grep "^${label}|" "$archive_file" | head -1)
+    [ -z "$line" ] && { log_error "Secret '${label}' not found in archive"; return 1; }
+
+    # Check not already active
+    local i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { log_error "Secret '${label}' already exists"; return 1; }
+    done
+
+    IFS='|' read -r _l key created enabled mc mi q ex notes <<< "$line"
+    SECRETS_LABELS+=("$label")
+    SECRETS_KEYS+=("$key")
+    SECRETS_CREATED+=("$created")
+    SECRETS_ENABLED+=("${enabled:-true}")
+    SECRETS_MAX_CONNS+=("${mc:-0}")
+    SECRETS_MAX_IPS+=("${mi:-0}")
+    SECRETS_QUOTA+=("${q:-0}")
+    SECRETS_EXPIRES+=("${ex:-0}")
+    SECRETS_NOTES+=("${notes:-}")
+
+    # Remove from archive
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${label}|" "$archive_file" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$archive_file"
+
+    save_secrets
+    reload_proxy_config
+    log_success "Secret '${label}' restored from archive"
+}
+
+# List archived secrets
+secret_archive_list() {
+    local archive_file="${INSTALL_DIR}/secrets_archive.conf"
+    if [ ! -f "$archive_file" ] || [ ! -s "$archive_file" ]; then
+        log_info "No archived secrets"
+        return
+    fi
+    echo ""
+    draw_header "ARCHIVED SECRETS"
+    echo ""
+    while IFS='|' read -r label key created enabled _mc _mi _q _ex notes; do
+        [ -z "$label" ] && continue
+        local date_str; date_str=$(date -d "@${created}" '+%Y-%m-%d' 2>/dev/null || echo "$created")
+        echo -e "  ${DIM}${SYM_OK}${NC} ${BOLD}${label}${NC}  created: ${date_str}$([ -n "$notes" ] && echo "  ${DIM}— ${notes}${NC}")"
+    done < "$archive_file"
+    echo ""
+}
+
+# Top N users by traffic or connections
+secret_top() {
+    local field="${1:-traffic}" count="${2:-5}"
+    local m; m=$(_fetch_metrics 2>/dev/null) || { log_error "Metrics unavailable"; return 1; }
+
+    local parsed
+    parsed=$(echo "$m" | awk '
+        function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
+        /^telemt_user_connections_current\{/  { u=lbl($0,"user"); if(u) uc[u]+=$NF }
+        /^telemt_user_octets_from_client\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+        /^telemt_user_octets_to_client\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+        END { for(u in uc) printf "%s|%.0f|%.0f|%.0f\n", u, uc[u]+0, rx[u]+0, tx[u]+0 }
+    ')
+
+    echo ""
+    case "$field" in
+        traffic|t)
+            draw_header "TOP ${count} BY TRAFFIC"
+            echo ""
+            echo "$parsed" | awk -F'|' '{print $0"|"$3+$4}' | sort -t'|' -k5 -rn | head -n "$count" | \
+            while IFS='|' read -r uname conns rx tx total; do
+                printf "  %-16s  ${SYM_DOWN} %-10s  ${SYM_UP} %-10s  (total: %s)\n" "$uname" "$(format_bytes "$rx")" "$(format_bytes "$tx")" "$(format_bytes "$total")"
+            done
+            ;;
+        conns|c)
+            draw_header "TOP ${count} BY CONNECTIONS"
+            echo ""
+            echo "$parsed" | sort -t'|' -k2 -rn | head -n "$count" | \
+            while IFS='|' read -r uname conns rx tx; do
+                printf "  %-16s  %s active connections\n" "$uname" "$conns"
+            done
+            ;;
+    esac
+    echo ""
+}
+
+# Show current engine config
+show_config() {
+    local config="${CONFIG_DIR}/config.toml"
+    if [ -f "$config" ]; then
+        echo ""
+        draw_header "ENGINE CONFIG"
+        echo ""
+        sed 's/^/  /' "$config"
+        echo ""
+    else
+        log_error "Config file not found — is the proxy installed?"
+    fi
+}
+
+# One-line scriptable uptime output
+show_uptime_oneliner() {
+    if ! is_proxy_running; then
+        echo "stopped"
+        return
+    fi
+    local up_secs; up_secs=$(get_proxy_uptime 2>/dev/null) || up_secs=0
+    local t_in t_out conns
+    read -r t_in t_out conns <<< "$(get_cumulative_proxy_stats 2>/dev/null)" || true
+    echo "$(format_duration "$up_secs") | ${conns:-0} conns | ${SYM_DOWN} $(format_bytes "${t_in:-0}") ${SYM_UP} $(format_bytes "${t_out:-0}")"
+}
+
+# Send custom notification via Telegram
+send_notify() {
+    local msg="$1"
+    [ -z "$msg" ] && { log_error "Usage: mtproxymax notify <message>"; return 1; }
+    [ "$TELEGRAM_ENABLED" != "true" ] && { log_error "Telegram bot is not configured"; return 1; }
+    [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] && { log_error "Telegram bot token or chat ID not set"; return 1; }
+    if telegram_send_message "📢 ${msg}"; then
+        log_success "Notification sent"
+    else
+        log_error "Failed to send notification"
+    fi
+}
+
+# Check if proxy port is reachable from outside
+port_check() {
+    local ip; ip=$(get_public_ip)
+    [ -z "$ip" ] && { log_error "Cannot detect public IP"; return 1; }
+
+    echo ""
+    echo -e "  ${BOLD}Testing port ${PROXY_PORT} on ${ip}...${NC}"
+
+    # Test 1: local socket check
+    if ! is_port_available "$PROXY_PORT" 2>/dev/null; then
+        echo -e "  ${GREEN}${SYM_CHECK}${NC} Port ${PROXY_PORT} is listening locally"
+    else
+        echo -e "  ${RED}${SYM_CROSS}${NC} Port ${PROXY_PORT} is NOT listening"
+        return 1
+    fi
+
+    # Test 2: external reachability via TLS handshake to self
+    local result
+    result=$(curl -sv --connect-timeout 5 --max-time 10 "https://${ip}:${PROXY_PORT}" 2>&1) || true
+    if echo "$result" | grep -q "Connected to.*${PROXY_PORT}"; then
+        echo -e "  ${GREEN}${SYM_CHECK}${NC} Port ${PROXY_PORT} is reachable from outside"
+    else
+        echo -e "  ${RED}${SYM_CROSS}${NC} Port ${PROXY_PORT} is NOT reachable from outside"
+        echo -e "  ${DIM}Check: firewall rules, cloud security groups, ISP blocking${NC}"
+    fi
+    echo ""
+}
+
+# Config profiles — save/load/list/delete
+PROFILES_DIR="${INSTALL_DIR}/profiles"
+
+profile_save() {
+    local name="$1"
+    [ -z "$name" ] && { log_error "Usage: mtproxymax profile save <name>"; return 1; }
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Profile name must be alphanumeric"; return 1; }
+
+    local dir="${PROFILES_DIR}/${name}"
+    mkdir -p "$dir"
+    cp "$SETTINGS_FILE" "${dir}/settings.conf" 2>/dev/null || true
+    cp "$SECRETS_FILE" "${dir}/secrets.conf" 2>/dev/null || true
+    cp "$UPSTREAMS_FILE" "${dir}/upstreams.conf" 2>/dev/null || true
+    echo "$(date +%s)" > "${dir}/.timestamp"
+    log_success "Profile '${name}' saved"
+}
+
+profile_load() {
+    local name="$1"
+    [ -z "$name" ] && { log_error "Usage: mtproxymax profile load <name>"; return 1; }
+
+    local dir="${PROFILES_DIR}/${name}"
+    [ -d "$dir" ] || { log_error "Profile '${name}' not found"; return 1; }
+
+    [ -f "${dir}/settings.conf" ] && cp "${dir}/settings.conf" "$SETTINGS_FILE"
+    [ -f "${dir}/secrets.conf" ] && cp "${dir}/secrets.conf" "$SECRETS_FILE"
+    [ -f "${dir}/upstreams.conf" ] && cp "${dir}/upstreams.conf" "$UPSTREAMS_FILE"
+
+    load_settings
+    load_secrets
+    load_upstreams 2>/dev/null || true
+
+    if is_proxy_running; then
+        restart_proxy_container
+    else
+        reload_proxy_config
+    fi
+
+    log_success "Profile '${name}' loaded and applied"
+}
+
+profile_list() {
+    [ ! -d "$PROFILES_DIR" ] && { log_info "No saved profiles"; return; }
+    local dirs; dirs=$(ls -1 "$PROFILES_DIR" 2>/dev/null)
+    [ -z "$dirs" ] && { log_info "No saved profiles"; return; }
+
+    echo ""
+    draw_header "PROFILES"
+    echo ""
+    while read -r name; do
+        [ -z "$name" ] && continue
+        local ts="" date_str="unknown"
+        [ -f "${PROFILES_DIR}/${name}/.timestamp" ] && ts=$(<"${PROFILES_DIR}/${name}/.timestamp")
+        [ -n "$ts" ] && date_str=$(date -d "@${ts}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$ts")
+        echo -e "  ${BOLD}${name}${NC}  ${DIM}saved: ${date_str}${NC}"
+    done <<< "$dirs"
+    echo ""
+}
+
+profile_delete() {
+    local name="$1"
+    [ -z "$name" ] && { log_error "Usage: mtproxymax profile delete <name>"; return 1; }
+    local dir="${PROFILES_DIR}/${name}"
+    [ -d "$dir" ] || { log_error "Profile '${name}' not found"; return 1; }
+    rm -rf "$dir"
+    log_success "Profile '${name}' deleted"
+}
+
 # ── Section 8b: Upstream Management ──────────────────────────
 
 # Add a new upstream
@@ -6509,6 +6911,13 @@ show_cli_help() {
     echo -e "    ${GREEN}secret extend${NC} <label> <days>  Extend expiry by N days"
     echo -e "    ${GREEN}secret stats${NC}                  Compact per-user stats overview"
     echo -e "    ${GREEN}secret sort${NC} [traffic|conns|date|name]  Sort secrets list"
+    echo -e "    ${GREEN}secret info${NC} <label>          Full detail view of a secret"
+    echo -e "    ${GREEN}secret search${NC} <query>        Search secrets by label or notes"
+    echo -e "    ${GREEN}secret top${NC} [traffic|conns] [N]  Top N users (default: 5)"
+    echo -e "    ${GREEN}secret generate-links${NC} [txt|html]  Export all links to file"
+    echo -e "    ${GREEN}secret archive${NC} <label>       Soft-delete (restorable)"
+    echo -e "    ${GREEN}secret unarchive${NC} <label>     Restore archived secret"
+    echo -e "    ${GREEN}secret archives${NC}              List archived secrets"
     echo -e "    ${DIM}Tip: add/remove support --no-restart flag for scripting${NC}"
     echo ""
     echo -e "  ${BOLD}Upstream Routing:${NC}"
@@ -6533,6 +6942,11 @@ show_cli_help() {
     echo -e "    ${GREEN}connections${NC}             Show live active connections per user"
     echo -e "    ${GREEN}metrics${NC}                 Show live engine metrics (connections, upstream, users, ME)"
     echo -e "    ${GREEN}doctor${NC}                  Comprehensive diagnostics (port, TLS, secrets, disk, bot)"
+    echo -e "    ${GREEN}uptime${NC}                  One-line status (for scripts/monitoring)"
+    echo -e "    ${GREEN}config${NC}                  Show current engine config"
+    echo -e "    ${GREEN}notify${NC} <message>        Send custom Telegram notification"
+    echo -e "    ${GREEN}port-check${NC}              Test if proxy port is reachable from outside"
+    echo -e "    ${GREEN}profile${NC} save|load|list|delete <name>  Config profiles"
     echo -e "    ${GREEN}metrics live${NC} [seconds]  Auto-refresh metrics dashboard (default: 5s)"
     echo -e "    ${GREEN}logs${NC}                    Stream container logs"
     echo -e "    ${GREEN}health${NC}                  Run health diagnostics"
@@ -6996,6 +7410,32 @@ cli_main() {
                     check_root
                     secret_sort "${1:-traffic}"
                     ;;
+                info)
+                    secret_info "$1"
+                    ;;
+                generate-links)
+                    secret_generate_links "${1:-txt}" "${2:-}"
+                    ;;
+                search)
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax secret search <query>"; return 1; }
+                    secret_search "$1"
+                    ;;
+                archive)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax secret archive <label>"; return 1; }
+                    secret_archive "$1"
+                    ;;
+                unarchive)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax secret unarchive <label>"; return 1; }
+                    secret_unarchive "$1"
+                    ;;
+                archives)
+                    secret_archive_list
+                    ;;
+                top)
+                    secret_top "${1:-traffic}" "${2:-5}"
+                    ;;
                 *)       log_error "Unknown: secret ${subcmd}"; show_cli_help; return 1 ;;
             esac
             ;;
@@ -7301,6 +7741,41 @@ cli_main() {
             load_settings
             load_secrets
             show_connections
+            ;;
+
+        config)
+            load_settings
+            show_config
+            ;;
+
+        uptime)
+            load_settings
+            load_secrets
+            show_uptime_oneliner
+            ;;
+
+        notify)
+            load_settings
+            send_notify "$*"
+            ;;
+
+        port-check)
+            load_settings
+            port_check
+            ;;
+
+        profile)
+            load_settings
+            load_secrets
+            local subcmd="${1:-list}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                save)   check_root; profile_save "$1" ;;
+                load)   check_root; profile_load "$1" ;;
+                list)   profile_list ;;
+                delete) check_root; profile_delete "$1" ;;
+                *)      log_error "Usage: mtproxymax profile save|load|list|delete <name>"; return 1 ;;
+            esac
             ;;
 
         metrics)
@@ -7884,6 +8359,11 @@ show_secrets_menu() {
         echo -e "  ${DIM}[s]${NC} User stats overview"
         echo -e "  ${DIM}[t]${NC} Sort secrets"
         echo -e "  ${DIM}[i]${NC} Export / Import"
+        echo -e "  ${DIM}[f]${NC} Full secret info"
+        echo -e "  ${DIM}[/]${NC} Search secrets"
+        echo -e "  ${DIM}[p]${NC} Top users"
+        echo -e "  ${DIM}[g]${NC} Generate links file"
+        echo -e "  ${DIM}[a]${NC} Archive / Unarchive"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8059,6 +8539,61 @@ show_secrets_menu() {
                 esac
                 press_any_key
                 ;;
+            f|F)
+                echo -en "  ${BOLD}Label or #:${NC} "
+                local info_label; read -r info_label
+                if [[ "$info_label" =~ ^[0-9]+$ ]] && [ "$info_label" -ge 1 ] && [ "$info_label" -le "${#SECRETS_LABELS[@]}" ]; then
+                    info_label="${SECRETS_LABELS[$((info_label - 1))]}"
+                fi
+                [ -n "$info_label" ] && { secret_info "$info_label" || true; }
+                press_any_key
+                ;;
+            /)
+                echo -en "  ${BOLD}Search:${NC} "
+                local sq; read -r sq
+                [ -n "$sq" ] && { secret_search "$sq" || true; }
+                press_any_key
+                ;;
+            p|P)
+                echo -e "  ${DIM}[1] By traffic  [2] By connections${NC}"
+                local tc; tc=$(read_choice "Choice" "1")
+                case "$tc" in
+                    1) secret_top traffic 5 ;;
+                    2) secret_top conns 5 ;;
+                esac
+                press_any_key
+                ;;
+            g|G)
+                echo -e "  ${DIM}[1] Text file  [2] HTML with QR codes${NC}"
+                local gc; gc=$(read_choice "Choice" "1")
+                case "$gc" in
+                    1) secret_generate_links txt ;;
+                    2) secret_generate_links html ;;
+                esac
+                press_any_key
+                ;;
+            a|A)
+                echo -e "  ${DIM}[1] Archive a secret  [2] Unarchive  [3] List archived${NC}"
+                local ac; ac=$(read_choice "Choice" "0")
+                case "$ac" in
+                    1)
+                        echo -en "  ${BOLD}Label or # to archive:${NC} "
+                        local al; read -r al
+                        if [[ "$al" =~ ^[0-9]+$ ]] && [ "$al" -ge 1 ] && [ "$al" -le "${#SECRETS_LABELS[@]}" ]; then
+                            al="${SECRETS_LABELS[$((al - 1))]}"
+                        fi
+                        [ -n "$al" ] && { secret_archive "$al" || true; }
+                        ;;
+                    2)
+                        secret_archive_list
+                        echo -en "  ${BOLD}Label to restore:${NC} "
+                        local ul; read -r ul
+                        [ -n "$ul" ] && { secret_unarchive "$ul" || true; }
+                        ;;
+                    3) secret_archive_list ;;
+                esac
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac
@@ -8125,6 +8660,7 @@ show_telegram_menu() {
         echo -e "  ${DIM}[3]${NC} Send proxy links"
         echo -e "  ${DIM}[4]${NC} Toggle notifications"
         echo -e "  ${DIM}[5]${NC} Toggle alerts"
+        echo -e "  ${DIM}[6]${NC} Send custom notification"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8160,6 +8696,12 @@ show_telegram_menu() {
                 log_success "Alerts: ${TELEGRAM_ALERTS_ENABLED}"
                 press_any_key
                 ;;
+            6)
+                echo -en "  ${BOLD}Message:${NC} "
+                local nmsg; read -r nmsg
+                [ -n "$nmsg" ] && { send_notify "$nmsg" || true; }
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac
@@ -8192,6 +8734,9 @@ show_settings_menu() {
         echo -e "  ${DIM}[7]${NC} Toggle auto-update"
         echo -e "  ${DIM}[8]${NC} Toggle PROXY protocol"
         echo -e "  ${DIM}[9]${NC} Engine Management"
+        echo -e "  ${DIM}[v]${NC} View engine config"
+        echo -e "  ${DIM}[k]${NC} Port reachability check"
+        echo -e "  ${DIM}[r]${NC} Config profiles"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8393,6 +8938,33 @@ show_settings_menu() {
                         [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
                     fi
                 fi
+                press_any_key
+                ;;
+            v|V) show_config; press_any_key ;;
+            k|K) port_check; press_any_key ;;
+            r|R)
+                echo -e "  ${DIM}[1] Save current config  [2] Load profile  [3] List  [4] Delete${NC}"
+                local pc; pc=$(read_choice "Choice" "3")
+                case "$pc" in
+                    1)
+                        echo -en "  ${BOLD}Profile name:${NC} "
+                        local pn; read -r pn
+                        [ -n "$pn" ] && { profile_save "$pn" || true; }
+                        ;;
+                    2)
+                        profile_list
+                        echo -en "  ${BOLD}Profile name to load:${NC} "
+                        local pn; read -r pn
+                        [ -n "$pn" ] && { profile_load "$pn" || true; }
+                        ;;
+                    3) profile_list ;;
+                    4)
+                        profile_list
+                        echo -en "  ${BOLD}Profile name to delete:${NC} "
+                        local pn; read -r pn
+                        [ -n "$pn" ] && { profile_delete "$pn" || true; }
+                        ;;
+                esac
                 press_any_key
                 ;;
             0|"") return ;;
