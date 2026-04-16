@@ -4365,11 +4365,11 @@ self_update() {
         return 1
     fi
 
-    # Regenerate + restart Telegram bot service if script was updated
-    if [ "$_script_updated" = true ] && [ "${TELEGRAM_ENABLED:-}" = "true" ]; then
-        log_info "Regenerating Telegram bot service..."
+    # Always regenerate Telegram bot service script to pick up any changes
+    if [ "${TELEGRAM_ENABLED:-}" = "true" ]; then
         telegram_generate_service_script
-        if command -v systemctl &>/dev/null; then
+        if [ "$_script_updated" = true ] && command -v systemctl &>/dev/null; then
+            log_info "Restarting Telegram bot service..."
             systemctl restart mtproxymax-telegram.service 2>/dev/null \
                 && log_success "Telegram bot service restarted" \
                 || log_warn "Telegram restart failed — run: systemctl restart mtproxymax-telegram.service"
