@@ -5367,9 +5367,10 @@ while true; do
     if [ $((_now - _last_report)) -ge $_report_interval ]; then
         _last_report=$_now
         if is_running; then
-            local _ri _ro _rc; read -r _ri _ro _rc <<< "$(get_stats)"
-            local up=$(get_uptime)
-            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration $up)\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})"
+            _ri=0 _ro=0 _rc=0
+            read -r _ri _ro _rc <<< "$(get_stats)" || true
+            _up=$(get_uptime)
+            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration ${_up:-0})\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})"
         fi
     fi
 
