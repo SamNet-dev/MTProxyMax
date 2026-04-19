@@ -608,9 +608,9 @@ mtproxymax telegram remove              # Remove bot completely
 - Fix bot uptime always 0m ([#70](https://github.com/SamNet-dev/MTProxyMax/issues/70))
 - Telegram bot: instant response, no temp files ([#62](https://github.com/SamNet-dev/MTProxyMax/issues/62))
 
-### v1.0.5 — Engine v3.4.3, Clone, Bulk-Extend, Doctor, Stats & More
+### v1.0.5 — Engine v3.4.4, Clone, Bulk-Extend, Doctor, Stats & More
 
-- Engine v3.4.3 — improved FakeTLS fidelity (captured TLS profiles), ServerHello fixes, traffic control, Docker healthcheck
+- Engine v3.4.4 — weighted fairness scheduler, 3-level pressure model, configurable Telegram infrastructure URLs, FakeTLS fidelity improvements
 - `secret clone <src> <new>` — duplicate a secret with all its limits
 - `secret bulk-extend <days>` — extend all secrets' expiry at once
 - `secret extend <label> <days>` — extend a single secret's expiry
