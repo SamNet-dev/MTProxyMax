@@ -8801,6 +8801,7 @@ show_settings_menu() {
         echo -e "  ${DIM}[v]${NC} View engine config"
         echo -e "  ${DIM}[k]${NC} Port reachability check"
         echo -e "  ${DIM}[r]${NC} Config profiles"
+        echo -e "  ${DIM}[u]${NC} Custom Telegram URLs (restricted regions)"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -9029,6 +9030,68 @@ show_settings_menu() {
                         [ -n "$pn" ] && { profile_delete "$pn" || true; }
                         ;;
                 esac
+                press_any_key
+                ;;
+            u|U)
+                echo ""
+                echo -e "  ${BOLD}Custom Telegram Infrastructure URLs${NC}"
+                echo -e "  ${DIM}Use this if core.telegram.org is blocked in your region.${NC}"
+                echo -e "  ${DIM}Point these to a mirror/proxy that serves the same files.${NC}"
+                echo ""
+                echo -e "  proxy_secret_url:    ${PROXY_SECRET_URL:-${DIM}(default)${NC}}"
+                echo -e "  proxy_config_v4_url: ${PROXY_CONFIG_V4_URL:-${DIM}(default)${NC}}"
+                echo -e "  proxy_config_v6_url: ${PROXY_CONFIG_V6_URL:-${DIM}(default)${NC}}"
+                echo ""
+                echo -e "  ${DIM}[1] Set getProxySecret URL${NC}"
+                echo -e "  ${DIM}[2] Set getProxyConfig (v4) URL${NC}"
+                echo -e "  ${DIM}[3] Set getProxyConfigV6 URL${NC}"
+                echo -e "  ${DIM}[4] Clear all (back to defaults)${NC}"
+                echo -e "  ${DIM}[0] Back${NC}"
+                local uc; uc=$(read_choice "Choice" "0")
+                local _url _field=""
+                case "$uc" in
+                    1) _field="secret" ;;
+                    2) _field="config-v4" ;;
+                    3) _field="config-v6" ;;
+                    4)
+                        PROXY_SECRET_URL=""; PROXY_CONFIG_V4_URL=""; PROXY_CONFIG_V6_URL=""
+                        save_settings
+                        log_success "Telegram URLs reset to defaults"
+                        if is_proxy_running; then
+                            echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
+                            local r; read -r r
+                            [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        fi
+                        ;;
+                esac
+                if [ -n "$_field" ]; then
+                    echo -en "  ${BOLD}URL (empty to clear):${NC} "
+                    read -r _url
+                    if [ -z "$_url" ]; then
+                        case "$_field" in
+                            secret)    PROXY_SECRET_URL="" ;;
+                            config-v4) PROXY_CONFIG_V4_URL="" ;;
+                            config-v6) PROXY_CONFIG_V6_URL="" ;;
+                        esac
+                        save_settings
+                        log_success "${_field} URL cleared"
+                    elif [[ "$_url" =~ ^https?:// ]]; then
+                        case "$_field" in
+                            secret)    PROXY_SECRET_URL="$_url" ;;
+                            config-v4) PROXY_CONFIG_V4_URL="$_url" ;;
+                            config-v6) PROXY_CONFIG_V6_URL="$_url" ;;
+                        esac
+                        save_settings
+                        log_success "${_field} URL set"
+                        if is_proxy_running; then
+                            echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
+                            local r; read -r r
+                            [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        fi
+                    else
+                        log_error "URL must start with http:// or https://"
+                    fi
+                fi
                 press_any_key
                 ;;
             0|"") return ;;
