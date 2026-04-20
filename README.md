@@ -335,6 +335,76 @@ Engine updates are delivered through `mtproxymax update`. Pre-built multi-arch D
 
 ---
 
+### 🌐 Custom Telegram URLs (Restricted Regions)
+
+For regions where `core.telegram.org` is blocked, the engine can fetch proxy configuration from a custom mirror:
+
+```bash
+mtproxymax tg-urls                                                    # Show current URLs
+mtproxymax tg-urls set secret https://mirror.example.com/getProxySecret
+mtproxymax tg-urls set config-v4 https://mirror.example.com/getProxyConfig
+mtproxymax tg-urls set config-v6 https://mirror.example.com/getProxyConfigV6
+mtproxymax tg-urls clear                                              # Reset to defaults
+```
+
+Also available in **TUI: Settings > [u] Custom Telegram URLs**.
+
+---
+
+### 🩺 Doctor & Diagnostics
+
+Single command that checks everything — Docker, engine, port, metrics, TLS cert, secrets, disk space, Telegram bot:
+
+```bash
+mtproxymax doctor
+```
+
+More targeted checks:
+
+```bash
+mtproxymax port-check     # Test if port is reachable from outside
+mtproxymax connections    # Live active connections per user
+mtproxymax uptime         # One-line status (scriptable)
+mtproxymax config         # Display current engine config
+```
+
+---
+
+### 💾 Config Profiles
+
+Save and restore entire configurations (settings + secrets + upstreams) as named snapshots. Useful for switching between stealth/debug/production setups:
+
+```bash
+mtproxymax profile save stealth       # Snapshot current config
+mtproxymax profile list               # List saved profiles
+mtproxymax profile load stealth       # Restore + auto-restart
+mtproxymax profile delete stealth
+```
+
+---
+
+### 📦 Bulk Operations & Search
+
+Managing many users? These commands scale to hundreds of secrets:
+
+```bash
+mtproxymax secret info <label>              # Full view of one user
+mtproxymax secret search <query>            # Find by label or notes
+mtproxymax secret top [traffic|conns]       # Top 5 users right now
+mtproxymax secret sort [traffic|conns|date|name]  # Reorder list
+mtproxymax secret stats                     # Compact overview: traffic/quota/expiry %
+mtproxymax secret generate-links [txt|html] # Bulk export all links (HTML includes QR codes)
+mtproxymax secret export > backup.csv       # Export to CSV
+mtproxymax secret import backup.csv         # Import from CSV
+mtproxymax secret archive <label>           # Soft-delete (restorable)
+mtproxymax secret unarchive <label>         # Restore from archive
+mtproxymax secret clone <src> <new>         # Duplicate with all limits
+mtproxymax secret bulk-extend <days>        # Extend all expiry dates
+mtproxymax secret disable-expired           # Auto-disable all expired secrets
+```
+
+---
+
 ## 📊 Comparison
 
 ### MTProxyMax vs Other Solutions
@@ -459,14 +529,33 @@ mtproxymax menu                 # Open interactive TUI
 mtproxymax secret add <label>           # Add user
 mtproxymax secret remove <label>        # Remove user
 mtproxymax secret list                  # List all users
+mtproxymax secret info <label>          # Full detail view (limits, traffic, link, QR)
+mtproxymax secret search <query>        # Find secrets by label or notes
 mtproxymax secret rotate <label>        # New key, same label
+mtproxymax secret clone <src> <new>     # Duplicate with all limits
+mtproxymax secret rename <old> <new>    # Rename a secret
 mtproxymax secret enable <label>        # Re-enable user
 mtproxymax secret disable <label>       # Temporarily disable
+mtproxymax secret disable-expired       # Disable all expired secrets
 mtproxymax secret link [label]          # Show proxy link
 mtproxymax secret qr [label]            # Show QR code
+mtproxymax secret generate-links [txt|html]  # Bulk export all links
+mtproxymax secret note <label> [text]   # Attach notes/description
 mtproxymax secret setlimit <label> <type> <value>  # Set individual limit
 mtproxymax secret setlimits <label> <conns> <ips> <quota> [expires]  # Set all limits
+mtproxymax secret extend <label> <days> # Extend one secret's expiry
+mtproxymax secret bulk-extend <days>    # Extend all secrets' expiry
 mtproxymax secret reset-traffic <label|all>  # Reset traffic counters
+mtproxymax secret sort [traffic|conns|date|name]  # Reorder the list
+mtproxymax secret top [traffic|conns] [N]  # Top N users (default 5)
+mtproxymax secret stats                 # Compact per-user overview
+mtproxymax secret archive <label>       # Soft-delete (restorable)
+mtproxymax secret unarchive <label>     # Restore from archive
+mtproxymax secret archives              # List archived secrets
+mtproxymax secret export > file.csv     # Export to CSV
+mtproxymax secret import file.csv       # Import from CSV
+mtproxymax secret add-batch <l1> <l2> ...     # Add many at once
+mtproxymax secret remove-batch <l1> <l2> ...  # Remove many at once
 ```
 
 </details>
@@ -478,8 +567,23 @@ mtproxymax secret reset-traffic <label|all>  # Reset traffic counters
 mtproxymax port [get|<number>]          # Get/set proxy port
 mtproxymax ip [get|auto|<address>]      # Get/set custom IP for proxy links
 mtproxymax domain [get|clear|<host>]    # Get/set FakeTLS domain
+mtproxymax mask-backend [host:port]     # Set mask backend for non-proxy traffic
+mtproxymax tg-urls [get|set <field> <url>|clear]  # Custom Telegram infra URLs
 mtproxymax adtag set <hex>              # Set ad-tag
 mtproxymax adtag remove                 # Remove ad-tag
+mtproxymax config                       # Show current engine config
+```
+
+</details>
+
+<details>
+<summary><b>Profiles</b></summary>
+
+```bash
+mtproxymax profile save <name>          # Snapshot current config
+mtproxymax profile load <name>          # Restore profile (auto-restarts)
+mtproxymax profile list                 # List all saved profiles
+mtproxymax profile delete <name>        # Delete a profile
 ```
 
 </details>
@@ -526,10 +630,24 @@ mtproxymax sni-policy [mask|drop]      # Unknown SNI action (mask=permissive, dr
 
 ```bash
 mtproxymax traffic                      # Per-user traffic breakdown
+mtproxymax connections                  # Live active connections per user
 mtproxymax metrics                      # Engine metrics dashboard
 mtproxymax metrics live [seconds]       # Auto-refresh metrics (default: 5s)
 mtproxymax logs                         # Stream live logs
-mtproxymax health                       # Run diagnostics
+mtproxymax health                       # Quick health check
+mtproxymax doctor                       # Comprehensive diagnostics (port, TLS, secrets, disk, bot)
+mtproxymax port-check                   # Test if proxy port is reachable from outside
+mtproxymax uptime                       # One-line status (scriptable)
+mtproxymax status [--json]              # Proxy status (JSON for monitoring integrations)
+```
+
+</details>
+
+<details>
+<summary><b>Notifications</b></summary>
+
+```bash
+mtproxymax notify <message>             # Send custom message via Telegram bot
 ```
 
 </details>
@@ -579,8 +697,11 @@ mtproxymax telegram remove              # Remove bot completely
 |------|---------|
 | `/opt/mtproxymax/settings.conf` | Proxy settings (port, domain, limits) |
 | `/opt/mtproxymax/secrets.conf` | User keys, limits, expiry dates |
+| `/opt/mtproxymax/secrets_archive.conf` | Archived secrets (soft-deleted) |
 | `/opt/mtproxymax/upstreams.conf` | Upstream routing rules |
+| `/opt/mtproxymax/profiles/` | Saved config profiles (named snapshots) |
 | `/opt/mtproxymax/mtproxy/config.toml` | Generated telemt engine config |
+| `/opt/mtproxymax/backups/` | Automatic backups before updates |
 
 ---
 
