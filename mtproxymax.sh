@@ -117,6 +117,12 @@ MASKING_ENABLED="true"
 MASKING_HOST=""
 MASKING_PORT=443
 UNKNOWN_SNI_ACTION="mask"
+
+# Custom Telegram infrastructure URLs (for restricted regions where core.telegram.org is blocked)
+PROXY_SECRET_URL=""
+PROXY_CONFIG_V4_URL=""
+PROXY_CONFIG_V6_URL=""
+
 TELEGRAM_ENABLED="false"
 TELEGRAM_BOT_TOKEN=""
 TELEGRAM_CHAT_ID=""
@@ -604,6 +610,11 @@ MASKING_HOST='${MASKING_HOST}'
 MASKING_PORT='${MASKING_PORT}'
 UNKNOWN_SNI_ACTION='${UNKNOWN_SNI_ACTION}'
 
+# Custom Telegram infrastructure URLs (for restricted regions)
+PROXY_SECRET_URL='${PROXY_SECRET_URL}'
+PROXY_CONFIG_V4_URL='${PROXY_CONFIG_V4_URL}'
+PROXY_CONFIG_V6_URL='${PROXY_CONFIG_V6_URL}'
+
 # Telegram Integration
 TELEGRAM_ENABLED='${TELEGRAM_ENABLED}'
 TELEGRAM_BOT_TOKEN='${TELEGRAM_BOT_TOKEN}'
@@ -657,6 +668,7 @@ load_settings() {
             PROXY_PORT|PROXY_METRICS_PORT|PROXY_DOMAIN|PROXY_CONCURRENCY|\
             PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|FAKE_CERT_LEN|PROXY_PROTOCOL|PROXY_PROTOCOL_TRUSTED_CIDRS|AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|\
             MASKING_ENABLED|MASKING_HOST|MASKING_PORT|UNKNOWN_SNI_ACTION|\
+            PROXY_SECRET_URL|PROXY_CONFIG_V4_URL|PROXY_CONFIG_V6_URL|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
             AUTO_UPDATE_ENABLED|\
@@ -1108,6 +1120,9 @@ fast_mode = true
 use_middle_proxy = true
 log_level = "normal"
 $([ -n "$ad_tag" ] && echo "ad_tag = \"$ad_tag\"" || echo "# ad_tag = \"\"  # Get from @MTProxyBot")
+$([ -n "${PROXY_SECRET_URL:-}" ] && echo "proxy_secret_url = \"${PROXY_SECRET_URL}\"")
+$([ -n "${PROXY_CONFIG_V4_URL:-}" ] && echo "proxy_config_v4_url = \"${PROXY_CONFIG_V4_URL}\"")
+$([ -n "${PROXY_CONFIG_V6_URL:-}" ] && echo "proxy_config_v6_url = \"${PROXY_CONFIG_V6_URL}\"")
 
 [general.modes]
 classic = false
@@ -6939,6 +6954,7 @@ show_cli_help() {
     echo -e "    ${GREEN}ip${NC} [get|auto|<address>]   Show, reset, or set custom IP/domain for links"
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
+    echo -e "    ${GREEN}tg-urls${NC} [get|set <field> <url>|clear]  Custom Telegram infrastructure URLs (restricted regions)"
     echo -e "    ${GREEN}adtag${NC} [set <hex>|remove|view] Manage ad-tag"
     echo -e "    ${GREEN}geoblock${NC} [add|remove|list|clear] Manage geo-blocking"
     echo -e "    ${GREEN}sni-policy${NC} [mask|drop]       Unknown SNI action (mask=permissive, drop=strict)"
@@ -7596,6 +7612,48 @@ cli_main() {
                 load_secrets
                 restart_proxy_container
             fi
+            ;;
+
+        tg-urls)
+            load_settings
+            load_secrets
+            local sub="${1:-get}"; shift 2>/dev/null || true
+            case "$sub" in
+                get|show|"")
+                    echo -e "  ${BOLD}Telegram infrastructure URLs${NC}"
+                    echo -e "  ${DIM}Empty = use Telegram's defaults (core.telegram.org)${NC}"
+                    echo ""
+                    echo -e "  proxy_secret_url:    ${PROXY_SECRET_URL:-${DIM}(default)${NC}}"
+                    echo -e "  proxy_config_v4_url: ${PROXY_CONFIG_V4_URL:-${DIM}(default)${NC}}"
+                    echo -e "  proxy_config_v6_url: ${PROXY_CONFIG_V6_URL:-${DIM}(default)${NC}}"
+                    ;;
+                clear|reset)
+                    check_root
+                    PROXY_SECRET_URL=""; PROXY_CONFIG_V4_URL=""; PROXY_CONFIG_V6_URL=""
+                    save_settings
+                    log_success "Telegram URLs reset to defaults"
+                    if is_proxy_running; then restart_proxy_container; fi
+                    ;;
+                set)
+                    check_root
+                    local _field="$1" _val="$2"
+                    [ -z "$_field" ] || [ -z "$_val" ] && { log_error "Usage: mtproxymax tg-urls set <secret|config-v4|config-v6> <url>"; return 1; }
+                    [[ "$_val" =~ ^https?:// ]] || { log_error "URL must start with http:// or https://"; return 1; }
+                    case "$_field" in
+                        secret)     PROXY_SECRET_URL="$_val" ;;
+                        config-v4)  PROXY_CONFIG_V4_URL="$_val" ;;
+                        config-v6)  PROXY_CONFIG_V6_URL="$_val" ;;
+                        *) log_error "Field must be: secret | config-v4 | config-v6"; return 1 ;;
+                    esac
+                    save_settings
+                    log_success "Telegram URL set: ${_field} = ${_val}"
+                    if is_proxy_running; then restart_proxy_container; fi
+                    ;;
+                *)
+                    log_error "Usage: mtproxymax tg-urls [get|set <field> <url>|clear]"
+                    return 1
+                    ;;
+            esac
             ;;
 
         adtag)
