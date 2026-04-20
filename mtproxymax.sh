@@ -4327,6 +4327,11 @@ self_update() {
                 "https://api.github.com/repos/${GITHUB_REPO}/commits/main" \
                 -H "Accept: application/vnd.github.sha" 2>/dev/null) || true
             [ -n "$_new_sha" ] && [ ${#_new_sha} -ge 40 ] && echo "${_new_sha:0:40}" > "$_UPDATE_SHA_FILE" 2>/dev/null || true
+            # Detect stale in-memory version (file on disk is newer than running process)
+            if [ -n "$_new_ver" ] && [ "$_new_ver" != "$VERSION" ]; then
+                log_warn "Running v${VERSION} in memory but disk has v${_new_ver} — restart required"
+                _SCRIPT_NEEDS_REEXEC=true
+            fi
         else
             log_info "Update found: v${_new_ver:-?} (installed: v${VERSION})"
             echo -en "  ${BOLD}Update now? [y/N]:${NC} "
