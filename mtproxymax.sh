@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.4.4"
-TELEMT_COMMIT="aace012"  # Pinned: v3.4.4 — weighted fairness, 3-level pressure, configurable TG URLs
+TELEMT_MIN_VERSION="3.4.5"
+TELEMT_COMMIT="30e73ad"  # Pinned: v3.4.5 — fairness regression fixes, unlimited mask_relay_max_bytes
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
