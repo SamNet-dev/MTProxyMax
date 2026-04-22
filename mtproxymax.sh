@@ -116,6 +116,7 @@ BLOCKLIST_COUNTRIES=""
 MASKING_ENABLED="true"
 MASKING_HOST=""
 MASKING_PORT=443
+MASKING_RELAY_MAX_BYTES=""  # Empty = engine default (32 KiB). "0" = unlimited (useful for large mask backends)
 UNKNOWN_SNI_ACTION="mask"
 
 # Custom Telegram infrastructure URLs (for restricted regions where core.telegram.org is blocked)
@@ -608,6 +609,7 @@ BLOCKLIST_COUNTRIES='${BLOCKLIST_COUNTRIES}'
 MASKING_ENABLED='${MASKING_ENABLED}'
 MASKING_HOST='${MASKING_HOST}'
 MASKING_PORT='${MASKING_PORT}'
+MASKING_RELAY_MAX_BYTES='${MASKING_RELAY_MAX_BYTES}'
 UNKNOWN_SNI_ACTION='${UNKNOWN_SNI_ACTION}'
 
 # Custom Telegram infrastructure URLs (for restricted regions)
@@ -667,7 +669,7 @@ load_settings() {
         case "$key" in
             PROXY_PORT|PROXY_METRICS_PORT|PROXY_DOMAIN|PROXY_CONCURRENCY|\
             PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|FAKE_CERT_LEN|PROXY_PROTOCOL|PROXY_PROTOCOL_TRUSTED_CIDRS|AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|\
-            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|UNKNOWN_SNI_ACTION|\
+            MASKING_ENABLED|MASKING_HOST|MASKING_PORT|MASKING_RELAY_MAX_BYTES|UNKNOWN_SNI_ACTION|\
             PROXY_SECRET_URL|PROXY_CONFIG_V4_URL|PROXY_CONFIG_V6_URL|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
@@ -1155,6 +1157,7 @@ unknown_sni_action = "${UNKNOWN_SNI_ACTION:-mask}"
 mask = ${mask_enabled}
 mask_port = ${mask_port}
 $([ "$mask_enabled" = "true" ] && [ -n "$mask_host" ] && echo "mask_host = \"${mask_host}\"")
+$([ -n "${MASKING_RELAY_MAX_BYTES:-}" ] && echo "mask_relay_max_bytes = ${MASKING_RELAY_MAX_BYTES}")
 fake_cert_len = ${FAKE_CERT_LEN:-2048}
 # Note: geo-blocking is enforced at the host firewall level (iptables/nftables),
 # not via telemt config. See: mtproxymax info -> Geo-Blocking
@@ -6954,6 +6957,7 @@ show_cli_help() {
     echo -e "    ${GREEN}ip${NC} [get|auto|<address>]   Show, reset, or set custom IP/domain for links"
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
+    echo -e "    ${GREEN}mask-relay-bytes${NC} [N|0|clear]  Max bytes per direction on mask relay (0=unlimited)"
     echo -e "    ${GREEN}tg-urls${NC} [get|set <field> <url>|clear]  Custom Telegram infrastructure URLs (restricted regions)"
     echo -e "    ${GREEN}adtag${NC} [set <hex>|remove|view] Manage ad-tag"
     echo -e "    ${GREEN}geoblock${NC} [add|remove|list|clear] Manage geo-blocking"
@@ -7610,6 +7614,39 @@ cli_main() {
             log_success "Mask backend set to ${MASKING_HOST}:${MASKING_PORT:-443}"
             if is_proxy_running; then
                 load_secrets
+                restart_proxy_container
+            fi
+            ;;
+
+        mask-relay-bytes)
+            load_settings
+            local _val="${1:-}"
+            if [ -z "$_val" ]; then
+                local _cur="${MASKING_RELAY_MAX_BYTES:-}"
+                if [ -z "$_cur" ]; then
+                    echo -e "  mask_relay_max_bytes: ${DIM}(engine default — 32768)${NC}"
+                elif [ "$_cur" = "0" ]; then
+                    echo -e "  mask_relay_max_bytes: ${BOLD}0${NC} ${DIM}(unlimited)${NC}"
+                else
+                    echo -e "  mask_relay_max_bytes: ${BOLD}${_cur}${NC} bytes"
+                fi
+                echo -e "  ${DIM}Caps bytes relayed per direction on mask fallback paths.${NC}"
+                echo -e "  ${DIM}Set to 0 for unlimited (useful for large mask backends).${NC}"
+                return
+            fi
+            check_root
+            load_secrets
+            if [ "$_val" = "clear" ] || [ "$_val" = "default" ]; then
+                MASKING_RELAY_MAX_BYTES=""
+            elif [[ "$_val" =~ ^[0-9]+$ ]]; then
+                MASKING_RELAY_MAX_BYTES="$_val"
+            else
+                log_error "Value must be a non-negative integer, 'clear', or 'default'"
+                return 1
+            fi
+            save_settings
+            log_success "mask_relay_max_bytes set to ${MASKING_RELAY_MAX_BYTES:-default}"
+            if is_proxy_running; then
                 restart_proxy_container
             fi
             ;;
@@ -8794,6 +8831,7 @@ show_settings_menu() {
         echo -e "  ${DIM}[4]${NC} Change resources (CPU/RAM)"
         echo -e "  ${DIM}[5]${NC} Toggle traffic masking"
         echo -e "  ${DIM}[m]${NC} Set mask backend (host:port for non-proxy traffic)"
+        echo -e "  ${DIM}[b]${NC} Set mask relay byte cap"
         echo -e "  ${DIM}[6]${NC} Set ad-tag"
         echo -e "  ${DIM}[7]${NC} Toggle auto-update"
         echo -e "  ${DIM}[8]${NC} Toggle PROXY protocol"
@@ -8998,6 +9036,39 @@ show_settings_menu() {
                     save_settings
                     log_success "Mask backend set to ${MASKING_HOST:-${PROXY_DOMAIN}}:${MASKING_PORT:-443}"
                     if is_proxy_running; then
+                        echo -en "  ${DIM}Restart proxy to apply? [Y/n]:${NC} "
+                        local r; read -r r
+                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                    fi
+                fi
+                press_any_key
+                ;;
+            b|B)
+                echo ""
+                echo -e "  ${BOLD}Mask relay byte cap${NC}"
+                echo -e "  ${DIM}Caps bytes relayed per direction on mask fallback paths.${NC}"
+                echo -e "  ${DIM}Empty = engine default (32768). 0 = unlimited (for large mask backends).${NC}"
+                echo ""
+                local _cur_disp="${MASKING_RELAY_MAX_BYTES:-default}"
+                [ "$_cur_disp" = "0" ] && _cur_disp="0 (unlimited)"
+                echo -en "  ${BOLD}Value [${_cur_disp}]:${NC} "
+                local _v; read -r _v
+                if [ -n "$_v" ]; then
+                    local _mrb_changed=false
+                    if [ "$_v" = "default" ] || [ "$_v" = "clear" ]; then
+                        MASKING_RELAY_MAX_BYTES=""
+                        save_settings
+                        log_success "mask_relay_max_bytes cleared (using engine default)"
+                        _mrb_changed=true
+                    elif [[ "$_v" =~ ^[0-9]+$ ]]; then
+                        MASKING_RELAY_MAX_BYTES="$_v"
+                        save_settings
+                        log_success "mask_relay_max_bytes set to ${_v}"
+                        _mrb_changed=true
+                    else
+                        log_error "Must be a non-negative integer, 'default', or 'clear'"
+                    fi
+                    if $_mrb_changed && is_proxy_running; then
                         echo -en "  ${DIM}Restart proxy to apply? [Y/n]:${NC} "
                         local r; read -r r
                         [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
