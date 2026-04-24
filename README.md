@@ -40,12 +40,19 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/SamNet-dev/MTProxyM
 Most MTProxy tools give you a proxy and a link. That's it. MTProxyMax gives you a **full management platform**:
 
 - 🔐 **Multi-user secrets** with individual bandwidth quotas, device limits, and expiry dates
+- 🏷️ **Tags & templates** — group users by category, onboard in seconds with reusable limit sets
+- 📅 **Monthly quota reset** — subscription-style automatic traffic resets per user
 - 🤖 **Telegram bot** with 17 commands — manage everything from your phone
 - 🗂️ **Replication** — sync config to slave servers automatically via rsync+SSH
+- 📦 **Server migration** — tarball-based export/import with one command
+- 💾 **Encrypted backups** — AES-256 backups with autoclean policy
 - 🖥️ **Interactive TUI** — no need to memorize commands, menu-driven setup
 - 📊 **Prometheus metrics** — real per-user traffic stats, not just iptables guesses
 - 🔗 **Proxy chaining** — route through SOCKS5 upstreams for extra privacy
-- 🔄 **Auto-recovery** — detects downtime, restarts automatically, alerts you on Telegram
+- 🚨 **Maintenance mode + IP banlist** — graceful pre-restart, fine-grained blocking
+- 🩺 **Doctor, verify, audit log** — comprehensive diagnostics and change history
+- ⚙️ **Engine tuning** — whitelisted parameter tuning without editing raw TOML
+- 🔄 **Auto-recovery + auto-rotate** — detects downtime, rotates aging secrets automatically
 - 🐳 **Pre-built Docker images** — installs in seconds, not minutes
 
 ---
@@ -405,6 +412,155 @@ mtproxymax secret disable-expired           # Auto-disable all expired secrets
 
 ---
 
+### 🏷️ Tags & Templates
+
+Tag users to group them logically (family, work, beta, premium), then run bulk operations by tag:
+
+```bash
+mtproxymax secret tag alice family,premium    # Assign tags
+mtproxymax secret list --tag family            # Filter by tag
+mtproxymax secret tags                         # Show all tags
+mtproxymax secret untag alice                  # Clear tags
+```
+
+Save reusable limit templates to quickly onboard users:
+
+```bash
+mtproxymax template save premium 15 5 50G 2026-12-31 "Premium tier"
+mtproxymax template list
+mtproxymax secret add alice --template premium    # Apply at creation
+mtproxymax template apply premium bob             # Apply to existing secret
+```
+
+Also available in **TUI: Secrets > [y] Tags / [k] Templates**.
+
+---
+
+### 📅 Monthly Quota Reset & Auto-Rotate
+
+Automatic scheduled operations — no cron setup required (runs from the Telegram bot's 5-min maintenance loop):
+
+```bash
+# Per-secret monthly reset — resets traffic counter on day N of each month (handles short months)
+mtproxymax secret quota-reset alice 1          # Reset on the 1st
+mtproxymax secret quota-reset bob 15           # Reset on the 15th
+mtproxymax secret quota-reset alice off        # Disable
+
+# Global auto-rotate — rotates secrets older than N days
+mtproxymax auto-rotate 90                      # Rotate every 90 days
+mtproxymax auto-rotate off                     # Disable
+
+# Bulk rotate with dry-run
+mtproxymax secret rotate --all --dry-run       # Preview
+mtproxymax secret rotate --all                 # Do it
+```
+
+TUI: **Secrets > [q] Monthly reset** and **[r] Rotate all**, **Settings > [a] Auto-rotate policy**.
+
+---
+
+### 🚨 Maintenance Mode & IP Banlist
+
+**Maintenance mode** rejects new connections with TCP RST while keeping existing sessions alive. Perfect for graceful pre-restart announcements:
+
+```bash
+mtproxymax maintenance on          # Reject new clients
+mtproxymax maintenance status      # Check current state
+mtproxymax maintenance off         # Restore
+```
+
+**IP banlist** — block specific IPs/CIDRs at the firewall level (survives reboots):
+
+```bash
+mtproxymax ban 192.0.2.0/24        # Ban a subnet
+mtproxymax ban 1.2.3.4              # Ban a single IP
+mtproxymax bans                     # List all bans
+mtproxymax unban 1.2.3.4            # Remove ban
+```
+
+Different from geo-blocking (which works by country). Both can run together.
+
+---
+
+### 💾 Encrypted Backups & Server Migration
+
+**Encrypted backups** — AES-256-CBC with PBKDF2 key derivation (100k iterations). Password entered interactively, passed to openssl via environment variable (hidden from `ps aux`):
+
+```bash
+mtproxymax backup --encrypt                # Create (password prompt)
+mtproxymax backup restore-encrypted file.tar.gz.enc
+mtproxymax backup autoclean 30             # Delete backups older than 30 days
+```
+
+Set `BACKUP_RETENTION_DAYS` in settings.conf for automatic cleanup via the bot's sweep loop.
+
+**Server migration** — pack everything into a tarball and transfer:
+
+```bash
+# On old server
+mtproxymax migrate export                      # → /tmp/mtproxymax-migrate-YYYYMMDD-HHMMSS.tar.gz
+scp /tmp/mtproxymax-migrate-*.tar.gz new-server:/tmp/
+
+# On new server
+mtproxymax migrate import /tmp/mtproxymax-migrate-*.tar.gz
+# Auto-backs up current state first, then restarts
+```
+
+Includes: settings, secrets, upstreams, instances, tags, archives, banlist, profiles. Replication role is preserved per-server.
+
+---
+
+### ⚙️ Engine Tuning
+
+Expose advanced engine parameters without editing raw TOML — changes are merged into the generated `config.toml` on every reload:
+
+```bash
+mtproxymax tune list                       # Show whitelisted params + current overrides
+mtproxymax tune set fake_cert_len 4096     # Larger fake cert
+mtproxymax tune set log_level debug        # Verbose logging
+mtproxymax tune set mask_relay_timeout_ms 120000   # 2-minute mask relay timeout
+mtproxymax tune clear log_level            # Revert one to default
+mtproxymax tune clear all                  # Revert all
+```
+
+Whitelisted params are regex-validated on input. Invalid values are rejected. Also available in **TUI: Settings > [n] Engine tuning**.
+
+---
+
+### ✅ Verify & Audit
+
+**`verify`** runs an end-to-end install check — Docker running, port bound, TLS handshake succeeds, domain reachable, Telegram API reachable, bot token valid:
+
+```bash
+mtproxymax verify
+```
+
+**`history`** shows an audit log of config changes (secret add/remove/rotate, domain changes, etc.) with timestamps:
+
+```bash
+mtproxymax history 100        # Last 100 events
+```
+
+**`speedtest`** measures outbound bandwidth and latency:
+
+```bash
+mtproxymax speedtest
+```
+
+---
+
+### 🐚 Bash Completion
+
+Get tab-completion for all commands:
+
+```bash
+sudo mtproxymax completion > /etc/bash_completion.d/mtproxymax
+source /etc/bash_completion.d/mtproxymax
+# Now: mtproxymax <TAB> or mtproxymax secret <TAB> works
+```
+
+---
+
 ## 📊 Comparison
 
 ### MTProxyMax vs Other Solutions
@@ -430,6 +586,12 @@ mtproxymax secret disable-expired           # Auto-disable all expired secrets
 | **User Expiry Dates** | ✅ | ❌ | ❌ | ❌ |
 | **Bandwidth Quotas** | ✅ | ❌ | ❌ | ❌ |
 | **Device Limits** | ✅ | ❌ | ❌ | ❌ |
+| **Tags & Templates** | ✅ | ❌ | ❌ | ❌ |
+| **Encrypted Backups** | ✅ (AES-256) | ❌ | ❌ | ❌ |
+| **Server Migration** | ✅ (tarball export/import) | ❌ | ❌ | ❌ |
+| **Maintenance Mode** | ✅ (graceful RST) | ❌ | ❌ | ❌ |
+| **Audit Log** | ✅ | ❌ | ❌ | ❌ |
+| **Engine Tuning UI** | ✅ (whitelisted params) | ❌ | Raw files | ❌ |
 | **Active Development** | ✅ | ✅ | Abandoned | Varies |
 
 <details>
@@ -525,13 +687,17 @@ mtproxymax menu                 # Open interactive TUI
 <details>
 <summary><b>User Secrets</b></summary>
 
+**Core operations:**
 ```bash
-mtproxymax secret add <label>           # Add user
-mtproxymax secret remove <label>        # Remove user
+mtproxymax secret add <label>           # Add user (optional: --template <name>)
+mtproxymax secret remove <label>        # Remove user (supports --dry-run)
 mtproxymax secret list                  # List all users
+mtproxymax secret list --tag <tag>      # Filter list by tag
+mtproxymax secret list --csv            # Output as CSV for spreadsheets
 mtproxymax secret info <label>          # Full detail view (limits, traffic, link, QR)
 mtproxymax secret search <query>        # Find secrets by label or notes
 mtproxymax secret rotate <label>        # New key, same label
+mtproxymax secret rotate --all          # Bulk rotate (supports --dry-run)
 mtproxymax secret clone <src> <new>     # Duplicate with all limits
 mtproxymax secret rename <old> <new>    # Rename a secret
 mtproxymax secret enable <label>        # Re-enable user
@@ -541,11 +707,33 @@ mtproxymax secret link [label]          # Show proxy link
 mtproxymax secret qr [label]            # Show QR code
 mtproxymax secret generate-links [txt|html]  # Bulk export all links
 mtproxymax secret note <label> [text]   # Attach notes/description
-mtproxymax secret setlimit <label> <type> <value>  # Set individual limit
+mtproxymax secret logs <label> [lines]  # Per-user activity log
+```
+
+**Limits & Quotas:**
+```bash
+mtproxymax secret setlimit <label> <type> <value>          # Set individual limit
 mtproxymax secret setlimits <label> <conns> <ips> <quota> [expires]  # Set all limits
-mtproxymax secret extend <label> <days> # Extend one secret's expiry
-mtproxymax secret bulk-extend <days>    # Extend all secrets' expiry
-mtproxymax secret reset-traffic <label|all>  # Reset traffic counters
+mtproxymax secret extend <label> <days>   # Extend one secret's expiry
+mtproxymax secret bulk-extend <days>      # Extend all secrets' expiry
+mtproxymax secret quota-reset <label> <day|off>  # Monthly quota reset on day N
+mtproxymax secret reset-traffic <label|all>      # Reset traffic counters
+```
+
+**Tags & Templates:**
+```bash
+mtproxymax secret tag <label> <tag1,tag2>  # Assign tags to a secret
+mtproxymax secret untag <label>            # Clear all tags
+mtproxymax secret tags [label]             # Show all tags or for one secret
+mtproxymax template save <name> <conns> <ips> <quota> [expires] [notes]
+mtproxymax template list                   # List saved templates
+mtproxymax template apply <name> <label>   # Apply template to existing secret
+mtproxymax template delete <name>
+mtproxymax secret add alice --template premium  # Add with preset limits
+```
+
+**Organization & Lifecycle:**
+```bash
 mtproxymax secret sort [traffic|conns|date|name]  # Reorder the list
 mtproxymax secret top [traffic|conns] [N]  # Top N users (default 5)
 mtproxymax secret stats                 # Compact per-user overview
@@ -556,6 +744,7 @@ mtproxymax secret export > file.csv     # Export to CSV
 mtproxymax secret import file.csv       # Import from CSV
 mtproxymax secret add-batch <l1> <l2> ...     # Add many at once
 mtproxymax secret remove-batch <l1> <l2> ...  # Remove many at once
+mtproxymax auto-rotate [N|off]          # Global policy: auto-rotate older than N days
 ```
 
 </details>
@@ -568,11 +757,22 @@ mtproxymax port [get|<number>]          # Get/set proxy port
 mtproxymax ip [get|auto|<address>]      # Get/set custom IP for proxy links
 mtproxymax domain [get|clear|<host>]    # Get/set FakeTLS domain
 mtproxymax mask-backend [host:port]     # Set mask backend for non-proxy traffic
+mtproxymax mask-relay-bytes [N|0|clear] # Max bytes per dir on mask relay (0=unlimited)
 mtproxymax tg-urls [get|set <field> <url>|clear]  # Custom Telegram infra URLs
 mtproxymax adtag set <hex>              # Set ad-tag
 mtproxymax adtag remove                 # Remove ad-tag
 mtproxymax config                       # Show current engine config
 ```
+
+**Engine Tuning (advanced):**
+```bash
+mtproxymax tune list                    # Show whitelisted tunable params + current values
+mtproxymax tune get <param>             # Show current value
+mtproxymax tune set <param> <value>     # Set a tunable (e.g. fake_cert_len, mask_relay_timeout_ms, log_level)
+mtproxymax tune clear <param|all>       # Clear one or all tunings
+```
+
+Tunings are applied via sed post-processing on the generated config.toml — no TOML duplicate-key issues. Whitelisted params include: `fake_cert_len`, `client_handshake`, `tg_connect`, `client_keepalive`, `client_ack`, `replay_check_len`, `replay_window_secs`, `ignore_time_skew`, `listen_backlog`, `max_connections`, `accept_permit_timeout_ms`, `prefer_ipv6`, `fast_mode`, `log_level`, `mask_relay_timeout_ms`, `mask_relay_idle_timeout_ms`.
 
 </details>
 
@@ -584,6 +784,72 @@ mtproxymax profile save <name>          # Snapshot current config
 mtproxymax profile load <name>          # Restore profile (auto-restarts)
 mtproxymax profile list                 # List all saved profiles
 mtproxymax profile delete <name>        # Delete a profile
+```
+
+</details>
+
+<details>
+<summary><b>Backup, Restore & Migration</b></summary>
+
+```bash
+# Regular (unencrypted) backups
+mtproxymax backup                       # Create a timestamped backup
+mtproxymax restore <file>               # Restore from a backup file
+mtproxymax backups                      # List available backups
+mtproxymax backup autoclean [days]      # Delete backups older than N days
+
+# Encrypted backups (AES-256 + PBKDF2)
+mtproxymax backup --encrypt             # Create encrypted backup (password prompt)
+mtproxymax backup restore-encrypted <file>  # Restore encrypted backup
+# Or: mtproxymax restore --encrypted <file>
+
+# Server migration (tarball-based — all settings, secrets, tags, bans, archives, profiles)
+mtproxymax migrate export [file]        # Export all state to a tarball
+mtproxymax migrate import <file>        # Import state from a tarball (auto-backs up current first)
+```
+
+The migrate workflow is perfect for server pivots: run `migrate export` on the old server, `scp` the tarball, run `migrate import` on the new server. Replication config is preserved per-role.
+
+</details>
+
+<details>
+<summary><b>Notifications & Bot</b></summary>
+
+```bash
+mtproxymax notify <message>             # Send custom message via Telegram bot
+mtproxymax telegram setup               # Interactive bot setup
+mtproxymax telegram status              # Show bot status
+mtproxymax telegram test                # Send test message
+mtproxymax telegram disable             # Disable bot
+mtproxymax telegram remove              # Remove bot completely
+```
+
+</details>
+
+<details>
+<summary><b>Periodic Maintenance</b></summary>
+
+```bash
+mtproxymax sweep                        # Run all periodic tasks (called by bot loop every 5 min)
+mtproxymax auto-rotate [N|off]          # Auto-rotate secrets older than N days
+# Monthly quota reset is per-secret: see `secret quota-reset` in User Secrets
+```
+
+Periodic tasks run automatically via the Telegram bot daemon's 5-min loop when installed. Can be triggered manually via `sweep` or scheduled via cron.
+
+</details>
+
+<details>
+<summary><b>Polish & Completion</b></summary>
+
+```bash
+mtproxymax completion                   # Emit bash tab-completion script
+mtproxymax changelog                    # Show GitHub release notes since installed version
+
+# Install bash completion (root):
+sudo mtproxymax completion > /etc/bash_completion.d/mtproxymax
+# Or in your shell:
+eval "$(mtproxymax completion)"
 ```
 
 </details>
@@ -612,15 +878,34 @@ mtproxymax replication promote          # Promote slave to master (failover)
 <details>
 <summary><b>Security & Routing</b></summary>
 
+**Geo-Blocking:**
 ```bash
 mtproxymax geoblock add <CC>            # Block country
 mtproxymax geoblock remove <CC>         # Unblock country
 mtproxymax geoblock list                # List blocked countries
+```
+
+**IP Banlist:**
+```bash
+mtproxymax ban <ip|cidr>                # Ban a specific IP/CIDR (iptables, survives reboots)
+mtproxymax unban <ip|cidr>              # Remove ban
+mtproxymax bans                         # List banned IPs
+```
+
+**Maintenance Mode:**
+```bash
+mtproxymax maintenance on               # Reject new connections gracefully (RST), keep existing alive
+mtproxymax maintenance off              # Restore normal operation
+mtproxymax maintenance status           # Check current state
+```
+
+**Upstream Routing:**
+```bash
 mtproxymax upstream list                # List upstreams
 mtproxymax upstream add <name> <type> <host:port> [user] [pass] [weight]
 mtproxymax upstream remove <name>       # Remove upstream
 mtproxymax upstream test <name>         # Test connectivity
-mtproxymax sni-policy [mask|drop]      # Unknown SNI action (mask=permissive, drop=strict)
+mtproxymax sni-policy [mask|drop]       # Unknown SNI action (mask=permissive, drop=strict)
 ```
 
 </details>
@@ -636,18 +921,13 @@ mtproxymax metrics live [seconds]       # Auto-refresh metrics (default: 5s)
 mtproxymax logs                         # Stream live logs
 mtproxymax health                       # Quick health check
 mtproxymax doctor                       # Comprehensive diagnostics (port, TLS, secrets, disk, bot)
+mtproxymax verify                       # End-to-end install check (port, TLS, Telegram API, metrics)
 mtproxymax port-check                   # Test if proxy port is reachable from outside
+mtproxymax speedtest                    # Outbound bandwidth/latency test from server
 mtproxymax uptime                       # One-line status (scriptable)
 mtproxymax status [--json]              # Proxy status (JSON for monitoring integrations)
-```
-
-</details>
-
-<details>
-<summary><b>Notifications</b></summary>
-
-```bash
-mtproxymax notify <message>             # Send custom message via Telegram bot
+mtproxymax info                         # Comprehensive server overview (OS, IPv4/IPv6, users, services)
+mtproxymax history [lines]              # Audit log of config changes
 ```
 
 </details>
@@ -660,19 +940,6 @@ mtproxymax engine status                # Show current engine version
 mtproxymax engine rebuild               # Force rebuild engine image
 mtproxymax rebuild                      # Force rebuild from source
 mtproxymax update                       # Check for script + engine updates
-```
-
-</details>
-
-<details>
-<summary><b>Telegram Bot</b></summary>
-
-```bash
-mtproxymax telegram setup               # Interactive bot setup
-mtproxymax telegram status              # Show bot status
-mtproxymax telegram test                # Send test message
-mtproxymax telegram disable             # Disable bot
-mtproxymax telegram remove              # Remove bot completely
 ```
 
 </details>
@@ -695,13 +962,21 @@ mtproxymax telegram remove              # Remove bot completely
 
 | File | Purpose |
 |------|---------|
-| `/opt/mtproxymax/settings.conf` | Proxy settings (port, domain, limits) |
+| `/opt/mtproxymax/settings.conf` | Proxy settings (port, domain, limits, tunings prefs) |
 | `/opt/mtproxymax/secrets.conf` | User keys, limits, expiry dates |
-| `/opt/mtproxymax/secrets_archive.conf` | Archived secrets (soft-deleted) |
+| `/opt/mtproxymax/secrets_archive.conf` | Archived secrets (soft-deleted, restorable) |
+| `/opt/mtproxymax/secrets_tags.conf` | User tags (label → comma-separated tags) |
+| `/opt/mtproxymax/secrets_quota_reset.conf` | Per-secret monthly quota reset days |
+| `/opt/mtproxymax/templates.conf` | Reusable limit templates |
+| `/opt/mtproxymax/tunings.conf` | Engine parameter overrides (from `tune set`) |
+| `/opt/mtproxymax/banlist.conf` | Banned IPs/CIDRs (iptables-backed) |
 | `/opt/mtproxymax/upstreams.conf` | Upstream routing rules |
+| `/opt/mtproxymax/instances.conf` | Multi-port instance config |
 | `/opt/mtproxymax/profiles/` | Saved config profiles (named snapshots) |
+| `/opt/mtproxymax/audit.log` | Config change history |
+| `/opt/mtproxymax/connection.log` | Per-user activity log |
 | `/opt/mtproxymax/mtproxy/config.toml` | Generated telemt engine config |
-| `/opt/mtproxymax/backups/` | Automatic backups before updates |
+| `/opt/mtproxymax/backups/` | Automatic backups (auto-cleaned via `BACKUP_RETENTION_DAYS`) |
 
 ---
 
