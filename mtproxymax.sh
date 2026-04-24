@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.0.6"
+VERSION="1.0.7"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="/opt/mtproxymax"
 CONFIG_DIR="${INSTALL_DIR}/mtproxy"
@@ -131,6 +131,10 @@ TELEGRAM_INTERVAL=6
 TELEGRAM_ALERTS_ENABLED="true"
 TELEGRAM_SERVER_LABEL="MTProxyMax"
 AUTO_UPDATE_ENABLED="true"
+
+# Auto-rotate and backup retention (v1.0.7)
+SECRET_AUTO_ROTATE_DAYS="0"     # 0 = disabled; otherwise rotate secrets older than N days
+BACKUP_RETENTION_DAYS="30"      # Auto-clean backups older than N days (0 = keep all)
 
 # Replication / HA
 REPLICATION_ENABLED="false"
@@ -628,6 +632,10 @@ TELEGRAM_SERVER_LABEL='${TELEGRAM_SERVER_LABEL}'
 # Auto-Update
 AUTO_UPDATE_ENABLED='${AUTO_UPDATE_ENABLED}'
 
+# Secret auto-rotate (v1.0.7)
+SECRET_AUTO_ROTATE_DAYS='${SECRET_AUTO_ROTATE_DAYS}'
+BACKUP_RETENTION_DAYS='${BACKUP_RETENTION_DAYS}'
+
 # Replication / HA
 REPLICATION_ENABLED='${REPLICATION_ENABLED}'
 REPLICATION_ROLE='${REPLICATION_ROLE}'
@@ -673,7 +681,7 @@ load_settings() {
             PROXY_SECRET_URL|PROXY_CONFIG_V4_URL|PROXY_CONFIG_V6_URL|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
-            AUTO_UPDATE_ENABLED|\
+            AUTO_UPDATE_ENABLED|SECRET_AUTO_ROTATE_DAYS|BACKUP_RETENTION_DAYS|\
             REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
             REPLICATION_SSH_PORT|REPLICATION_SSH_USER|REPLICATION_DELETE_EXTRA|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
             REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG)
@@ -1250,6 +1258,37 @@ TOML_EOF
         fi
     done
 
+    # Apply engine tunings (replace matching keys in-place before the final copy)
+    if [ -f "${_TUNE_FILE:-/dev/null}" ] && [ -s "${_TUNE_FILE}" ]; then
+        while IFS='|' read -r _tp _tv; do
+            [ -z "$_tp" ] && continue
+            # Only allow whitelisted params
+            _tune_lookup "$_tp" >/dev/null 2>&1 || continue
+            # Format value (quote strings, leave numbers/booleans bare)
+            local _tv_out
+            if [[ "$_tv" =~ ^(true|false|[0-9]+)$ ]]; then
+                _tv_out="$_tv"
+            else
+                _tv_out="\"$_tv\""
+            fi
+            # Escape for sed
+            local _esc_tp _esc_tv
+            _esc_tp=$(printf '%s' "$_tp" | sed 's/[][\/.*^$]/\\&/g')
+            _esc_tv=$(printf '%s' "$_tv_out" | sed 's/[\/&]/\\&/g')
+            # Replace existing line if present; otherwise append to [general] section
+            if grep -qE "^${_esc_tp} *=" "$tmp"; then
+                sed -i.bak "s/^${_esc_tp} *=.*/${_tp} = ${_tv_out}/" "$tmp" && rm -f "${tmp}.bak"
+            else
+                # Append after [general] header if not elsewhere (safe fallback)
+                awk -v p="$_tp" -v v="$_tv_out" '
+                    BEGIN{inserted=0}
+                    {print}
+                    /^\[general\]$/ && !inserted {print p " = " v; inserted=1}
+                ' "$tmp" > "${tmp}.new" && mv "${tmp}.new" "$tmp"
+            fi
+        done < "$_TUNE_FILE"
+    fi
+
     chmod 644 "$tmp"
     cp "$tmp" "${CONFIG_DIR}/config.toml" && rm -f "$tmp"
 }
@@ -1737,6 +1776,7 @@ secret_add() {
     server_ip=$(get_public_ip)
 
     log_success "Secret '${label}' created"
+    audit_log "secret add ${label}"
     echo ""
     echo -e "  ${BOLD}Proxy Link:${NC}"
     echo -e "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}"
@@ -1821,6 +1861,7 @@ secret_remove() {
     fi
 
     log_success "Secret '${label}' removed"
+    audit_log "secret remove ${label}"
 }
 
 # Batch add multiple secrets (single restart)
@@ -2034,6 +2075,7 @@ secret_rotate() {
     server_ip=$(get_public_ip)
 
     log_success "Secret '${label}' rotated"
+    audit_log "secret rotate ${label}"
     echo ""
     echo -e "  ${BOLD}New Proxy Link:${NC}"
     echo -e "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}"
@@ -3332,6 +3374,1083 @@ profile_delete() {
     log_success "Profile '${name}' deleted"
 }
 
+# ── v1.0.7 Features ──────────────────────────────────────────
+
+# ── Secret Tags (stored in separate file: label|tag1,tag2,tag3) ──
+_TAGS_FILE="${INSTALL_DIR}/secrets_tags.conf"
+
+secret_get_tags() {
+    local label="$1"
+    [ -f "$_TAGS_FILE" ] || return 0
+    awk -F'|' -v u="$label" '$1==u{print $2; exit}' "$_TAGS_FILE"
+}
+
+secret_set_tags() {
+    local label="$1" tags="$2"
+    [ -z "$label" ] && { log_error "Usage: secret_set_tags <label> <tags>"; return 1; }
+    mkdir -p "$INSTALL_DIR"
+    touch "$_TAGS_FILE"; chmod 600 "$_TAGS_FILE"
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${label}|" "$_TAGS_FILE" > "$tmp" 2>/dev/null || true
+    [ -n "$tags" ] && echo "${label}|${tags}" >> "$tmp"
+    mv "$tmp" "$_TAGS_FILE"
+    chmod 600 "$_TAGS_FILE"
+}
+
+secret_tag() {
+    local label="$1"; shift 2>/dev/null || true
+    local new_tags="$*"
+    [ -z "$label" ] || [ -z "$new_tags" ] && { log_error "Usage: mtproxymax secret tag <label> <tag1,tag2,...>"; return 1; }
+
+    # Verify secret exists
+    local exists=false i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { exists=true; break; }
+    done
+    $exists || { log_error "Secret '${label}' not found"; return 1; }
+
+    # Sanitize tags: strip spaces, allow a-z0-9_-
+    local _clean; _clean=$(echo "$new_tags" | tr '[:upper:]' '[:lower:]' | tr -s ' ' ',' | sed 's/[^a-z0-9_,-]//g;s/,,*/,/g;s/^,//;s/,$//')
+    [ -z "$_clean" ] && { log_error "No valid tags after sanitization"; return 1; }
+
+    secret_set_tags "$label" "$_clean"
+    log_success "Tags for '${label}': ${_clean}"
+}
+
+secret_untag() {
+    local label="$1"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret untag <label>"; return 1; }
+    secret_set_tags "$label" ""
+    log_success "Tags cleared for '${label}'"
+}
+
+secret_list_by_tag() {
+    local tag="$1"
+    [ -z "$tag" ] && { log_error "Usage: mtproxymax secret list --tag <tag>"; return 1; }
+    [ -f "$_TAGS_FILE" ] || { log_info "No tagged secrets"; return 0; }
+
+    local tag_lower; tag_lower=$(echo "$tag" | tr '[:upper:]' '[:lower:]')
+    local found=0
+    echo ""
+    draw_header "SECRETS WITH TAG: ${tag_lower}"
+    echo ""
+    while IFS='|' read -r label tags; do
+        [ -z "$label" ] && continue
+        # Match whole tags (comma-separated)
+        [[ ",${tags}," == *",${tag_lower},"* ]] || continue
+        # Verify secret still exists and get status
+        local idx=-1 i
+        for i in "${!SECRETS_LABELS[@]}"; do
+            [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
+        done
+        [ $idx -eq -1 ] && continue
+        local icon="${GREEN}●${NC}"
+        [ "${SECRETS_ENABLED[$idx]}" != "true" ] && icon="${RED}○${NC}"
+        echo -e "  ${icon} ${BOLD}${label}${NC}  ${DIM}[${tags}]${NC}"
+        found=$((found + 1))
+    done < "$_TAGS_FILE"
+    [ $found -eq 0 ] && echo -e "  ${DIM}No secrets with tag '${tag_lower}'${NC}"
+    echo ""
+}
+
+# Return array of labels matching a given tag (for bulk ops)
+_secret_labels_with_tag() {
+    local tag="$1"
+    [ -f "$_TAGS_FILE" ] || return 0
+    local tag_lower; tag_lower=$(echo "$tag" | tr '[:upper:]' '[:lower:]')
+    awk -F'|' -v t=",${tag_lower}," '{ if(index(","$2",", t)) print $1 }' "$_TAGS_FILE"
+}
+
+# ── Maintenance mode (iptables-based) ──
+MAINTENANCE_FILE="${INSTALL_DIR}/.maintenance"
+
+maintenance_on() {
+    check_root
+    local port="${PROXY_PORT:-443}"
+    # Idempotent: skip if rule already exists
+    if ! iptables -C INPUT -p tcp --dport "$port" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null; then
+        iptables -I INPUT -p tcp --dport "$port" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null
+    fi
+    touch "$MAINTENANCE_FILE"
+    log_success "Maintenance mode ON — new connections rejected on port ${port}"
+    log_info "Existing connections remain active. Use 'mtproxymax maintenance off' to restore."
+}
+
+# Reapply maintenance rule if the marker file exists (called on startup)
+maintenance_reapply() {
+    [ -f "$MAINTENANCE_FILE" ] || return 0
+    local port="${PROXY_PORT:-443}"
+    iptables -C INPUT -p tcp --dport "$port" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null || \
+    iptables -I INPUT -p tcp --dport "$port" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null
+}
+
+maintenance_off() {
+    check_root
+    # Remove all rules tagged with our comment
+    while iptables -C INPUT -p tcp --dport "${PROXY_PORT:-443}" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null; do
+        iptables -D INPUT -p tcp --dport "${PROXY_PORT:-443}" --syn -j REJECT --reject-with tcp-reset -m comment --comment "mtproxymax-maintenance" 2>/dev/null
+    done
+    rm -f "$MAINTENANCE_FILE"
+    log_success "Maintenance mode OFF — accepting new connections"
+}
+
+maintenance_status() {
+    if [ -f "$MAINTENANCE_FILE" ]; then
+        echo -e "  Maintenance: ${YELLOW}ON${NC}"
+    else
+        echo -e "  Maintenance: ${GREEN}OFF${NC}"
+    fi
+}
+
+# ── IP Banlist (iptables) ──
+BANLIST_FILE="${INSTALL_DIR}/banlist.conf"
+
+_valid_ip_or_cidr() {
+    local x="$1"
+    [[ "$x" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(/[0-9]{1,2})?$ ]] || \
+    [[ "$x" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ ]]
+}
+
+ban_ip() {
+    check_root
+    local ip="$1"
+    [ -z "$ip" ] && { log_error "Usage: mtproxymax ban <ip|cidr>"; return 1; }
+    _valid_ip_or_cidr "$ip" || { log_error "Invalid IP or CIDR"; return 1; }
+
+    # Idempotent: skip if already banned
+    if [ -f "$BANLIST_FILE" ] && grep -qFx "$ip" "$BANLIST_FILE" 2>/dev/null; then
+        log_warn "'${ip}' is already banned"
+        return 0
+    fi
+
+    local cmd=iptables
+    [[ "$ip" =~ : ]] && cmd=ip6tables
+    $cmd -I INPUT -s "$ip" -j DROP -m comment --comment "mtproxymax-ban" 2>/dev/null || { log_error "Failed to add iptables rule"; return 1; }
+
+    echo "$ip" >> "$BANLIST_FILE"
+    chmod 600 "$BANLIST_FILE"
+    log_success "Banned ${ip}"
+}
+
+unban_ip() {
+    check_root
+    local ip="$1"
+    [ -z "$ip" ] && { log_error "Usage: mtproxymax unban <ip|cidr>"; return 1; }
+
+    local cmd=iptables
+    [[ "$ip" =~ : ]] && cmd=ip6tables
+    while $cmd -C INPUT -s "$ip" -j DROP -m comment --comment "mtproxymax-ban" 2>/dev/null; do
+        $cmd -D INPUT -s "$ip" -j DROP -m comment --comment "mtproxymax-ban" 2>/dev/null
+    done
+
+    if [ -f "$BANLIST_FILE" ]; then
+        local tmp; tmp=$(_mktemp) || return 1
+        grep -vFx "$ip" "$BANLIST_FILE" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$BANLIST_FILE"
+    fi
+    log_success "Unbanned ${ip}"
+}
+
+bans_list() {
+    echo ""
+    draw_header "BANNED IPs"
+    echo ""
+    if [ -f "$BANLIST_FILE" ] && [ -s "$BANLIST_FILE" ]; then
+        local count=0
+        while read -r ip; do
+            [ -z "$ip" ] && continue
+            echo -e "  ${RED}${SYM_CROSS}${NC} ${ip}"
+            count=$((count + 1))
+        done < "$BANLIST_FILE"
+        echo ""
+        echo -e "  ${DIM}${count} banned${NC}"
+    else
+        echo -e "  ${DIM}No IPs banned${NC}"
+    fi
+    echo ""
+}
+
+# Restore bans from file (called on startup / after reboot)
+bans_reapply() {
+    [ -f "$BANLIST_FILE" ] || return 0
+    while read -r ip; do
+        [ -z "$ip" ] && continue
+        _valid_ip_or_cidr "$ip" || continue
+        local cmd=iptables
+        [[ "$ip" =~ : ]] && cmd=ip6tables
+        $cmd -C INPUT -s "$ip" -j DROP -m comment --comment "mtproxymax-ban" 2>/dev/null || \
+        $cmd -I INPUT -s "$ip" -j DROP -m comment --comment "mtproxymax-ban" 2>/dev/null
+    done < "$BANLIST_FILE"
+}
+
+# ── Per-user activity log ──
+secret_logs() {
+    local label="$1" lines="${2:-50}"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret logs <label> [lines]"; return 1; }
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=50
+
+    if [ ! -f "$CONNECTION_LOG" ] || [ ! -s "$CONNECTION_LOG" ]; then
+        log_info "Connection log is empty"
+        return
+    fi
+
+    echo ""
+    draw_header "ACTIVITY: ${label}"
+    echo ""
+    local matches; matches=$(grep -F " ${label}: " "$CONNECTION_LOG" | tail -n "$lines")
+    if [ -z "$matches" ]; then
+        echo -e "  ${DIM}No activity logged for '${label}'${NC}"
+    else
+        echo "$matches" | sed 's/^/  /'
+    fi
+    echo ""
+}
+
+# ── Server migration: export/import ──
+MIGRATION_FILES=("$SETTINGS_FILE" "$SECRETS_FILE" "$UPSTREAMS_FILE" "$INSTANCES_FILE" "$_TAGS_FILE" "${INSTALL_DIR}/secrets_archive.conf" "$BANLIST_FILE")
+
+migrate_export() {
+    local out="${1:-/tmp/mtproxymax-migrate-$(date +%Y%m%d-%H%M%S).tar.gz}"
+    local tmp; tmp=$(mktemp -d) || { log_error "Cannot create temp dir"; return 1; }
+    local count=0
+    for f in "${MIGRATION_FILES[@]}"; do
+        [ -f "$f" ] && { cp "$f" "$tmp/$(basename "$f")" 2>/dev/null && count=$((count + 1)); }
+    done
+    # Also include profiles/ if present
+    [ -d "${INSTALL_DIR}/profiles" ] && cp -r "${INSTALL_DIR}/profiles" "$tmp/" 2>/dev/null
+    echo "v${VERSION}" > "$tmp/MIGRATE_VERSION"
+    tar -czf "$out" -C "$tmp" . 2>/dev/null && log_success "Exported ${count} file(s) to ${out}" || { log_error "Export failed"; rm -rf "$tmp"; return 1; }
+    rm -rf "$tmp"
+    chmod 600 "$out"
+}
+
+migrate_import() {
+    check_root
+    local file="$1"
+    [ -z "$file" ] && { log_error "Usage: mtproxymax migrate import <file.tar.gz>"; return 1; }
+    [ -f "$file" ] || { log_error "File not found: ${file}"; return 1; }
+
+    # Backup current state before overwriting
+    local backup_before="${BACKUP_DIR}/pre-migrate-$(date +%s).tar.gz"
+    mkdir -p "$BACKUP_DIR"
+    migrate_export "$backup_before" 2>/dev/null
+    log_info "Current state backed up to: ${backup_before}"
+
+    local tmp; tmp=$(mktemp -d) || { log_error "Cannot create temp dir"; return 1; }
+    tar -xzf "$file" -C "$tmp" 2>/dev/null || { log_error "Invalid tarball"; rm -rf "$tmp"; return 1; }
+
+    # Copy each file back (but not replication.conf to preserve role)
+    local restored=0 f base
+    for f in "${MIGRATION_FILES[@]}"; do
+        base=$(basename "$f")
+        [ -f "${tmp}/${base}" ] && { cp "${tmp}/${base}" "$f" && chmod 600 "$f" && restored=$((restored + 1)); }
+    done
+    # Restore profiles if present
+    [ -d "${tmp}/profiles" ] && { rm -rf "${INSTALL_DIR}/profiles"; cp -r "${tmp}/profiles" "${INSTALL_DIR}/"; }
+
+    rm -rf "$tmp"
+    load_settings
+    load_secrets
+    log_success "Imported ${restored} file(s) from ${file}"
+    if is_proxy_running; then
+        restart_proxy_container
+    else
+        reload_proxy_config
+    fi
+}
+
+# ── Encrypted backups (openssl AES-256) ──
+backup_create_encrypted() {
+    check_root
+    command -v openssl &>/dev/null || { log_error "openssl is required for encrypted backups"; return 1; }
+
+    mkdir -p "$BACKUP_DIR"
+    local ts; ts=$(date +%Y%m%d-%H%M%S)
+    local plain="${BACKUP_DIR}/mtproxymax-${ts}.tar.gz"
+    local enc="${plain}.enc"
+
+    migrate_export "$plain" >/dev/null || { log_error "Backup export failed"; return 1; }
+
+    local pw1 pw2
+    echo -en "  ${BOLD}Encryption password:${NC} "
+    read -rs pw1; echo ""
+    echo -en "  ${BOLD}Confirm password:${NC} "
+    read -rs pw2; echo ""
+    if [ "$pw1" != "$pw2" ]; then
+        log_error "Passwords don't match"
+        rm -f "$plain"
+        unset pw1 pw2
+        return 1
+    fi
+    if [ ${#pw1} -lt 8 ]; then
+        log_error "Password must be at least 8 characters"
+        rm -f "$plain"
+        unset pw1 pw2
+        return 1
+    fi
+
+    # Encrypt with AES-256-CBC + PBKDF2 (password via env to avoid exposing in process list)
+    local _rc=0
+    MTPMXPW="$pw1" openssl enc -aes-256-cbc -salt -pbkdf2 -iter 100000 -in "$plain" -out "$enc" -pass env:MTPMXPW 2>/dev/null || _rc=1
+    unset pw1 pw2 MTPMXPW
+    if [ "$_rc" -eq 0 ]; then
+        chmod 600 "$enc"
+        rm -f "$plain"
+        log_success "Encrypted backup saved: ${enc}"
+        log_info "Keep your password safe — backup cannot be decrypted without it."
+    else
+        log_error "Encryption failed"
+        rm -f "$plain" "$enc"
+        return 1
+    fi
+}
+
+backup_restore_encrypted() {
+    check_root
+    local file="$1"
+    [ -z "$file" ] && { log_error "Usage: mtproxymax backup restore-encrypted <file.tar.gz.enc>"; return 1; }
+    [ -f "$file" ] || { log_error "File not found: ${file}"; return 1; }
+    command -v openssl &>/dev/null || { log_error "openssl is required"; return 1; }
+
+    local pw
+    echo -en "  ${BOLD}Decryption password:${NC} "
+    read -rs pw; echo ""
+    mkdir -p "$BACKUP_DIR"
+    local plain; plain=$(mktemp "${BACKUP_DIR}/.decrypt.XXXXXX.tar.gz")
+    local _rc=0
+    MTPMXPW="$pw" openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -in "$file" -out "$plain" -pass env:MTPMXPW 2>/dev/null || _rc=1
+    unset pw MTPMXPW
+    if [ "$_rc" -eq 0 ]; then
+        migrate_import "$plain"
+        rm -f "$plain"
+    else
+        log_error "Decryption failed (wrong password?)"
+        rm -f "$plain"
+        return 1
+    fi
+}
+
+# ── Comprehensive server info ──
+show_server_info() {
+    echo ""
+    draw_header "MTPROXYMAX SERVER INFO"
+    echo ""
+
+    # System
+    local os_name="unknown" kernel arch
+    [ -f /etc/os-release ] && os_name=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-$ID}")
+    kernel=$(uname -r 2>/dev/null || echo "unknown")
+    arch=$(uname -m 2>/dev/null || echo "unknown")
+
+    echo -e "  ${BOLD}System${NC}"
+    echo -e "    OS:           ${os_name}"
+    echo -e "    Kernel:       ${kernel}"
+    echo -e "    Architecture: ${arch}"
+    echo -e "    Hostname:     $(hostname 2>/dev/null || echo '—')"
+    echo ""
+
+    # Network
+    local ip4 ip6
+    ip4=$(get_public_ip)
+    ip6=$(curl -s --max-time 3 -6 https://api6.ipify.org 2>/dev/null || echo "")
+    echo -e "  ${BOLD}Network${NC}"
+    echo -e "    Public IPv4:  ${ip4:-—}"
+    echo -e "    Public IPv6:  ${ip6:-—}"
+    echo -e "    Proxy port:   ${PROXY_PORT:-443}"
+    echo ""
+
+    # Proxy config
+    echo -e "  ${BOLD}Proxy Configuration${NC}"
+    echo -e "    Script ver:   v${VERSION}"
+    echo -e "    Engine ver:   telemt v$(get_telemt_version 2>/dev/null || echo '?')"
+    echo -e "    Domain:       ${PROXY_DOMAIN:-cloudflare.com}"
+    echo -e "    Masking:      ${MASKING_ENABLED:-true}"
+    echo -e "    Ad-tag:       ${AD_TAG:-${DIM}not set${NC}}"
+    echo ""
+
+    # Users
+    local active=0 disabled=0 total=${#SECRETS_LABELS[@]} i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_ENABLED[$i]}" = "true" ] && active=$((active + 1)) || disabled=$((disabled + 1))
+    done
+    local archived=0
+    [ -f "${INSTALL_DIR}/secrets_archive.conf" ] && archived=$(awk 'NF>0 && !/^[[:space:]]*#/{c++} END{print c+0}' "${INSTALL_DIR}/secrets_archive.conf" 2>/dev/null || echo 0)
+
+    echo -e "  ${BOLD}Users${NC}"
+    echo -e "    Total:        ${total}"
+    echo -e "    Active:       ${active}"
+    echo -e "    Disabled:     ${disabled}"
+    echo -e "    Archived:     ${archived}"
+    echo ""
+
+    # Services
+    local proxy_status="stopped"
+    is_proxy_running && proxy_status="running"
+    local bot_status="disabled"
+    [ "${TELEGRAM_ENABLED:-false}" = "true" ] && bot_status="enabled"
+    local repl_role="${REPLICATION_ROLE:-standalone}"
+
+    echo -e "  ${BOLD}Services${NC}"
+    echo -e "    Proxy:        ${proxy_status}"
+    echo -e "    Telegram bot: ${bot_status}"
+    echo -e "    Replication:  ${repl_role}"
+    if [ -f "$MAINTENANCE_FILE" ]; then
+        echo -e "    Maintenance:  ${YELLOW}ON${NC}"
+    fi
+    local ban_count=0
+    [ -f "$BANLIST_FILE" ] && ban_count=$(wc -l < "$BANLIST_FILE" 2>/dev/null | tr -d ' ')
+    [ "$ban_count" -gt 0 ] 2>/dev/null && echo -e "    Banned IPs:   ${ban_count}"
+    echo ""
+
+    # Security
+    echo -e "  ${BOLD}Security${NC}"
+    echo -e "    Metrics bind: 127.0.0.1:${PROXY_METRICS_PORT:-9090} ${DIM}(localhost only)${NC}"
+    echo -e "    SNI policy:   ${UNKNOWN_SNI_ACTION:-mask}"
+    local geo_count=0
+    [ -n "$BLOCKLIST_COUNTRIES" ] && geo_count=$(echo "$BLOCKLIST_COUNTRIES" | tr ',' '\n' | wc -l | tr -d ' ')
+    echo -e "    Geo-block:    ${GEOBLOCK_MODE:-blacklist} (${geo_count} countries)"
+    echo ""
+
+    # Disk
+    local disk_usage
+    disk_usage=$(df -h "$INSTALL_DIR" 2>/dev/null | awk 'NR==2{print $3"/"$2" ("$5")"}')
+    echo -e "  ${BOLD}Storage${NC}"
+    echo -e "    Install dir:  ${INSTALL_DIR}"
+    echo -e "    Disk used:    ${disk_usage:-—}"
+    echo ""
+}
+
+# ── Monthly quota reset ──
+# Config: secrets_quota_reset.conf with lines "label|day_of_month"
+# State:  .quota_reset_log with lines "label|YYYY-MM" (last reset month)
+_QUOTA_RESET_FILE="${INSTALL_DIR}/secrets_quota_reset.conf"
+_QUOTA_RESET_LOG="${INSTALL_DIR}/relay_stats/.quota_reset_log"
+
+secret_get_quota_reset_day() {
+    local label="$1"
+    [ -f "$_QUOTA_RESET_FILE" ] || return 0
+    awk -F'|' -v u="$label" '$1==u{print $2; exit}' "$_QUOTA_RESET_FILE"
+}
+
+secret_set_quota_reset_day() {
+    check_root
+    local label="$1" day="$2"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret quota-reset <label> <day|off>"; return 1; }
+
+    # Verify secret exists
+    local exists=false i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { exists=true; break; }
+    done
+    $exists || { log_error "Secret '${label}' not found"; return 1; }
+
+    mkdir -p "$INSTALL_DIR"
+    touch "$_QUOTA_RESET_FILE"; chmod 600 "$_QUOTA_RESET_FILE"
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${label}|" "$_QUOTA_RESET_FILE" > "$tmp" 2>/dev/null || true
+
+    if [ "$day" = "off" ] || [ "$day" = "clear" ] || [ -z "$day" ]; then
+        mv "$tmp" "$_QUOTA_RESET_FILE"; chmod 600 "$_QUOTA_RESET_FILE"
+        log_success "Quota reset disabled for '${label}'"
+    elif [[ "$day" =~ ^[0-9]+$ ]] && [ "$day" -ge 1 ] && [ "$day" -le 31 ]; then
+        echo "${label}|${day}" >> "$tmp"
+        mv "$tmp" "$_QUOTA_RESET_FILE"; chmod 600 "$_QUOTA_RESET_FILE"
+        log_success "Quota for '${label}' will reset on day ${day} of each month"
+    else
+        rm -f "$tmp"
+        log_error "Day must be 1-31, 'off', or 'clear'"
+        return 1
+    fi
+}
+
+# Check quota resets (called from bot loop)
+secret_check_quota_resets() {
+    [ -f "$_QUOTA_RESET_FILE" ] || return 0
+    local today_day today_month last_day
+    today_day=$(date +%d | sed 's/^0//')
+    today_month=$(date +%Y-%m)
+    # Last day of current month (GNU date or BSD fallback)
+    last_day=$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d 2>/dev/null | sed 's/^0//')
+    [ -z "$last_day" ] && last_day=$(date -v1d -v+1m -v-1d +%d 2>/dev/null | sed 's/^0//')
+    [ -z "$last_day" ] && last_day=31
+
+    mkdir -p "$(dirname "$_QUOTA_RESET_LOG")"
+    touch "$_QUOTA_RESET_LOG"; chmod 600 "$_QUOTA_RESET_LOG"
+
+    while IFS='|' read -r label day; do
+        [ -z "$label" ] && continue
+        [[ "$day" =~ ^[0-9]+$ ]] || continue
+        # Clamp configured day to last day of the current month (e.g. day 31 in February → day 28/29)
+        local effective_day="$day"
+        [ "$day" -gt "$last_day" ] && effective_day="$last_day"
+        # Only reset on or after the effective day
+        [ "$today_day" -lt "$effective_day" ] && continue
+        # Already reset this month?
+        grep -q "^${label}|${today_month}$" "$_QUOTA_RESET_LOG" 2>/dev/null && continue
+        # Reset
+        if "${INSTALL_DIR}/mtproxymax" secret reset-traffic "$label" &>/dev/null; then
+            echo "${label}|${today_month}" >> "$_QUOTA_RESET_LOG"
+            log_info "Monthly quota reset for '${label}'"
+        fi
+    done < "$_QUOTA_RESET_FILE"
+}
+
+# ── Auto-rotate policy ──
+# Global setting: SECRET_AUTO_ROTATE_DAYS (in settings.conf)
+# State: .auto_rotate_log (last rotation per label as epoch)
+_AUTO_ROTATE_LOG="${INSTALL_DIR}/relay_stats/.auto_rotate_log"
+
+secret_check_auto_rotate() {
+    local days="${SECRET_AUTO_ROTATE_DAYS:-0}"
+    [ "$days" = "0" ] || [ -z "$days" ] && return 0
+    [[ "$days" =~ ^[0-9]+$ ]] || return 0
+
+    mkdir -p "$(dirname "$_AUTO_ROTATE_LOG")"
+    touch "$_AUTO_ROTATE_LOG"; chmod 600 "$_AUTO_ROTATE_LOG"
+
+    local now i
+    now=$(date +%s)
+    local threshold=$((days * 86400))
+
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+        local label="${SECRETS_LABELS[$i]}"
+        # Check last auto-rotate time (if any) or use creation time
+        local last; last=$(awk -F'|' -v u="$label" '$1==u{print $2; exit}' "$_AUTO_ROTATE_LOG")
+        [ -z "$last" ] && last="${SECRETS_CREATED[$i]}"
+        [[ "$last" =~ ^[0-9]+$ ]] || continue
+        local age=$((now - last))
+        if [ "$age" -ge "$threshold" ]; then
+            if "${INSTALL_DIR}/mtproxymax" secret rotate "$label" &>/dev/null; then
+                # Update log
+                local tmp; tmp=$(_mktemp) || continue
+                grep -v "^${label}|" "$_AUTO_ROTATE_LOG" > "$tmp" 2>/dev/null || true
+                echo "${label}|${now}" >> "$tmp"
+                mv "$tmp" "$_AUTO_ROTATE_LOG"; chmod 600 "$_AUTO_ROTATE_LOG"
+                log_info "Auto-rotated '${label}' (age: $((age / 86400))d)"
+            fi
+        fi
+    done
+}
+
+# ── Backup autoclean ──
+backup_autoclean() {
+    local days="${1:-${BACKUP_RETENTION_DAYS:-30}}"
+    [[ "$days" =~ ^[0-9]+$ ]] || { log_error "Days must be a positive integer"; return 1; }
+    [ "$days" -le 0 ] && { log_info "Autoclean disabled (0 = keep all)"; return 0; }
+    [ -d "$BACKUP_DIR" ] || return 0
+
+    local before=0 after=0
+    before=$(find "$BACKUP_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+    find "$BACKUP_DIR" -maxdepth 1 -type f -mtime "+${days}" -delete 2>/dev/null
+    after=$(find "$BACKUP_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')
+
+    local removed=$((before - after))
+    log_success "Removed ${removed} backup(s) older than ${days} day(s) (${after} remaining)"
+}
+
+# ── Secret Templates ──
+_TEMPLATES_FILE="${INSTALL_DIR}/templates.conf"
+
+template_save() {
+    check_root
+    local name="$1" conns="${2:-0}" ips="${3:-0}" quota="${4:-0}" expires="${5:-0}" notes="${6:-}"
+    [ -z "$name" ] && { log_error "Usage: mtproxymax template save <name> <conns> <ips> <quota> [expires] [notes]"; return 1; }
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Name must be alphanumeric"; return 1; }
+    [[ "$conns" =~ ^[0-9]+$ ]] || { log_error "Conns must be a number"; return 1; }
+    [[ "$ips" =~ ^[0-9]+$ ]] || { log_error "IPs must be a number"; return 1; }
+
+    # Parse quota (supports 10G, 500M, etc)
+    local quota_bytes
+    if [[ "$quota" =~ ^[0-9]+$ ]]; then
+        quota_bytes="$quota"
+    else
+        quota_bytes=$(parse_human_bytes "$quota" 2>/dev/null) || quota_bytes="0"
+    fi
+
+    mkdir -p "$INSTALL_DIR"
+    touch "$_TEMPLATES_FILE"; chmod 600 "$_TEMPLATES_FILE"
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${name}|" "$_TEMPLATES_FILE" > "$tmp" 2>/dev/null || true
+    echo "${name}|${conns}|${ips}|${quota_bytes}|${expires}|${notes}" >> "$tmp"
+    mv "$tmp" "$_TEMPLATES_FILE"; chmod 600 "$_TEMPLATES_FILE"
+    log_success "Template '${name}' saved: conns=${conns} ips=${ips} quota=${quota} expires=${expires:-never}"
+}
+
+template_list() {
+    if [ ! -f "$_TEMPLATES_FILE" ] || [ ! -s "$_TEMPLATES_FILE" ]; then
+        log_info "No templates saved"
+        return
+    fi
+    echo ""
+    draw_header "TEMPLATES"
+    echo ""
+    printf "  ${BOLD}%-16s %-8s %-8s %-12s %-14s${NC}\n" "NAME" "CONNS" "IPS" "QUOTA" "EXPIRES"
+    echo -e "  ${DIM}$(_repeat '─' 64)${NC}"
+    while IFS='|' read -r name conns ips quota expires notes; do
+        [ -z "$name" ] && continue
+        local q_fmt="$([ "$quota" = "0" ] && echo "—" || format_bytes "$quota")"
+        local e_fmt="$([ "$expires" = "0" ] || [ -z "$expires" ] && echo "never" || echo "${expires%%T*}")"
+        printf "  %-16s %-8s %-8s %-12s %-14s\n" "$name" "$conns" "$ips" "$q_fmt" "$e_fmt"
+    done < "$_TEMPLATES_FILE"
+    echo ""
+}
+
+template_delete() {
+    check_root
+    local name="$1"
+    [ -z "$name" ] && { log_error "Usage: mtproxymax template delete <name>"; return 1; }
+    [ -f "$_TEMPLATES_FILE" ] || { log_error "No templates saved"; return 1; }
+
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${name}|" "$_TEMPLATES_FILE" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$_TEMPLATES_FILE"; chmod 600 "$_TEMPLATES_FILE"
+    log_success "Template '${name}' deleted"
+}
+
+# Apply a template to an existing secret
+template_apply() {
+    check_root
+    local name="$1" label="$2"
+    [ -z "$name" ] || [ -z "$label" ] && { log_error "Usage: mtproxymax template apply <name> <label>"; return 1; }
+    [ -f "$_TEMPLATES_FILE" ] || { log_error "No templates saved"; return 1; }
+
+    local line; line=$(grep "^${name}|" "$_TEMPLATES_FILE" | head -1)
+    [ -z "$line" ] && { log_error "Template '${name}' not found"; return 1; }
+
+    IFS='|' read -r _tn tconns tips tquota texpires tnotes <<< "$line"
+    secret_set_limits "$label" "$tconns" "$tips" "$tquota" "$texpires" "false" || return 1
+    if [ -n "$tnotes" ]; then
+        local _idx; _idx=$(_get_secret_idx "$label")
+        if [ "$_idx" != "-1" ]; then
+            SECRETS_NOTES[$_idx]="$tnotes"
+            save_secrets
+        fi
+    fi
+    log_success "Template '${name}' applied to '${label}'"
+}
+
+_get_secret_idx() {
+    local label="$1" i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_LABELS[$i]}" = "$label" ] && { echo "$i"; return; }
+    done
+    echo "-1"
+}
+
+# ── Bulk rotate all secrets ──
+secret_rotate_all() {
+    check_root
+    local dry_run="${1:-false}"
+
+    [ ${#SECRETS_LABELS[@]} -eq 0 ] && { log_info "No secrets to rotate"; return 0; }
+
+    if [ "$dry_run" = "true" ]; then
+        local i dry_count=0
+        for i in "${!SECRETS_LABELS[@]}"; do
+            [ "${SECRETS_ENABLED[$i]}" = "true" ] && dry_count=$((dry_count + 1))
+        done
+        log_info "DRY RUN — would rotate ${dry_count} enabled secret(s):"
+        for i in "${!SECRETS_LABELS[@]}"; do
+            [ "${SECRETS_ENABLED[$i]}" = "true" ] && echo "  - ${SECRETS_LABELS[$i]}"
+        done
+        return 0
+    fi
+
+    if [ -t 0 ]; then
+        echo -en "  ${YELLOW}This will rotate ALL ${#SECRETS_LABELS[@]} secret(s). Existing links will stop working. Type 'yes' to confirm:${NC} "
+        local confirm; read -r confirm
+        [ "$confirm" != "yes" ] && { log_info "Cancelled"; return 0; }
+    fi
+
+    local now; now=$(date +%s)
+    local i count=0
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+        SECRETS_KEYS[$i]=$(generate_secret)
+        SECRETS_CREATED[$i]="$now"
+        count=$((count + 1))
+    done
+    save_secrets
+    reload_proxy_config
+    log_success "Rotated ${count} secret(s) — share new links with your users"
+    audit_log "secret rotate --all (${count} secrets)"
+}
+
+# ── CSV secret listing ──
+secret_list_csv() {
+    echo "label,enabled,max_conns,max_ips,quota_bytes,expires,notes,tags"
+    local i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        local label="${SECRETS_LABELS[$i]}"
+        local tags; tags=$(secret_get_tags "$label" 2>/dev/null)
+        # Sanitize notes for CSV: strip newlines, escape commas and quotes
+        local notes="${SECRETS_NOTES[$i]:-}"
+        notes="${notes//$'\n'/ }"
+        notes="${notes//$'\r'/ }"
+        notes="${notes//\"/\"\"}"
+        notes="${notes//,/;}"
+        echo "${label},${SECRETS_ENABLED[$i]},${SECRETS_MAX_CONNS[$i]:-0},${SECRETS_MAX_IPS[$i]:-0},${SECRETS_QUOTA[$i]:-0},${SECRETS_EXPIRES[$i]:-0},\"${notes}\",${tags}"
+    done
+}
+
+# ── Engine parameter tuning ──
+# Whitelist of safe params that can be set via `tune`
+# Format: param_name:section:validator  (section: general|server|timeouts|censorship)
+_TUNE_WHITELIST=(
+    "fake_cert_len:censorship:^[0-9]+$"
+    "client_handshake:timeouts:^[0-9]+$"
+    "tg_connect:timeouts:^[0-9]+$"
+    "client_keepalive:timeouts:^[0-9]+$"
+    "client_ack:timeouts:^[0-9]+$"
+    "replay_check_len:access:^[0-9]+$"
+    "replay_window_secs:access:^[0-9]+$"
+    "ignore_time_skew:access:^(true|false)$"
+    "listen_backlog:server:^[0-9]+$"
+    "max_connections:server:^[0-9]+$"
+    "accept_permit_timeout_ms:server:^[0-9]+$"
+    "prefer_ipv6:general:^(true|false)$"
+    "fast_mode:general:^(true|false)$"
+    "log_level:general:^(debug|verbose|normal|silent)$"
+    "mask_relay_timeout_ms:censorship:^[0-9]+$"
+    "mask_relay_idle_timeout_ms:censorship:^[0-9]+$"
+)
+_TUNE_FILE="${INSTALL_DIR}/tunings.conf"
+
+_tune_lookup() {
+    local param="$1" entry
+    for entry in "${_TUNE_WHITELIST[@]}"; do
+        [[ "$entry" =~ ^${param}: ]] && { echo "$entry"; return 0; }
+    done
+    return 1
+}
+
+tune_list_params() {
+    echo ""
+    draw_header "TUNABLE ENGINE PARAMS"
+    echo ""
+    local entry p s v
+    for entry in "${_TUNE_WHITELIST[@]}"; do
+        IFS=':' read -r p s v <<< "$entry"
+        printf "  %-32s ${DIM}[%s]${NC}\n" "$p" "$s"
+    done
+    echo ""
+    [ -f "$_TUNE_FILE" ] && [ -s "$_TUNE_FILE" ] && {
+        echo -e "  ${BOLD}Currently set:${NC}"
+        while IFS='|' read -r p v; do
+            [ -z "$p" ] && continue
+            echo "    ${p} = ${v}"
+        done < "$_TUNE_FILE"
+        echo ""
+    }
+}
+
+tune_set() {
+    check_root
+    local param="$1" value="$2"
+    [ -z "$param" ] && { log_error "Usage: mtproxymax tune set <param> <value>"; return 1; }
+
+    local entry; entry=$(_tune_lookup "$param") || { log_error "Unknown param '${param}'. Run: mtproxymax tune list"; return 1; }
+    local p sect regex
+    IFS=':' read -r p sect regex <<< "$entry"
+
+    if [ -z "$value" ]; then
+        log_error "Value required"
+        return 1
+    fi
+    [[ "$value" =~ $regex ]] || { log_error "Invalid value for '${param}' (expected pattern: ${regex})"; return 1; }
+
+    mkdir -p "$INSTALL_DIR"
+    touch "$_TUNE_FILE"; chmod 600 "$_TUNE_FILE"
+    local tmp; tmp=$(_mktemp) || return 1
+    grep -v "^${param}|" "$_TUNE_FILE" > "$tmp" 2>/dev/null || true
+    echo "${param}|${value}" >> "$tmp"
+    mv "$tmp" "$_TUNE_FILE"; chmod 600 "$_TUNE_FILE"
+    log_success "Tune '${param}' = ${value}"
+    if is_proxy_running; then
+        echo -en "  ${DIM}Restart to apply? [Y/n]:${NC} "
+        local r; read -r r 2>/dev/null || r="y"
+        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+    fi
+}
+
+tune_clear() {
+    check_root
+    local param="$1"
+    [ -z "$param" ] && { log_error "Usage: mtproxymax tune clear <param|all>"; return 1; }
+    [ ! -f "$_TUNE_FILE" ] && { log_info "No tunings set"; return 0; }
+
+    if [ "$param" = "all" ]; then
+        rm -f "$_TUNE_FILE"
+        log_success "All tunings cleared"
+    else
+        local tmp; tmp=$(_mktemp) || return 1
+        grep -v "^${param}|" "$_TUNE_FILE" > "$tmp" 2>/dev/null || true
+        mv "$tmp" "$_TUNE_FILE"; chmod 600 "$_TUNE_FILE"
+        log_success "Tune '${param}' cleared"
+    fi
+    if is_proxy_running; then
+        echo -en "  ${DIM}Restart to apply? [Y/n]:${NC} "
+        local r; read -r r 2>/dev/null || r="y"
+        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+    fi
+}
+
+tune_get() {
+    local param="$1"
+    if [ -z "$param" ]; then
+        if [ ! -f "$_TUNE_FILE" ] || [ ! -s "$_TUNE_FILE" ]; then
+            log_info "No tunings set"
+            return
+        fi
+        echo ""
+        while IFS='|' read -r p v; do
+            [ -z "$p" ] && continue
+            echo "  ${p} = ${v}"
+        done < "$_TUNE_FILE"
+        echo ""
+    else
+        local v; v=$(awk -F'|' -v u="$param" '$1==u{print $2; exit}' "$_TUNE_FILE" 2>/dev/null)
+        [ -n "$v" ] && echo "  ${param} = ${v}" || echo -e "  ${DIM}${param}: not set${NC}"
+    fi
+}
+
+# Helper: emit tunings for a given section (used by generate_telemt_config)
+_emit_tunings_for_section() {
+    [ -f "$_TUNE_FILE" ] || return 0
+    local target_section="$1" entry p s v tune_p tune_v
+    while IFS='|' read -r tune_p tune_v; do
+        [ -z "$tune_p" ] && continue
+        entry=$(_tune_lookup "$tune_p") || continue
+        IFS=':' read -r p s <<< "$entry"
+        if [ "$s" = "$target_section" ]; then
+            # Boolean / numeric — no quotes. String values wrap in quotes.
+            if [[ "$tune_v" =~ ^(true|false|[0-9]+)$ ]]; then
+                echo "${tune_p} = ${tune_v}"
+            else
+                echo "${tune_p} = \"${tune_v}\""
+            fi
+        fi
+    done < "$_TUNE_FILE"
+}
+
+# ── End-to-end install verification ──
+run_verify() {
+    echo ""
+    draw_header "VERIFY"
+    echo ""
+    local pass=0 fail=0
+    _check() {
+        local name="$1" cmd="$2"
+        if eval "$cmd" &>/dev/null; then
+            echo -e "  ${GREEN}${SYM_CHECK}${NC} ${name}"
+            pass=$((pass + 1))
+        else
+            echo -e "  ${RED}${SYM_CROSS}${NC} ${name}"
+            fail=$((fail + 1))
+        fi
+    }
+
+    _check "Docker installed"           "command -v docker"
+    _check "Engine container running"   "is_proxy_running"
+    _check "Port ${PROXY_PORT} listening" "ss -tln 2>/dev/null | grep -qE ':${PROXY_PORT}[[:space:]]'"
+    _check "Metrics endpoint responds"  "curl -fsS --max-time 3 http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics -o /dev/null"
+    _check "TLS handshake on proxy port" "echo | timeout 5 openssl s_client -connect 127.0.0.1:${PROXY_PORT} -servername ${PROXY_DOMAIN:-cloudflare.com} 2>&1 | grep -q 'CONNECTED'"
+    _check "Domain ${PROXY_DOMAIN:-cloudflare.com} reachable" "curl -fsS --max-time 5 -o /dev/null https://${PROXY_DOMAIN:-cloudflare.com}"
+    _check "api.telegram.org reachable" "curl -fsS --max-time 5 -o /dev/null https://api.telegram.org"
+    _check "At least one active secret"  "[ ${#SECRETS_LABELS[@]} -gt 0 ]"
+    _check "Config file exists"          "[ -f '${CONFIG_DIR}/config.toml' ]"
+
+    # Telegram bot if configured
+    if [ "$TELEGRAM_ENABLED" = "true" ] && [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+        local _cfg; _cfg=$(_mktemp)
+        printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TELEGRAM_BOT_TOKEN" > "$_cfg"
+        _check "Telegram bot token valid" "curl -fsS --max-time 5 -K '$_cfg' | grep -q '\"ok\":true'"
+        rm -f "$_cfg"
+    fi
+
+    unset -f _check
+    echo ""
+    if [ $fail -eq 0 ]; then
+        echo -e "  ${BRIGHT_GREEN}${BOLD}All ${pass} checks passed${NC}"
+    else
+        echo -e "  ${YELLOW}${pass} passed, ${RED}${fail} failed${NC}"
+    fi
+    echo ""
+    return "$fail"
+}
+
+# ── Audit log (config change history) ──
+_AUDIT_LOG="${INSTALL_DIR}/audit.log"
+
+audit_log() {
+    local action="$*"
+    [ -z "$action" ] && return 0
+    mkdir -p "$INSTALL_DIR"
+    touch "$_AUDIT_LOG"; chmod 600 "$_AUDIT_LOG"
+    local ts user
+    ts=$(date -u '+%Y-%m-%d %H:%M:%S')
+    user="${SUDO_USER:-${USER:-root}}"
+    echo "${ts} UTC | ${user} | ${action}" >> "$_AUDIT_LOG"
+    # Rotate if over 10000 lines
+    local lines; lines=$(wc -l < "$_AUDIT_LOG" 2>/dev/null | tr -d ' ')
+    [[ "$lines" =~ ^[0-9]+$ ]] && [ "$lines" -gt 10000 ] 2>/dev/null && \
+        tail -n 8000 "$_AUDIT_LOG" > "${_AUDIT_LOG}.tmp" && mv "${_AUDIT_LOG}.tmp" "$_AUDIT_LOG"
+}
+
+show_history() {
+    local lines="${1:-50}"
+    [[ "$lines" =~ ^[0-9]+$ ]] || lines=50
+    if [ ! -f "$_AUDIT_LOG" ] || [ ! -s "$_AUDIT_LOG" ]; then
+        log_info "No audit history yet"
+        return
+    fi
+    echo ""
+    draw_header "AUDIT HISTORY (last ${lines})"
+    echo ""
+    tail -n "$lines" "$_AUDIT_LOG" | sed 's/^/  /'
+    echo ""
+}
+
+# ── Bash completion ──
+emit_completion() {
+    cat <<'COMPL'
+# mtproxymax bash completion — generated by `mtproxymax completion`
+# Install: sudo mtproxymax completion > /etc/bash_completion.d/mtproxymax
+# Or: eval "$(mtproxymax completion)"
+_mtproxymax_completion() {
+    local cur prev cmd
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    cmd="${COMP_WORDS[1]}"
+
+    # Top-level commands
+    if [ "$COMP_CWORD" -eq 1 ]; then
+        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy"
+        COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
+        return 0
+    fi
+
+    # Subcommands
+    case "$cmd" in
+        secret)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "add remove list info rotate clone rename enable disable limits setlimit setlimits link qr note stats sort top search archive unarchive archives generate-links extend bulk-extend disable-expired export import reset-traffic tag untag tags logs quota-reset" -- "${cur}") )
+            fi
+            ;;
+        upstream)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "list add remove enable disable test" -- "${cur}") )
+            ;;
+        profile)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "save load list delete" -- "${cur}") )
+            ;;
+        template)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "save list delete apply" -- "${cur}") )
+            ;;
+        tune)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "list get set clear" -- "${cur}") )
+            ;;
+        migrate)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "export import" -- "${cur}") )
+            ;;
+        backup)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "--encrypt restore-encrypted autoclean" -- "${cur}") )
+            ;;
+        tg-urls)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "get set clear" -- "${cur}") )
+            ;;
+        geoblock)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "add remove list mode" -- "${cur}") )
+            ;;
+        maintenance)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+            ;;
+        telegram)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status test disable remove" -- "${cur}") )
+            ;;
+        replication)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status add remove list enable disable sync test logs reset promote" -- "${cur}") )
+            ;;
+    esac
+    return 0
+}
+complete -F _mtproxymax_completion mtproxymax
+COMPL
+}
+
+# ── Outbound throughput test ──
+run_speedtest() {
+    echo ""
+    draw_header "SPEED TEST"
+    echo ""
+    echo -e "  ${DIM}Measuring outbound bandwidth from server...${NC}"
+    echo ""
+
+    # Parallel arrays: label + url
+    local labels=("Cachefly 10MB" "Hetzner 100MB" "Telegram API (latency)")
+    local urls=(
+        "https://cachefly.cachefly.net/10mb.test"
+        "https://speed.hetzner.de/100MB.bin"
+        "https://api.telegram.org"
+    )
+
+    local i
+    for i in "${!urls[@]}"; do
+        local label="${labels[$i]}" url="${urls[$i]}"
+        printf "  ${BOLD}%-28s${NC}  " "$label"
+        local result
+        result=$(curl -so /dev/null -w '%{http_code}|%{time_total}|%{speed_download}' --max-time 15 "$url" 2>/dev/null) || { echo -e "${RED}FAILED${NC}"; continue; }
+        local code time speed
+        IFS='|' read -r code time speed <<< "$result"
+        local speed_fmt="—"
+        local speed_int="${speed%.*}"
+        [[ "$speed_int" =~ ^[0-9]+$ ]] && [ "$speed_int" -gt 0 ] 2>/dev/null && speed_fmt="$(format_bytes "$speed_int")/s"
+        printf "code=%s  time=%.2fs  speed=%s\n" "$code" "$time" "$speed_fmt"
+    done
+    echo ""
+    echo -e "  ${DIM}Note: measures server ↔ internet bandwidth, not proxy throughput.${NC}"
+    echo ""
+}
+
+# ── Show changelog since installed version ──
+show_changelog() {
+    log_info "Fetching changelog from GitHub..."
+    local out
+    out=$(curl -fsSL --max-time 10 "https://api.github.com/repos/${GITHUB_REPO}/releases" 2>/dev/null) || { log_error "Failed to fetch releases"; return 1; }
+
+    # Parse and display (Python for clean JSON, grep fallback)
+    if command -v python3 &>/dev/null; then
+        echo "$out" | python3 -c "
+import json,sys
+try:
+    releases=json.load(sys.stdin)
+    current='${VERSION}'
+    found_current=False
+    for r in releases:
+        tag=r.get('tag_name','').lstrip('v')
+        if tag==current:
+            found_current=True
+            break
+        print('\n━━━ v'+tag+' ━━━')
+        print(r.get('name',tag))
+        print()
+        body=r.get('body','').strip()
+        if body:
+            for line in body.split('\n')[:30]:
+                print('  '+line)
+        print()
+    if not found_current:
+        print('(current version not found in releases)')
+except Exception as e:
+    sys.stderr.write(f'parse error: {e}\n')
+" 2>/dev/null
+    else
+        echo "$out" | grep -oE '"tag_name":[[:space:]]*"[^"]*"' | head -10 | cut -d'"' -f4
+    fi
+    echo ""
+}
+
 # ── Section 8b: Upstream Management ──────────────────────────
 
 # Add a new upstream
@@ -3715,6 +4834,8 @@ run_proxy_container() {
         log_success "Proxy is running on port ${PROXY_PORT}"
         traffic_tracking_setup
         geoblock_reapply_all
+        bans_reapply 2>/dev/null
+        maintenance_reapply 2>/dev/null
 
         # Show links for all enabled secrets
         local server_ip
@@ -5311,6 +6432,9 @@ while true; do
     # Quota enforcement + expiry checks every 5 min (runs even if Telegram is disabled)
     if [ $((_now - _last_enforcement)) -ge 300 ]; then
         _last_enforcement=$_now
+
+        # Periodic tasks: monthly quota reset, auto-rotate, backup autoclean
+        "${INSTALL_DIR}/mtproxymax" sweep &>/dev/null &
 
         # Quota enforcement (auto-disable secrets that exceeded quota)
         _quota_file="${INSTALL_DIR}/relay_stats/.quota_alerts_sent"
@@ -6942,6 +8066,15 @@ show_cli_help() {
     echo -e "    ${GREEN}secret archive${NC} <label>       Soft-delete (restorable)"
     echo -e "    ${GREEN}secret unarchive${NC} <label>     Restore archived secret"
     echo -e "    ${GREEN}secret archives${NC}              List archived secrets"
+    echo -e "    ${GREEN}secret tag${NC} <label> <tags>    Tag a secret (comma-separated)"
+    echo -e "    ${GREEN}secret untag${NC} <label>         Remove all tags"
+    echo -e "    ${GREEN}secret tags${NC} [label]          Show tags (all or one secret)"
+    echo -e "    ${GREEN}secret list --tag${NC} <tag>      List secrets with a given tag"
+    echo -e "    ${GREEN}secret list --csv${NC}            List secrets in CSV format"
+    echo -e "    ${GREEN}secret logs${NC} <label> [lines]  Show activity log for one user"
+    echo -e "    ${GREEN}secret rotate --all${NC}          Rotate ALL secrets (--dry-run to preview)"
+    echo -e "    ${GREEN}secret quota-reset${NC} <label> <day|off>  Monthly quota reset on day N"
+    echo -e "    ${GREEN}secret add --template${NC} <name> <label>  Add secret using a template"
     echo -e "    ${DIM}Tip: add/remove support --no-restart flag for scripting${NC}"
     echo ""
     echo -e "  ${BOLD}Upstream Routing:${NC}"
@@ -6959,6 +8092,24 @@ show_cli_help() {
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
     echo -e "    ${GREEN}mask-relay-bytes${NC} [N|0|clear]  Max bytes per direction on mask relay (0=unlimited)"
     echo -e "    ${GREEN}tg-urls${NC} [get|set <field> <url>|clear]  Custom Telegram infrastructure URLs (restricted regions)"
+    echo -e "    ${GREEN}info${NC}                    Comprehensive server + proxy info"
+    echo -e "    ${GREEN}maintenance${NC} [on|off]    Maintenance mode (reject new connections)"
+    echo -e "    ${GREEN}ban${NC} <ip|cidr>           Ban an IP or CIDR range"
+    echo -e "    ${GREEN}unban${NC} <ip|cidr>         Remove ban"
+    echo -e "    ${GREEN}bans${NC}                    List banned IPs"
+    echo -e "    ${GREEN}migrate export${NC} [file]   Export all state to a tarball"
+    echo -e "    ${GREEN}migrate import${NC} <file>   Import state from a tarball"
+    echo -e "    ${GREEN}changelog${NC}               Show release notes since installed version"
+    echo -e "    ${GREEN}backup --encrypt${NC}        Create AES-256 encrypted backup"
+    echo -e "    ${GREEN}backup autoclean${NC} [days] Delete backups older than N days (default: BACKUP_RETENTION_DAYS)"
+    echo -e "    ${GREEN}auto-rotate${NC} [N|off]     Auto-rotate secrets older than N days"
+    echo -e "    ${GREEN}template${NC} save|list|delete|apply  Manage limit templates"
+    echo -e "    ${GREEN}sweep${NC}                   Run periodic maintenance tasks (quota-reset, auto-rotate, backup cleanup)"
+    echo -e "    ${GREEN}tune${NC} list|get|set|clear Engine tuning (whitelisted params)"
+    echo -e "    ${GREEN}verify${NC}                  End-to-end install verification"
+    echo -e "    ${GREEN}history${NC} [lines]         Show config change audit log"
+    echo -e "    ${GREEN}completion${NC}              Emit bash completion script"
+    echo -e "    ${GREEN}speedtest${NC}               Test outbound bandwidth/latency from server"
     echo -e "    ${GREEN}adtag${NC} [set <hex>|remove|view] Manage ad-tag"
     echo -e "    ${GREEN}geoblock${NC} [add|remove|list|clear] Manage geo-blocking"
     echo -e "    ${GREEN}sni-policy${NC} [mask|drop]       Unknown SNI action (mask=permissive, drop=strict)"
@@ -7301,14 +8452,17 @@ cli_main() {
             case "$subcmd" in
                 add)
                     check_root
-                    local _no_restart="false" _add_label="" _add_secret=""
+                    local _no_restart="false" _add_label="" _add_secret="" _add_template=""
                     while [ $# -gt 0 ]; do
                         case "$1" in
                             --no-restart) _no_restart="true" ;;
+                            --template) shift; _add_template="$1" ;;
                             *) [ -z "$_add_label" ] && _add_label="$1" || _add_secret="$1" ;;
                         esac; shift
                     done
-                    secret_add "$_add_label" "$_add_secret" "$_no_restart"
+                    secret_add "$_add_label" "$_add_secret" "$_no_restart" || return 1
+                    # Apply template after creating
+                    [ -n "$_add_template" ] && template_apply "$_add_template" "$_add_label"
                     ;;
                 add-batch)
                     check_root
@@ -7318,14 +8472,19 @@ cli_main() {
                     ;;
                 remove)
                     check_root
-                    local _no_restart="false" _rm_label=""
+                    local _no_restart="false" _rm_label="" _dry=""
                     while [ $# -gt 0 ]; do
                         case "$1" in
                             --no-restart) _no_restart="true" ;;
+                            --dry-run)    _dry="true" ;;
                             *) [ -z "$_rm_label" ] && _rm_label="$1" ;;
                         esac; shift
                     done
-                    secret_remove "$_rm_label" "false" "$_no_restart"
+                    if [ "$_dry" = "true" ]; then
+                        log_info "DRY RUN — would remove secret '${_rm_label}' (no changes made)"
+                    else
+                        secret_remove "$_rm_label" "false" "$_no_restart"
+                    fi
                     ;;
                 remove-batch)
                     check_root
@@ -7333,8 +8492,29 @@ cli_main() {
                     for _a in "$@"; do [[ "$_a" == "--no-restart" ]] && _no_restart="true" || _args+=("$_a"); done
                     secret_remove_batch "false" "$_no_restart" "${_args[@]}"
                     ;;
-                list)    secret_list ;;
-                rotate)  check_root; secret_rotate "$1" ;;
+                list)
+                    if [ "${1:-}" = "--tag" ] && [ -n "${2:-}" ]; then
+                        secret_list_by_tag "$2"
+                    elif [ "${1:-}" = "--csv" ]; then
+                        secret_list_csv
+                    else
+                        secret_list
+                    fi
+                    ;;
+                rotate)
+                    check_root
+                    if [ "${1:-}" = "--all" ]; then
+                        secret_rotate_all "${2:-false}"
+                    elif [ "${1:-}" = "--dry-run" ]; then
+                        secret_rotate_all "true"
+                    else
+                        secret_rotate "$1"
+                    fi
+                    ;;
+                quota-reset)
+                    check_root
+                    secret_set_quota_reset_day "$1" "$2"
+                    ;;
                 link)    get_proxy_link_https "${1:-}"; echo "" ;;
                 qr)      local link; link=$(get_proxy_link_https "${1:-}") && show_qr "$link" ;;
                 enable)  check_root; secret_toggle "$1" enable ;;
@@ -7462,6 +8642,28 @@ cli_main() {
                 top)
                     secret_top "${1:-traffic}" "${2:-5}"
                     ;;
+                tag)
+                    check_root
+                    local _tg_label="$1"; shift 2>/dev/null || true
+                    secret_tag "$_tg_label" "$@"
+                    ;;
+                untag)
+                    check_root
+                    secret_untag "$1"
+                    ;;
+                tags)
+                    local _st_label="$1"
+                    if [ -z "$_st_label" ]; then
+                        [ ! -f "$_TAGS_FILE" ] && { log_info "No tags set"; return 0; }
+                        cat "$_TAGS_FILE" 2>/dev/null | column -t -s'|' 2>/dev/null || cat "$_TAGS_FILE"
+                    else
+                        local _t; _t=$(secret_get_tags "$_st_label")
+                        echo "  ${_st_label}: ${_t:-${DIM}(none)${NC}}"
+                    fi
+                    ;;
+                logs)
+                    secret_logs "$1" "${2:-50}"
+                    ;;
                 *)       log_error "Unknown: secret ${subcmd}"; show_cli_help; return 1 ;;
             esac
             ;;
@@ -7566,6 +8768,7 @@ cli_main() {
                         PROXY_DOMAIN="$new_domain"
                         save_settings
                         log_success "Domain changed to ${new_domain}"
+                        audit_log "domain change → ${new_domain}"
                         log_warn "Existing proxy links still encode the old domain"
                         local _rot="y"
                         if [ -t 0 ]; then
@@ -7649,6 +8852,121 @@ cli_main() {
             if is_proxy_running; then
                 restart_proxy_container
             fi
+            ;;
+
+        info)
+            load_settings
+            load_secrets
+            show_server_info
+            ;;
+
+        maintenance)
+            load_settings
+            case "${1:-status}" in
+                on|enable)   maintenance_on ;;
+                off|disable) maintenance_off ;;
+                status|"")   maintenance_status ;;
+                *) log_error "Usage: mtproxymax maintenance [on|off|status]"; return 1 ;;
+            esac
+            ;;
+
+        ban)
+            load_settings
+            ban_ip "$1"
+            ;;
+        unban)
+            load_settings
+            unban_ip "$1"
+            ;;
+        bans)
+            load_settings
+            bans_list
+            ;;
+
+        migrate)
+            load_settings
+            load_secrets
+            case "${1:-}" in
+                export) migrate_export "$2" ;;
+                import) migrate_import "$2" ;;
+                *) log_error "Usage: mtproxymax migrate export [file] | import <file>"; return 1 ;;
+            esac
+            ;;
+
+        changelog)
+            show_changelog
+            ;;
+
+        sweep)
+            # Internal periodic maintenance tasks — called by bot loop and/or cron
+            load_settings
+            load_secrets
+            secret_check_quota_resets 2>/dev/null
+            secret_check_auto_rotate 2>/dev/null
+            [ "${BACKUP_RETENTION_DAYS:-30}" -gt 0 ] 2>/dev/null && backup_autoclean "${BACKUP_RETENTION_DAYS}" >/dev/null 2>&1
+            ;;
+
+        auto-rotate)
+            load_settings
+            local _val="${1:-}"
+            if [ -z "$_val" ]; then
+                echo -e "  Auto-rotate: ${SECRET_AUTO_ROTATE_DAYS:-0} days ${DIM}(0 = disabled)${NC}"
+                return
+            fi
+            check_root
+            if [ "$_val" = "off" ] || [ "$_val" = "0" ]; then
+                SECRET_AUTO_ROTATE_DAYS="0"
+            elif [[ "$_val" =~ ^[0-9]+$ ]] && [ "$_val" -ge 1 ] && [ "$_val" -le 3650 ]; then
+                SECRET_AUTO_ROTATE_DAYS="$_val"
+            else
+                log_error "Value must be a positive integer (days) or 'off'"
+                return 1
+            fi
+            save_settings
+            log_success "Auto-rotate policy: ${SECRET_AUTO_ROTATE_DAYS} days"
+            ;;
+
+        template)
+            load_settings
+            load_secrets
+            local sub="${1:-list}"; shift 2>/dev/null || true
+            case "$sub" in
+                save)   template_save "$@" ;;
+                list)   template_list ;;
+                delete) template_delete "$1" ;;
+                apply)  template_apply "$@" ;;
+                *) log_error "Usage: mtproxymax template save|list|delete|apply"; return 1 ;;
+            esac
+            ;;
+
+        tune)
+            load_settings
+            local sub="${1:-list}"; shift 2>/dev/null || true
+            case "$sub" in
+                list|"")  tune_list_params ;;
+                get)      tune_get "$1" ;;
+                set)      tune_set "$1" "$2" ;;
+                clear)    tune_clear "$1" ;;
+                *) log_error "Usage: mtproxymax tune list|get|set|clear"; return 1 ;;
+            esac
+            ;;
+
+        verify)
+            load_settings
+            load_secrets
+            run_verify
+            ;;
+
+        history)
+            show_history "${1:-50}"
+            ;;
+
+        completion)
+            emit_completion
+            ;;
+
+        speedtest)
+            run_speedtest
             ;;
 
         tg-urls)
@@ -7931,13 +9249,23 @@ cli_main() {
         backup)
             check_root
             load_settings
-            create_backup
+            load_secrets
+            case "${1:-}" in
+                --encrypt|encrypt) backup_create_encrypted ;;
+                restore-encrypted) backup_restore_encrypted "$2" ;;
+                autoclean)         backup_autoclean "${2:-${BACKUP_RETENTION_DAYS:-30}}" ;;
+                *) create_backup ;;
+            esac
             ;;
 
         restore)
             check_root
             load_settings
-            restore_backup "$1"
+            if [ "${1:-}" = "--encrypted" ] && [ -n "${2:-}" ]; then
+                backup_restore_encrypted "$2"
+            else
+                restore_backup "$1"
+            fi
             ;;
 
         backups)
@@ -8070,10 +9398,6 @@ cli_main() {
             esac
             ;;
 
-        info)
-            load_settings
-            show_info_menu
-            ;;
 
         firewall)
             load_settings
@@ -8197,6 +9521,7 @@ show_security_menu() {
         echo -e "  ${DIM}[1]${NC} Geo-Blocking"
         echo -e "  ${DIM}[2]${NC} Proxy Chaining (Upstreams)"
         echo -e "  ${DIM}[3]${NC} Unknown SNI Policy: ${sni_label}"
+        echo -e "  ${DIM}[4]${NC} IP Banlist"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8222,6 +9547,24 @@ show_security_menu() {
                     1) UNKNOWN_SNI_ACTION="mask"; save_settings; reload_proxy_config; log_success "Unknown SNI policy set to Mask" ;;
                     2) UNKNOWN_SNI_ACTION="drop"; save_settings; reload_proxy_config; log_success "Unknown SNI policy set to Drop" ;;
                     *) ;;
+                esac
+                press_any_key
+                ;;
+            4)
+                bans_list
+                echo -e "  ${DIM}[1] Ban IP/CIDR  [2] Unban IP/CIDR  [0] Back${NC}"
+                local bc; bc=$(read_choice "Choice" "0")
+                case "$bc" in
+                    1)
+                        echo -en "  ${BOLD}IP or CIDR to ban:${NC} "
+                        local bi; read -r bi
+                        [ -n "$bi" ] && { ban_ip "$bi" || true; }
+                        ;;
+                    2)
+                        echo -en "  ${BOLD}IP or CIDR to unban:${NC} "
+                        local bi; read -r bi
+                        [ -n "$bi" ] && { unban_ip "$bi" || true; }
+                        ;;
                 esac
                 press_any_key
                 ;;
@@ -8421,6 +9764,8 @@ show_proxy_menu() {
         echo -e "  ${DIM}[3]${NC} Restart proxy"
         echo -e "  ${DIM}[4]${NC} View logs"
         echo -e "  ${DIM}[5]${NC} Health check"
+        maintenance_status
+        echo -e "  ${DIM}[m]${NC} Toggle maintenance mode"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8431,6 +9776,14 @@ show_proxy_menu() {
             3) restart_proxy_container || true; press_any_key ;;
             4) echo -e "  ${DIM}Press Ctrl+C to stop...${NC}"; docker logs -f --tail 30 "$CONTAINER_NAME" 2>&1 || true; press_any_key ;;
             5) health_check || true; press_any_key ;;
+            m|M)
+                if [ -f "$MAINTENANCE_FILE" ]; then
+                    maintenance_off
+                else
+                    maintenance_on
+                fi
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac
@@ -8465,6 +9818,11 @@ show_secrets_menu() {
         echo -e "  ${DIM}[p]${NC} Top users"
         echo -e "  ${DIM}[g]${NC} Generate links file"
         echo -e "  ${DIM}[a]${NC} Archive / Unarchive"
+        echo -e "  ${DIM}[y]${NC} Tag / Untag / Filter by tag"
+        echo -e "  ${DIM}[l]${NC} View user activity log"
+        echo -e "  ${DIM}[q]${NC} Monthly quota reset"
+        echo -e "  ${DIM}[R]${NC} Rotate ALL secrets"
+        echo -e "  ${DIM}[k]${NC} Templates (save / apply / list / delete)"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -8695,6 +10053,114 @@ show_secrets_menu() {
                 esac
                 press_any_key
                 ;;
+            y|Y)
+                echo -e "  ${DIM}[1] Set tags  [2] Clear tags  [3] Filter by tag  [4] Show all tags${NC}"
+                local tc; tc=$(read_choice "Choice" "0")
+                case "$tc" in
+                    1)
+                        echo -en "  ${BOLD}Label or #:${NC} "
+                        local tl; read -r tl
+                        if [[ "$tl" =~ ^[0-9]+$ ]] && [ "$tl" -ge 1 ] && [ "$tl" -le "${#SECRETS_LABELS[@]}" ]; then
+                            tl="${SECRETS_LABELS[$((tl - 1))]}"
+                        fi
+                        if [ -n "$tl" ]; then
+                            echo -en "  ${BOLD}Tags (comma-separated):${NC} "
+                            local tv; read -r tv
+                            [ -n "$tv" ] && { secret_tag "$tl" "$tv" || true; }
+                        fi
+                        ;;
+                    2)
+                        echo -en "  ${BOLD}Label or #:${NC} "
+                        local tl; read -r tl
+                        if [[ "$tl" =~ ^[0-9]+$ ]] && [ "$tl" -ge 1 ] && [ "$tl" -le "${#SECRETS_LABELS[@]}" ]; then
+                            tl="${SECRETS_LABELS[$((tl - 1))]}"
+                        fi
+                        [ -n "$tl" ] && { secret_untag "$tl" || true; }
+                        ;;
+                    3)
+                        echo -en "  ${BOLD}Tag to filter:${NC} "
+                        local tf; read -r tf
+                        [ -n "$tf" ] && secret_list_by_tag "$tf"
+                        ;;
+                    4)
+                        if [ -f "$_TAGS_FILE" ] && [ -s "$_TAGS_FILE" ]; then
+                            echo ""
+                            echo -e "  ${BOLD}LABEL            TAGS${NC}"
+                            echo -e "  ${DIM}$(_repeat '─' 50)${NC}"
+                            while IFS='|' read -r lbl tgs; do
+                                [ -z "$lbl" ] && continue
+                                printf "  %-16s %s\n" "$lbl" "$tgs"
+                            done < "$_TAGS_FILE"
+                        else
+                            echo -e "  ${DIM}No tags set${NC}"
+                        fi
+                        ;;
+                esac
+                press_any_key
+                ;;
+            l|L)
+                echo -en "  ${BOLD}Label or #:${NC} "
+                local ll; read -r ll
+                if [[ "$ll" =~ ^[0-9]+$ ]] && [ "$ll" -ge 1 ] && [ "$ll" -le "${#SECRETS_LABELS[@]}" ]; then
+                    ll="${SECRETS_LABELS[$((ll - 1))]}"
+                fi
+                [ -n "$ll" ] && secret_logs "$ll"
+                press_any_key
+                ;;
+            q|Q)
+                echo -en "  ${BOLD}Label or #:${NC} "
+                local ql; read -r ql
+                if [[ "$ql" =~ ^[0-9]+$ ]] && [ "$ql" -ge 1 ] && [ "$ql" -le "${#SECRETS_LABELS[@]}" ]; then
+                    ql="${SECRETS_LABELS[$((ql - 1))]}"
+                fi
+                if [ -n "$ql" ]; then
+                    local _cur_day; _cur_day=$(secret_get_quota_reset_day "$ql")
+                    echo -e "  ${DIM}Current: ${_cur_day:-not set}${NC}"
+                    echo -en "  ${BOLD}Day of month (1-31, or 'off'):${NC} "
+                    local qd; read -r qd
+                    [ -n "$qd" ] && { secret_set_quota_reset_day "$ql" "$qd" || true; }
+                fi
+                press_any_key
+                ;;
+            r|R)
+                echo -e "  ${DIM}[1] Dry run (preview)  [2] Rotate ALL now${NC}"
+                local rc; rc=$(read_choice "Choice" "1")
+                case "$rc" in
+                    1) secret_rotate_all "true" ;;
+                    2) secret_rotate_all "false" ;;
+                esac
+                press_any_key
+                ;;
+            k|K)
+                template_list
+                echo -e "  ${DIM}[1] Save new  [2] Apply to secret  [3] Delete${NC}"
+                local tc; tc=$(read_choice "Choice" "0")
+                case "$tc" in
+                    1)
+                        echo -en "  ${BOLD}Name:${NC} "; local tn; read -r tn
+                        [ -z "$tn" ] && { press_any_key; continue; }
+                        echo -en "  ${BOLD}Conns (0=unlimited):${NC} "; local tc2; read -r tc2
+                        echo -en "  ${BOLD}IPs (0=unlimited):${NC} "; local ti; read -r ti
+                        echo -en "  ${BOLD}Quota (e.g. 10G, 0=unlimited):${NC} "; local tq; read -r tq
+                        echo -en "  ${BOLD}Expires (YYYY-MM-DD or empty):${NC} "; local te; read -r te
+                        echo -en "  ${BOLD}Notes (optional):${NC} "; local tno; read -r tno
+                        template_save "$tn" "${tc2:-0}" "${ti:-0}" "${tq:-0}" "${te:-0}" "$tno" || true
+                        ;;
+                    2)
+                        echo -en "  ${BOLD}Template name:${NC} "; local tn; read -r tn
+                        echo -en "  ${BOLD}Label or # to apply to:${NC} "; local tl; read -r tl
+                        if [[ "$tl" =~ ^[0-9]+$ ]] && [ "$tl" -ge 1 ] && [ "$tl" -le "${#SECRETS_LABELS[@]}" ]; then
+                            tl="${SECRETS_LABELS[$((tl - 1))]}"
+                        fi
+                        [ -n "$tn" ] && [ -n "$tl" ] && { template_apply "$tn" "$tl" || true; }
+                        ;;
+                    3)
+                        echo -en "  ${BOLD}Name to delete:${NC} "; local tn; read -r tn
+                        [ -n "$tn" ] && { template_delete "$tn" || true; }
+                        ;;
+                esac
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac
@@ -8840,6 +10306,8 @@ show_settings_menu() {
         echo -e "  ${DIM}[k]${NC} Port reachability check"
         echo -e "  ${DIM}[r]${NC} Config profiles"
         echo -e "  ${DIM}[u]${NC} Custom Telegram URLs (restricted regions)"
+        echo -e "  ${DIM}[A]${NC} Auto-rotate policy (current: ${SECRET_AUTO_ROTATE_DAYS:-0}d)"
+        echo -e "  ${DIM}[n]${NC} Engine tuning (advanced)"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -9162,6 +10630,53 @@ show_settings_menu() {
                     else
                         log_error "URL must start with http:// or https://"
                     fi
+                fi
+                press_any_key
+                ;;
+            n|N)
+                tune_list_params
+                echo -e "  ${DIM}[1] Set param  [2] Clear param  [3] Clear all  [0] Back${NC}"
+                local tch; tch=$(read_choice "Choice" "0")
+                case "$tch" in
+                    1)
+                        echo -en "  ${BOLD}Param name:${NC} "
+                        local tp; read -r tp
+                        [ -z "$tp" ] && { press_any_key; continue; }
+                        echo -en "  ${BOLD}Value:${NC} "
+                        local tv; read -r tv
+                        [ -n "$tv" ] && { tune_set "$tp" "$tv" || true; }
+                        ;;
+                    2)
+                        echo -en "  ${BOLD}Param name to clear:${NC} "
+                        local tp; read -r tp
+                        [ -n "$tp" ] && { tune_clear "$tp" || true; }
+                        ;;
+                    3)
+                        tune_clear "all"
+                        ;;
+                esac
+                press_any_key
+                ;;
+            a|A)
+                echo ""
+                echo -e "  ${BOLD}Secret auto-rotate policy${NC}"
+                echo -e "  ${DIM}Automatically rotate all secrets older than N days.${NC}"
+                echo -e "  ${DIM}Set to 0 to disable. Bot daemon enforces every 5 min.${NC}"
+                echo ""
+                echo -e "  Current: ${SECRET_AUTO_ROTATE_DAYS:-0} days"
+                echo -en "  ${BOLD}New value (days, 0=disabled):${NC} "
+                local _av; read -r _av
+                if [ -n "$_av" ]; then
+                    if [ "$_av" = "off" ] || [ "$_av" = "0" ]; then
+                        SECRET_AUTO_ROTATE_DAYS="0"
+                    elif [[ "$_av" =~ ^[0-9]+$ ]] && [ "$_av" -ge 1 ] && [ "$_av" -le 3650 ]; then
+                        SECRET_AUTO_ROTATE_DAYS="$_av"
+                    else
+                        log_error "Must be a positive integer (days) or 'off'"
+                        press_any_key; continue
+                    fi
+                    save_settings
+                    log_success "Auto-rotate policy: ${SECRET_AUTO_ROTATE_DAYS} days"
                 fi
                 press_any_key
                 ;;
@@ -9796,6 +11311,11 @@ show_info_menu() {
         echo -e "  ${BRIGHT_CYAN}[f]${NC}  Firewall Configuration Guide"
         echo ""
         echo -e "  ${BRIGHT_CYAN}[d]${NC}  Run Doctor (diagnostics)"
+        echo -e "  ${BRIGHT_CYAN}[i]${NC}  Server Info (full overview)"
+        echo -e "  ${BRIGHT_CYAN}[n]${NC}  View Changelog"
+        echo -e "  ${BRIGHT_CYAN}[v]${NC}  Run Verify (install check)"
+        echo -e "  ${BRIGHT_CYAN}[s]${NC}  Speed Test (outbound bandwidth)"
+        echo -e "  ${BRIGHT_CYAN}[h]${NC}  Audit History"
         echo ""
         echo -e "  ${DIM}[0]${NC}  Back"
 
@@ -9817,6 +11337,11 @@ show_info_menu() {
             p|P) show_port_forward_guide ;;
             f|F) show_firewall_guide ;;
             d|D) run_doctor; press_any_key ;;
+            i|I) show_server_info; press_any_key ;;
+            n|N) show_changelog; press_any_key ;;
+            v|V) run_verify; press_any_key ;;
+            s|S) run_speedtest; press_any_key ;;
+            h|H) show_history 50; press_any_key ;;
             0|"") return ;;
             *) ;;
         esac
@@ -10012,6 +11537,11 @@ show_about() {
         echo -e "  ${DIM}[2]${NC} Create backup"
         echo -e "  ${DIM}[3]${NC} Restore backup"
         echo -e "  ${DIM}[4]${NC} List backups"
+        echo -e "  ${DIM}[5]${NC} Create encrypted backup"
+        echo -e "  ${DIM}[6]${NC} Restore encrypted backup"
+        echo -e "  ${DIM}[7]${NC} Migrate export (to another server)"
+        echo -e "  ${DIM}[8]${NC} Migrate import (from another server)"
+        echo -e "  ${DIM}[9]${NC} Auto-clean old backups"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -10035,6 +11565,39 @@ show_about() {
                 press_any_key
                 ;;
             4) list_backups; press_any_key ;;
+            5) backup_create_encrypted || true; press_any_key ;;
+            6)
+                echo -en "  ${BOLD}Encrypted backup file path:${NC} "
+                local ef; read -r ef
+                [ -n "$ef" ] && backup_restore_encrypted "$ef" || true
+                press_any_key
+                ;;
+            7)
+                echo -en "  ${BOLD}Output file [auto]:${NC} "
+                local mf; read -r mf
+                migrate_export "$mf" || true
+                press_any_key
+                ;;
+            8)
+                echo -en "  ${BOLD}Migration tarball path:${NC} "
+                local mf; read -r mf
+                [ -n "$mf" ] && migrate_import "$mf" || true
+                press_any_key
+                ;;
+            9)
+                echo -e "  ${DIM}Current retention: ${BACKUP_RETENTION_DAYS:-30} days${NC}"
+                echo -en "  ${BOLD}Delete backups older than N days [${BACKUP_RETENTION_DAYS:-30}]:${NC} "
+                local acd; read -r acd
+                acd="${acd:-${BACKUP_RETENTION_DAYS:-30}}"
+                backup_autoclean "$acd" || true
+                # Persist if changed
+                if [[ "$acd" =~ ^[0-9]+$ ]] && [ "$acd" != "${BACKUP_RETENTION_DAYS:-30}" ]; then
+                    BACKUP_RETENTION_DAYS="$acd"
+                    save_settings
+                    log_info "Retention policy updated: ${acd} days"
+                fi
+                press_any_key
+                ;;
             0|"") return ;;
             *) ;;
         esac

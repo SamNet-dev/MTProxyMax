@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.6-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.0.7-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -706,6 +706,29 @@ mtproxymax telegram remove              # Remove bot completely
 ---
 
 ## 📋 Changelog
+
+### v1.0.7 — Tags, Templates, Migration, Maintenance, IP Banlist & More
+
+- `secret tag/untag/tags` + `secret list --tag` — group users, run bulk ops by tag
+- `secret logs <label>` — per-user activity log filter
+- `secret rotate --all` + `--dry-run` — bulk rotate with preview
+- `secret quota-reset <label> <day>` — monthly quota reset (resets traffic on day N of each month)
+- `secret list --csv` — CSV output for spreadsheets
+- `template save/list/apply/delete` + `secret add --template <name>` — reusable limit templates
+- `auto-rotate [days]` — global policy to auto-rotate secrets older than N days
+- `migrate export/import` — tarball-based server migration
+- `maintenance on/off` — reject new connections, keep existing alive (graceful pre-restart mode)
+- `ban/unban/bans` — iptables-based IP banlist (survives reboots)
+- `backup --encrypt` — AES-256 encrypted backups with password
+- `backup autoclean [days]` — remove backups older than N days (automatic via `BACKUP_RETENTION_DAYS`)
+- `sweep` — internal periodic maintenance command (quota resets, auto-rotate, backup cleanup)
+- `info` — comprehensive server overview (OS, network, users, services, security)
+- `changelog` — show GitHub release notes since installed version
+- `tune list/get/set/clear` — whitelisted engine parameter tuning (fake_cert_len, timeouts, etc.)
+- `verify` — end-to-end install verification
+- `history [lines]` — config change audit log (secret add/remove/rotate, domain changes)
+- `completion` — emit bash tab-completion script
+- `speedtest` — outbound bandwidth/latency test from server
 
 ### v1.0.6 — Profiles, Archive, Search, Info, Port Check & More
 
