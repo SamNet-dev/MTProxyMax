@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.4.6"
-TELEMT_COMMIT="8874396"  # Pinned: v3.4.6 — TLS 1.2/1.3 fronting fixes, full ServerHello default, ALPN fingerprinting
+TELEMT_MIN_VERSION="3.4.8"
+TELEMT_COMMIT="10c9bcd"  # Pinned: v3.4.8 — bounded relay queues, hot-path pressure caps, IP tracker fixes
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
