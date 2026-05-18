@@ -820,6 +820,9 @@ mtproxymax notify <message>             # Send custom message via Telegram bot
 mtproxymax telegram setup               # Interactive bot setup
 mtproxymax telegram status              # Show bot status
 mtproxymax telegram test                # Send test message
+mtproxymax telegram interval <hours>    # Change report interval (1-168h)
+mtproxymax telegram label <name>        # Change server label in notifications
+mtproxymax telegram alerts <on|off>     # Enable/disable down/recovery alerts
 mtproxymax telegram disable             # Disable bot
 mtproxymax telegram remove              # Remove bot completely
 ```
@@ -993,6 +996,10 @@ mtproxymax update                       # Check for script + engine updates
   - **Observability:** class-based rejected connection metrics, handshake failure metrics, quota contention/cancellation/flow-wait metrics, updated Grafana dashboard
   - **Fixes:** TimeWindow IP limiting fix, WorkingDirectory behavior fix, multi-domain TLS fetcher, `tls_domains` validation
   - **Dependencies:** rustls-webpki 0.103.12 → 0.103.13
+- `telegram interval <hours>` — change report interval post-install (1-168h) ([#77](https://github.com/SamNet-dev/MTProxyMax/issues/77))
+- `telegram label <name>` — change server label in notifications post-install ([#77](https://github.com/SamNet-dev/MTProxyMax/issues/77))
+- `telegram alerts <on|off>` — toggle down/recovery alerts from CLI ([#77](https://github.com/SamNet-dev/MTProxyMax/issues/77))
+- TUI: Telegram Bot menu now shows options to change interval, label, and alerts without re-running setup wizard ([#77](https://github.com/SamNet-dev/MTProxyMax/issues/77))
 
 ### v1.0.7 — Tags, Templates, Migration, Maintenance, IP Banlist & More
 

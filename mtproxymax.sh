@@ -4367,7 +4367,7 @@ _mtproxymax_completion() {
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
             ;;
         telegram)
-            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status test disable remove" -- "${cur}") )
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status test disable remove interval label alerts" -- "${cur}") )
             ;;
         replication)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status add remove list enable disable sync test logs reset promote" -- "${cur}") )
@@ -9311,10 +9311,71 @@ cli_main() {
                 status|"")
                     if [ "$TELEGRAM_ENABLED" = "true" ]; then
                         echo -e "  ${BOLD}Telegram:${NC} $(draw_status running 'Enabled')"
-                        echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED}${NC}"
+                        echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED} | Label: ${TELEGRAM_SERVER_LABEL}${NC}"
                     else
                         echo -e "  ${BOLD}Telegram:${NC} $(draw_status disabled 'Disabled')"
                     fi
+                    ;;
+                interval)
+                    check_root
+                    shift
+                    local _ival="${1:-}"
+                    if [ -z "$_ival" ]; then
+                        echo -e "  ${BOLD}Report interval:${NC} every ${TELEGRAM_INTERVAL}h"
+                        echo -e "  ${DIM}Usage: mtproxymax telegram interval <hours>${NC}"
+                        return 0
+                    fi
+                    if [[ "$_ival" =~ ^[0-9]+$ ]] && [ "$_ival" -ge 1 ] && [ "$_ival" -le 168 ]; then
+                        TELEGRAM_INTERVAL="$_ival"
+                        save_settings
+                        log_success "Report interval set to every ${_ival}h"
+                    else
+                        log_error "Invalid interval — must be 1-168 hours"
+                        return 1
+                    fi
+                    ;;
+                label)
+                    check_root
+                    shift
+                    local _lbl="${*:-}"
+                    if [ -z "$_lbl" ]; then
+                        echo -e "  ${BOLD}Server label:${NC} ${TELEGRAM_SERVER_LABEL}"
+                        echo -e "  ${DIM}Usage: mtproxymax telegram label <name>${NC}"
+                        return 0
+                    fi
+                    if [[ "$_lbl" =~ ^[a-zA-Z0-9_.\ -]+$ ]] && [ ${#_lbl} -le 32 ]; then
+                        TELEGRAM_SERVER_LABEL="$_lbl"
+                        save_settings
+                        log_success "Server label set to '${_lbl}'"
+                    else
+                        log_error "Invalid label — letters, digits, spaces, dots, hyphens, max 32 chars"
+                        return 1
+                    fi
+                    ;;
+                alerts)
+                    check_root
+                    shift
+                    local _aval="${1:-}"
+                    case "$_aval" in
+                        on|true|enable)
+                            TELEGRAM_ALERTS_ENABLED="true"
+                            save_settings
+                            log_success "Alerts enabled"
+                            ;;
+                        off|false|disable)
+                            TELEGRAM_ALERTS_ENABLED="false"
+                            save_settings
+                            log_success "Alerts disabled"
+                            ;;
+                        "")
+                            echo -e "  ${BOLD}Alerts:${NC} ${TELEGRAM_ALERTS_ENABLED}"
+                            echo -e "  ${DIM}Usage: mtproxymax telegram alerts <on|off>${NC}"
+                            ;;
+                        *)
+                            log_error "Usage: mtproxymax telegram alerts <on|off>"
+                            return 1
+                            ;;
+                    esac
                     ;;
                 disable)
                     check_root
@@ -9333,7 +9394,7 @@ cli_main() {
                     systemctl disable mtproxymax-telegram.service 2>/dev/null
                     log_success "Telegram bot removed"
                     ;;
-                *) log_error "Usage: mtproxymax telegram [setup|test|status|disable|remove]"; return 1 ;;
+                *) log_error "Usage: mtproxymax telegram [setup|test|status|interval|label|alerts|disable|remove]"; return 1 ;;
             esac
             ;;
 
@@ -10217,7 +10278,7 @@ show_telegram_menu() {
         echo ""
         if [ "$TELEGRAM_ENABLED" = "true" ]; then
             echo -e "  Status: $(draw_status running 'Enabled')"
-            echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED}${NC}"
+            echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED} | Label: ${TELEGRAM_SERVER_LABEL}${NC}"
         else
             echo -e "  Status: $(draw_status disabled 'Disabled')"
         fi
@@ -10226,8 +10287,10 @@ show_telegram_menu() {
         echo -e "  ${DIM}[2]${NC} Send test message"
         echo -e "  ${DIM}[3]${NC} Send proxy links"
         echo -e "  ${DIM}[4]${NC} Toggle notifications"
-        echo -e "  ${DIM}[5]${NC} Toggle alerts"
+        echo -e "  ${DIM}[5]${NC} Toggle alerts (${TELEGRAM_ALERTS_ENABLED})"
         echo -e "  ${DIM}[6]${NC} Send custom notification"
+        echo -e "  ${DIM}[7]${NC} Change report interval (${TELEGRAM_INTERVAL}h)"
+        echo -e "  ${DIM}[8]${NC} Change server label (${TELEGRAM_SERVER_LABEL})"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -10267,6 +10330,36 @@ show_telegram_menu() {
                 echo -en "  ${BOLD}Message:${NC} "
                 local nmsg; read -r nmsg
                 [ -n "$nmsg" ] && { send_notify "$nmsg" || true; }
+                press_any_key
+                ;;
+            7)
+                echo -en "  ${BOLD}Report interval in hours [${TELEGRAM_INTERVAL}]:${NC} "
+                local new_interval; read -r new_interval
+                if [[ "$new_interval" =~ ^[0-9]+$ ]] && [ "$new_interval" -ge 1 ] && [ "$new_interval" -le 168 ]; then
+                    TELEGRAM_INTERVAL="$new_interval"
+                    save_settings
+                    log_success "Report interval set to every ${new_interval}h"
+                elif [ -z "$new_interval" ]; then
+                    log_info "Keeping current interval: ${TELEGRAM_INTERVAL}h"
+                else
+                    log_error "Invalid interval — must be 1-168 hours"
+                fi
+                press_any_key
+                ;;
+            8)
+                echo -en "  ${BOLD}Server label [${TELEGRAM_SERVER_LABEL}]:${NC} "
+                local new_label; read -r new_label
+                if [ -n "$new_label" ]; then
+                    if [[ "$new_label" =~ ^[a-zA-Z0-9_.\ -]+$ ]] && [ ${#new_label} -le 32 ]; then
+                        TELEGRAM_SERVER_LABEL="$new_label"
+                        save_settings
+                        log_success "Server label set to '${new_label}'"
+                    else
+                        log_error "Invalid label — letters, digits, spaces, dots, hyphens, max 32 chars"
+                    fi
+                else
+                    log_info "Keeping current label: ${TELEGRAM_SERVER_LABEL}"
+                fi
                 press_any_key
                 ;;
             0|"") return ;;
