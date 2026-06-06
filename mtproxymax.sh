@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.4.11"
-TELEMT_COMMIT="3bd5637"  # Pinned: v3.4.11 — persistent quota, per-user deny lists, TLS cert budget, security hardening
+TELEMT_MIN_VERSION="3.4.15"
+TELEMT_COMMIT="504cafb"  # Pinned: v3.4.15 — MSS tuning
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
