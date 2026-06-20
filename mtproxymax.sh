@@ -6041,11 +6041,10 @@ update_traffic() {
     # Fetch metrics once for both global and per-user stats
     local _metrics
     _metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
+    [ -z "$_metrics" ] && return 0
     local cur_in cur_out
-    if [ -n "$_metrics" ]; then
-        cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-        cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
-    fi
+    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
     cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
 
     # Compute deltas (torware pattern: detect container restart by negative delta)
