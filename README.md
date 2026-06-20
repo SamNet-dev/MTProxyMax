@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.0.8-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.0.9-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -984,6 +984,17 @@ mtproxymax update                       # Check for script + engine updates
 ---
 
 ## 📋 Changelog
+
+### v1.0.9 — Engine v3.4.18, TLS Stealth, ME/MR Hardening ([#85](https://github.com/SamNet-dev/MTProxyMax/issues/85))
+
+- Engine v3.4.18 — 7 upstream releases (3.4.12 through 3.4.18) with major stealth and reliability improvements:
+  - **TLS stealth:** ServerHello now selects a cipher suite actually offered by ClientHello, profiled extension order preserved, ALPN no longer exposed as plaintext marker in fake ApplicationData, single-record TLS-F primary app flight restored
+  - **ME/MR hardening:** bounded writer queue waits under backpressure, prioritized cancellation in async paths, reused reader scratch buffers, atomic MR pressure-eviction budget claims
+  - **API:** user rate limits exposed via API, `GET /v1/stats/users/quota` endpoint, proper `405 Method Not Allowed` responses with `Allow` header, hyphenated route aliases, quota reset validates config revision
+  - **Performance:** startup speed-up, IDN support, hot-path module decomposition, exclusive mask mode
+  - **SYN limiter:** lifecycle fix + correct default burst behavior
+  - **Docker:** writable `/etc/telemt/` config mount, `/run/telemt` tmpfs cache, `json-file` log rotation
+  - **Fixes:** `disable_colors` now suppresses ANSI in MAESTRO output, quota route relocated to `GET /v1/stats/users/quota`
 
 ### v1.0.8 — Engine v3.4.11, Security Hardening, Persistent Quotas
 
