@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.0.9"
+VERSION="1.0.10"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="/opt/mtproxymax"
 CONFIG_DIR="${INSTALL_DIR}/mtproxy"
@@ -26,8 +26,8 @@ REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.4.18"
-TELEMT_COMMIT="9dc6772"  # Pinned: v3.4.18 — TLS ServerHello realism, ME/MR hardening, user rate limit APIs, SYN limiter fix
+TELEMT_MIN_VERSION="3.4.19"
+TELEMT_COMMIT="987c53c"  # Pinned: v3.4.19 — Fix config API corrupting nested tables, client_mss_bulk, relay mode fixes
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
