@@ -3244,7 +3244,7 @@ secret_top() {
 
 # Purge disabled or expired secrets
 secret_purge_disabled() {
-    local count=0 i
+    local to_purge=() i
     local now_s; now_s=$(date +%s)
     for i in "${!SECRETS_LABELS[@]}"; do
         local purge=false
@@ -3254,12 +3254,21 @@ secret_purge_disabled() {
             purge=true
         fi
         if [ "$purge" = "true" ]; then
-            log_info "Purging secret: '${SECRETS_LABELS[$i]}'"
-            secret_remove "${SECRETS_LABELS[$i]}" --no-restart
-            count=$((count + 1))
+            to_purge+=("${SECRETS_LABELS[$i]}")
         fi
     done
-    if [ "$count" -gt 0 ]; then
+
+    if [ ${#to_purge[@]} -gt 0 ]; then
+        if [ ${#to_purge[@]} -ge ${#SECRETS_LABELS[@]} ]; then
+            log_error "Cannot purge all secrets — proxy needs at least one active secret"
+            return 1
+        fi
+        local l count=0
+        for l in "${to_purge[@]}"; do
+            log_info "Purging secret: '${l}'"
+            secret_remove "$l" "true" "true"
+            count=$((count + 1))
+        done
         if is_proxy_running; then restart_proxy_container; fi
         log_success "Purged ${count} disabled/expired secret(s)"
     else
@@ -3310,12 +3319,18 @@ secret_rename_prefix() {
         local label="${SECRETS_LABELS[$i]}"
         if [[ "$label" == "$old_p"* ]]; then
             local new_label="${new_p}${label#$old_p}"
-            log_info "Renaming '${label}' -> '${new_label}'"
-            secret_rename "$label" "$new_label"
-            count=$((count + 1))
+            if [[ "$new_label" =~ ^[a-zA-Z0-9_-]+$ ]] && [ ${#new_label} -le 32 ]; then
+                log_info "Renaming '${label}' -> '${new_label}'"
+                SECRETS_LABELS[$i]="$new_label"
+                count=$((count + 1))
+            else
+                log_error "Skipping '${label}' -> '${new_label}' (invalid label format)"
+            fi
         fi
     done
     if [ "$count" -gt 0 ]; then
+        save_secrets
+        reload_proxy_config
         log_success "Renamed ${count} secret(s) with prefix '${old_p}'"
     else
         log_info "No secrets found matching prefix '${old_p}'"
