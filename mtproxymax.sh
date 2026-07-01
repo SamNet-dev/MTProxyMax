@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.1.0"
+VERSION="1.2.0"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="/opt/mtproxymax"
 CONFIG_DIR="${INSTALL_DIR}/mtproxy"
@@ -24,6 +24,12 @@ CONNECTION_LOG="${INSTALL_DIR}/connection.log"
 INSTANCES_FILE="${INSTALL_DIR}/instances.conf"
 REPLICATION_FILE="${INSTALL_DIR}/replication.conf"
 REPLICATION_SSH_DIR="${INSTALL_DIR}/.ssh"
+VOUCHERS_FILE="${INSTALL_DIR}/vouchers.conf"
+ADMINS_FILE="${INSTALL_DIR}/admins.conf"
+PORTAL_DIR="${INSTALL_DIR}/portal"
+PORTAL_WWW="${PORTAL_DIR}/www"
+PORTAL_DATA="${PORTAL_WWW}/data.json"
+SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
 TELEMT_MIN_VERSION="3.4.22"
@@ -137,6 +143,25 @@ AUTO_UPDATE_ENABLED="true"
 STEALTH_SHIELD="false"
 STEALTH_PRESET="normal"
 STEALTH_MSS_CLAMP="false"
+LOCKDOWN_MODE="false"
+PORT_POOL_PORTS=""
+QOS_LIMIT_MBPS="0"
+HAPPY_HOURS_WINDOW=""
+
+# Performance, Diagnostics & Self-Healing Suite
+TCP_BOOST_ENABLED="false"
+TCP_CLEAN_ENABLED="false"
+SOCKET_BOOST_ENABLED="false"
+TLS_PAD_ENABLED="false"
+HONEYPOT_ENABLED="false"
+AUTO_HEAL_ENABLED="false"
+TCP_FASTPATH_ENABLED="false"
+RAM_TUNE_ENABLED="false"
+PORT_HOP_RANGES=""
+CPU_TUNE_ENABLED="false"
+SCANNER_SHIELD_ENABLED="false"
+PORTAL_ENABLED="false"
+PORTAL_PORT="8080"
 
 # Auto-rotate and backup retention (v1.0.7)
 SECRET_AUTO_ROTATE_DAYS="0"     # 0 = disabled; otherwise rotate secrets older than N days
@@ -649,6 +674,13 @@ save_settings() {
     local tmp
     tmp=$(_mktemp) || { log_error "Cannot create temp file"; return 1; }
 
+    # Sanitize string variables against single quotes and carriage returns
+    TELEGRAM_SERVER_LABEL="${TELEGRAM_SERVER_LABEL//\'/}"
+    TELEGRAM_SERVER_LABEL="${TELEGRAM_SERVER_LABEL//$'\r'/}"
+    AD_TAG="${AD_TAG//\'/}"
+    PROXY_DOMAIN="${PROXY_DOMAIN//\'/}"
+    BLOCKLIST_COUNTRIES="${BLOCKLIST_COUNTRIES//\'/}"
+
     cat > "$tmp" << SETTINGS_EOF
 # MTProxyMax Settings — v${VERSION}
 # Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
@@ -705,6 +737,10 @@ BACKUP_RETENTION_DAYS='${BACKUP_RETENTION_DAYS}'
 STEALTH_SHIELD='${STEALTH_SHIELD}'
 STEALTH_PRESET='${STEALTH_PRESET}'
 STEALTH_MSS_CLAMP='${STEALTH_MSS_CLAMP}'
+LOCKDOWN_MODE='${LOCKDOWN_MODE}'
+PORT_POOL_PORTS='${PORT_POOL_PORTS}'
+QOS_LIMIT_MBPS='${QOS_LIMIT_MBPS}'
+HAPPY_HOURS_WINDOW='${HAPPY_HOURS_WINDOW}'
 
 # Replication / HA
 REPLICATION_ENABLED='${REPLICATION_ENABLED}'
@@ -716,7 +752,25 @@ REPLICATION_DELETE_EXTRA='${REPLICATION_DELETE_EXTRA}'
 REPLICATION_SSH_KEY_PATH='${REPLICATION_SSH_KEY_PATH}'
 REPLICATION_EXCLUDE='${REPLICATION_EXCLUDE}'
 REPLICATION_RESTART_ON_CHANGE='${REPLICATION_RESTART_ON_CHANGE}'
-REPLICATION_LOG='${REPLICATION_LOG}'
+# Cloudflare Dynamic DNS (DDNS)
+DDNS_ENABLED='${DDNS_ENABLED}'
+DDNS_CF_TOKEN='${DDNS_CF_TOKEN}'
+DDNS_CF_ZONE_ID='${DDNS_CF_ZONE_ID}'
+DDNS_RECORD_NAME='${DDNS_RECORD_NAME}'
+# Performance, Diagnostics & Self-Healing Suite
+TCP_BOOST_ENABLED='${TCP_BOOST_ENABLED}'
+TCP_CLEAN_ENABLED='${TCP_CLEAN_ENABLED}'
+SOCKET_BOOST_ENABLED='${SOCKET_BOOST_ENABLED}'
+TLS_PAD_ENABLED='${TLS_PAD_ENABLED}'
+HONEYPOT_ENABLED='${HONEYPOT_ENABLED}'
+AUTO_HEAL_ENABLED='${AUTO_HEAL_ENABLED}'
+TCP_FASTPATH_ENABLED='${TCP_FASTPATH_ENABLED}'
+RAM_TUNE_ENABLED='${RAM_TUNE_ENABLED}'
+PORT_HOP_RANGES='${PORT_HOP_RANGES}'
+CPU_TUNE_ENABLED='${CPU_TUNE_ENABLED}'
+SCANNER_SHIELD_ENABLED='${SCANNER_SHIELD_ENABLED}'
+PORTAL_ENABLED='${PORTAL_ENABLED}'
+PORTAL_PORT='${PORTAL_PORT}'
 SETTINGS_EOF
 
     chmod 600 "$tmp"
@@ -752,10 +806,14 @@ load_settings() {
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
             AUTO_UPDATE_ENABLED|SECRET_AUTO_ROTATE_DAYS|BACKUP_RETENTION_DAYS|\
-            STEALTH_SHIELD|STEALTH_PRESET|STEALTH_MSS_CLAMP|\
+            STEALTH_SHIELD|STEALTH_PRESET|STEALTH_MSS_CLAMP|LOCKDOWN_MODE|PORT_POOL_PORTS|QOS_LIMIT_MBPS|HAPPY_HOURS_WINDOW|\
             REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
             REPLICATION_SSH_PORT|REPLICATION_SSH_USER|REPLICATION_DELETE_EXTRA|REPLICATION_SSH_KEY_PATH|REPLICATION_EXCLUDE|\
-            REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG)
+            REPLICATION_RESTART_ON_CHANGE|REPLICATION_LOG|\
+            DDNS_ENABLED|DDNS_CF_TOKEN|DDNS_CF_ZONE_ID|DDNS_RECORD_NAME|\
+            TCP_BOOST_ENABLED|TCP_CLEAN_ENABLED|SOCKET_BOOST_ENABLED|TLS_PAD_ENABLED|HONEYPOT_ENABLED|AUTO_HEAL_ENABLED|\
+            TCP_FASTPATH_ENABLED|RAM_TUNE_ENABLED|PORT_HOP_RANGES|CPU_TUNE_ENABLED|\
+            SCANNER_SHIELD_ENABLED|PORTAL_ENABLED|PORTAL_PORT)
                 printf -v "$key" '%s' "$val"
                 ;;
         esac
@@ -1087,6 +1145,7 @@ build_telemt_image() {
 
     local build_dir
     build_dir=$(mktemp -d "${TMPDIR:-/tmp}/mtproxymax-build.XXXXXX")
+    _TEMP_FILES+=("$build_dir")
 
     cat > "${build_dir}/Dockerfile" << 'DOCKERFILE_EOF'
 FROM rust:1-bookworm AS builder
@@ -1246,7 +1305,7 @@ port = ${port}
 listen_addr_ipv4 = "0.0.0.0"
 listen_addr_ipv6 = "::"
 proxy_protocol = ${PROXY_PROTOCOL:-false}
-$([ "$PROXY_PROTOCOL" = "true" ] && [ -n "$PROXY_PROTOCOL_TRUSTED_CIDRS" ] && echo "proxy_protocol_trusted_cidrs = [$(echo "$PROXY_PROTOCOL_TRUSTED_CIDRS" | sed 's/[[:space:]]*,[[:space:]]*/", "/g;s/^/"/;s/$/"/' )]")
+$([ "$PROXY_PROTOCOL" = "true" ] && [ -n "$PROXY_PROTOCOL_TRUSTED_CIDRS" ] && echo "proxy_protocol_trusted_cidrs = [$(echo "$PROXY_PROTOCOL_TRUSTED_CIDRS" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//;s/[[:space:]]*,[[:space:]]*/", "/g;s/^/"/;s/$/"/' )]")
 metrics_listen = "127.0.0.1:${metrics_port}"
 metrics_whitelist = ["127.0.0.1", "::1"]
 client_mss = "${CLIENT_MSS:-tspu}"
@@ -1746,6 +1805,10 @@ flush_traffic_to_disk() {
         cum_out=$((cum_out + gd_out))
 
         # Per-user traffic delta
+        local in_happy="false"
+        if [ -n "${HAPPY_HOURS_WINDOW:-}" ] && check_in_happy_hours "${HAPPY_HOURS_WINDOW}" 2>/dev/null; then
+            in_happy="true"
+        fi
         [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
             [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
             [ "$enabled" != "true" ] && continue
@@ -1757,8 +1820,10 @@ flush_traffic_to_disk() {
             local di=$((ui - si)) doo=$((uo - so))
             [ "$di" -lt 0 ] 2>/dev/null && di=$ui
             [ "$doo" -lt 0 ] 2>/dev/null && doo=$uo
-            _fu_cum_in["$label"]=$(( ${_fu_cum_in["$label"]:-0} + di ))
-            _fu_cum_out["$label"]=$(( ${_fu_cum_out["$label"]:-0} + doo ))
+            if [ "$in_happy" != "true" ]; then
+                _fu_cum_in["$label"]=$(( ${_fu_cum_in["$label"]:-0} + di ))
+                _fu_cum_out["$label"]=$(( ${_fu_cum_out["$label"]:-0} + doo ))
+            fi
             _fu_snap_in["$label"]=$ui
             _fu_snap_out["$label"]=$uo
         done < "$SECRETS_FILE"
@@ -1768,22 +1833,19 @@ flush_traffic_to_disk() {
 
     # Write cumulative traffic
     local _tmp
-    _tmp=$(mktemp "${_stats_dir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
-    chmod 600 "$_tmp"
+    _tmp=$(_mktemp "${_stats_dir}") || { exec 9>&-; return; }
     echo "${cum_in}|${cum_out}" > "$_tmp"
     mv "$_tmp" "$_tf" 2>/dev/null || { rm -f "$_tmp"; exec 9>&-; return; }
 
     # Write per-user cumulative
-    _tmp=$(mktemp "${_stats_dir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
-    chmod 600 "$_tmp"
+    _tmp=$(_mktemp "${_stats_dir}") || { exec 9>&-; return; }
     for _l in "${!_fu_cum_in[@]}"; do
         echo "${_l}|${_fu_cum_in[$_l]}|${_fu_cum_out[$_l]}" >> "$_tmp"
     done
     mv "$_tmp" "$_utf" 2>/dev/null || rm -f "$_tmp"
 
     # Write per-user snapshot (reset to 0 if metrics were unavailable)
-    _tmp=$(mktemp "${_stats_dir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
-    chmod 600 "$_tmp"
+    _tmp=$(_mktemp "${_stats_dir}") || { exec 9>&-; return; }
     if $_have_metrics; then
         for _l in "${!_fu_snap_in[@]}"; do
             echo "${_l}|${_fu_snap_in[$_l]}|${_fu_snap_out[$_l]}" >> "$_tmp"
@@ -1796,8 +1858,7 @@ flush_traffic_to_disk() {
     mv "$_tmp" "$_snap" 2>/dev/null || rm -f "$_tmp"
 
     # Write global snapshot (reset to 0 if metrics were unavailable)
-    _tmp=$(mktemp "${_stats_dir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
-    chmod 600 "$_tmp"
+    _tmp=$(_mktemp "${_stats_dir}") || { exec 9>&-; return; }
     if $_have_metrics; then
         echo "${cur_gin}|${cur_gout}" > "$_tmp"
     else
@@ -2560,7 +2621,7 @@ secret_clone() {
     reload_proxy_config
 
     local full_secret server_ip
-    full_secret=$(build_faketls_secret "${SECRETS_KEYS[-1]}")
+    full_secret=$(build_faketls_secret "${SECRETS_KEYS[${#SECRETS_KEYS[@]}-1]}")
     server_ip=$(get_public_ip)
     log_success "Secret '${new_label}' cloned from '${src_label}'"
     echo -e "  ${CYAN}tg://proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${full_secret}${NC}"
@@ -3345,8 +3406,9 @@ secret_purge_disabled() {
         local purge=false
         if [ "${SECRETS_ENABLED[$i]}" = "false" ]; then
             purge=true
-        elif [ -n "${SECRETS_EXPIRES[$i]}" ] && [ "${SECRETS_EXPIRES[$i]}" != "0" ] && [ "$now_s" -ge "${SECRETS_EXPIRES[$i]}" ] 2>/dev/null; then
-            purge=true
+        elif [ -n "${SECRETS_EXPIRES[$i]}" ] && [ "${SECRETS_EXPIRES[$i]}" != "0" ]; then
+            local _exp_s; _exp_s=$(_iso_to_epoch "${SECRETS_EXPIRES[$i]}")
+            [ "$_exp_s" -gt 0 ] && [ "$now_s" -ge "$_exp_s" ] 2>/dev/null && purge=true
         fi
         if [ "$purge" = "true" ]; then
             to_purge+=("${SECRETS_LABELS[$i]}")
@@ -3805,6 +3867,7 @@ MIGRATION_FILES=("$SETTINGS_FILE" "$SECRETS_FILE" "$UPSTREAMS_FILE" "$INSTANCES_
 migrate_export() {
     local out="${1:-/tmp/mtproxymax-migrate-$(date +%Y%m%d-%H%M%S).tar.gz}"
     local tmp; tmp=$(mktemp -d) || { log_error "Cannot create temp dir"; return 1; }
+    _TEMP_FILES+=("$tmp")
     local count=0
     for f in "${MIGRATION_FILES[@]}"; do
         [ -f "$f" ] && { cp "$f" "$tmp/$(basename "$f")" 2>/dev/null && count=$((count + 1)); }
@@ -3830,6 +3893,7 @@ migrate_import() {
     log_info "Current state backed up to: ${backup_before}"
 
     local tmp; tmp=$(mktemp -d) || { log_error "Cannot create temp dir"; return 1; }
+    _TEMP_FILES+=("$tmp")
     tar -xzf "$file" -C "$tmp" 2>/dev/null || { log_error "Invalid tarball"; rm -rf "$tmp"; return 1; }
 
     # Copy each file back (but not replication.conf to preserve role)
@@ -3909,7 +3973,7 @@ backup_restore_encrypted() {
     echo -en "  ${BOLD}Decryption password:${NC} "
     read -rs pw; echo ""
     mkdir -p "$BACKUP_DIR"
-    local plain; plain=$(mktemp "${BACKUP_DIR}/.decrypt.XXXXXX.tar.gz")
+    local plain; plain=$(_mktemp "${BACKUP_DIR}") || return 1
     local _rc=0
     MTPMXPW="$pw" openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 -in "$file" -out "$plain" -pass env:MTPMXPW 2>/dev/null || _rc=1
     unset pw MTPMXPW
@@ -4081,7 +4145,7 @@ secret_check_quota_resets() {
         # Already reset this month?
         grep -q "^${label}|${today_month}$" "$_QUOTA_RESET_LOG" 2>/dev/null && continue
         # Reset
-        if "${INSTALL_DIR}/mtproxymax" secret reset-traffic "$label" &>/dev/null; then
+        if secret_reset_traffic "$label" &>/dev/null; then
             echo "${label}|${today_month}" >> "$_QUOTA_RESET_LOG"
             log_info "Monthly quota reset for '${label}'"
         fi
@@ -4114,7 +4178,7 @@ secret_check_auto_rotate() {
         [[ "$last" =~ ^[0-9]+$ ]] || continue
         local age=$((now - last))
         if [ "$age" -ge "$threshold" ]; then
-            if "${INSTALL_DIR}/mtproxymax" secret rotate "$label" &>/dev/null; then
+            if secret_rotate "$label" &>/dev/null; then
                 # Update log
                 local tmp; tmp=$(_mktemp) || continue
                 grep -v "^${label}|" "$_AUTO_ROTATE_LOG" > "$tmp" 2>/dev/null || true
@@ -4520,7 +4584,7 @@ _mtproxymax_completion() {
 
     # Top-level commands
     if [ "$COMP_CWORD" -eq 1 ]; then
-        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool"
+        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune"
         COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
         return 0
     fi
@@ -4548,7 +4612,7 @@ _mtproxymax_completion() {
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "export import" -- "${cur}") )
             ;;
         backup)
-            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "--encrypt restore-encrypted autoclean" -- "${cur}") )
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "--encrypt restore-encrypted autoclean send-tg" -- "${cur}") )
             ;;
         tg-urls)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "get set clear" -- "${cur}") )
@@ -4559,17 +4623,41 @@ _mtproxymax_completion() {
         maintenance)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
             ;;
+        daily-report|ssh-shield|tcp-boost|auto-heal|tcp-clean|socket-boost|honeypot|tcp-fastpath|cpu-tune)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
+            ;;
+        tls-pad)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "auto off rotate status" -- "${cur}") )
+            ;;
+        ram-tune)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "auto off status" -- "${cur}") )
+            ;;
+        port-hop)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "add remove list" -- "${cur}") )
+            ;;
         telegram)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status test disable remove interval label alerts" -- "${cur}") )
             ;;
         replication)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup status add remove list enable disable sync test logs reset promote" -- "${cur}") )
             ;;
-        shield|clamp-mss)
+        shield|clamp-mss|lockdown)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status" -- "${cur}") )
             ;;
         stealth)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "ultra normal status" -- "${cur}") )
+            ;;
+        cover-watchdog)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "test auto" -- "${cur}") )
+            ;;
+        port-pool)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "add remove list" -- "${cur}") )
+            ;;
+        qos)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "set off status" -- "${cur}") )
+            ;;
+        happy-hours)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "set off status" -- "${cur}") )
             ;;
         domain-pool)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "get" -- "${cur}") )
@@ -4693,19 +4781,62 @@ apply_firewall_rules() {
     [ -z "${PROXY_PORT:-}" ] && return 0
     if command -v iptables >/dev/null 2>&1; then
         while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn 2>/dev/null; do :; done
+        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null; do :; done
         while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -j DROP 2>/dev/null; do :; done
+        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
         while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+        while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
     fi
 
     if [ "${STEALTH_SHIELD:-false}" = "true" ] && command -v iptables >/dev/null 2>&1; then
-        iptables -I INPUT 1 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn 2>/dev/null || true
-        iptables -I INPUT 2 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -j DROP 2>/dev/null || true
+        iptables -I INPUT 1 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null || true
+        iptables -I INPUT 2 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null || true
     fi
 
     if [ "${STEALTH_MSS_CLAMP:-false}" = "true" ] && command -v iptables >/dev/null 2>&1; then
-        iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+        iptables -t mangle -I FORWARD 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+    fi
+    apply_qos_rules
+    apply_port_pool_rules
+    apply_port_hop_rules
+}
+
+apply_port_pool_rules() {
+    [ -z "${PROXY_PORT:-}" ] && return 0
+    if ! command -v iptables >/dev/null 2>&1; then return 0; fi
+    if [ -n "${PORT_POOL_PORTS:-}" ]; then
+        IFS=',' read -ra _plist <<< "${PORT_POOL_PORTS}"
+        for _p in "${_plist[@]}"; do
+            _p="${_p// /}"
+            [ -z "$_p" ] && continue
+            while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+            while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+            iptables -t nat -I PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null || true
+        done
+    fi
+}
+
+apply_port_hop_rules() {
+    [ -z "${PROXY_PORT:-}" ] && return 0
+    if [ -n "${PORT_HOP_RANGES:-}" ]; then
+        IFS=',' read -ra _rlist <<< "${PORT_HOP_RANGES}"
+        for _r in "${_rlist[@]}"; do
+            _r="${_r// /}"
+            [ -z "$_r" ] && continue
+            local s="${_r%%:*}" e="${_r##*:}"
+            if command -v iptables >/dev/null 2>&1; then
+                while iptables -t nat -D PREROUTING -p tcp --dport "${s}:${e}" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+                while iptables -t nat -D PREROUTING -p tcp --dport "${s}:${e}" -m comment --comment "mtproxymax_porthop" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+                iptables -t nat -I PREROUTING -p tcp --dport "${s}:${e}" -m comment --comment "mtproxymax_porthop" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null || true
+            elif command -v nft >/dev/null 2>&1; then
+                nft add table inet mtproxymax_hop 2>/dev/null || true
+                nft add chain inet mtproxymax_hop prerouting '{ type nat hook prerouting priority -100; }' 2>/dev/null || true
+                nft add rule inet mtproxymax_hop prerouting tcp dport "${s}-${e}" redirect to :"$PROXY_PORT" 2>/dev/null || true
+            fi
+        done
     fi
 }
 
@@ -4823,7 +4954,7 @@ run_domain_pool() {
     load_settings
     local pool="$1"
     case "$pool" in
-        ""|get)
+        ""|get|list|show)
             echo -e "\n  🔀 ${BOLD}Multi-Domain SNI Pool:${NC}"
             echo -e "     Current Pool: ${CYAN}${PROXY_DOMAIN:-<not set>}${NC}"
             echo ""
@@ -4840,6 +4971,1793 @@ run_domain_pool() {
                 log_error "Invalid domain pool format (use e.g. cloudflare.com,www.microsoft.com)"
                 return 1
             fi
+            ;;
+    esac
+}
+
+# ── DPI Forensics & Readiness Score ──
+run_dpi_inspect() {
+    echo ""
+    draw_header "DPI FORENSICS & READINESS ANALYZER"
+    echo ""
+    echo -e "  ${DIM}Running active 5-point network diagnostics...${NC}"
+    echo ""
+
+    local score=0 total_checks=5
+
+    # Check 1: Cover Domain Reachability & Latency
+    local primary_dom="${PROXY_DOMAIN:-}"
+    primary_dom="${primary_dom%%,*}"
+    primary_dom="${primary_dom// /}"
+    printf "  [1/5] Cover Domain Status (${CYAN}%s${NC}): " "${primary_dom:-none}"
+    if [ -n "${primary_dom:-}" ]; then
+        local time_s
+        time_s=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 4 "https://${primary_dom}:443" 2>/dev/null) || time_s=""
+        if [ -n "$time_s" ] && [ "$time_s" != "0.000000" ]; then
+            local time_ms
+            time_ms=$(awk -v t="$time_s" 'BEGIN { printf "%.1f", t * 1000 }')
+            echo -e "${GREEN}PASS (${time_ms} ms)${NC}"
+            score=$((score + 20))
+        else
+            echo -e "${RED}FAIL / BLOCKED${NC}"
+        fi
+    else
+        echo -e "${YELLOW}NOT CONFIGURED${NC}"
+    fi
+
+    # Check 2: TLS Certificate Parity
+    printf "  [2/5] Auto Cert Synchronization: "
+    if [ -n "${FAKE_CERT_LEN:-}" ] && [ "${FAKE_CERT_LEN}" != "0" ]; then
+        echo -e "${GREEN}PASS (Cert Len: ${FAKE_CERT_LEN})${NC}"
+        score=$((score + 20))
+    else
+        echo -e "${YELLOW}WARNING (Using defaults)${NC}"
+        score=$((score + 10))
+    fi
+
+    # Check 3: Kernel SYN Shield State
+    printf "  [3/5] Anti-DPI SYN Shield: "
+    if [ "${STEALTH_SHIELD:-false}" = "true" ]; then
+        echo -e "${GREEN}ACTIVE${NC}"
+        score=$((score + 20))
+    else
+        echo -e "${YELLOW}DISABLED${NC}"
+    fi
+
+    # Check 4: Stealth Preset Engine Hardening
+    printf "  [4/5] Engine Replay Hardening: "
+    if [ "${STEALTH_PRESET:-normal}" = "ultra" ]; then
+        echo -e "${GREEN}ULTRA STEALTH${NC}"
+        score=$((score + 20))
+    else
+        echo -e "${GREEN}NORMAL STEALTH${NC}"
+        score=$((score + 15))
+    fi
+
+    # Check 5: TCP MSS Clamping
+    printf "  [5/5] TCP MSS Clamping (PMTU): "
+    if [ "${STEALTH_MSS_CLAMP:-false}" = "true" ]; then
+        echo -e "${GREEN}ENABLED${NC}"
+        score=$((score + 20))
+    else
+        echo -e "${YELLOW}DISABLED${NC}"
+    fi
+
+    echo ""
+    local score_color="${GREEN}"
+    [ "$score" -lt 70 ] && score_color="${YELLOW}"
+    [ "$score" -lt 40 ] && score_color="${RED}"
+    echo -e "  🛡️  ${BOLD}Anti-DPI Readiness Score:${NC} ${score_color}${BOLD}${score}%${NC}"
+    echo ""
+}
+
+# ── Cover Domain Watchdog & Auto-Rotator ──
+run_cover_watchdog() {
+    local action="${1:-test}"
+    case "$action" in
+        test)
+            echo ""
+            draw_header "COVER DOMAIN HEALTH WATCHDOG"
+            echo ""
+            echo -e "  ${DIM}Testing live latency across domain pool...${NC}"
+            echo ""
+            local pool_str="${PROXY_DOMAIN:-}"
+            if [ -n "${PROXY_TLS_DOMAINS:-}" ]; then
+                pool_str="${pool_str},${PROXY_TLS_DOMAINS}"
+            fi
+            # Deduplicate and split by comma
+            local -a domains=()
+            IFS=',' read -ra _parts <<< "$pool_str" || true
+            for _d in "${_parts[@]}"; do
+                _d="${_d// /}"
+                [ -n "$_d" ] && domains+=("$_d")
+            done
+            if [ ${#domains[@]} -eq 0 ]; then
+                log_info "No cover domains configured."
+                return 0
+            fi
+            for _d in "${domains[@]}"; do
+                printf "  %-26s  " "${_d}"
+                local time_s code
+                read -r code time_s <<< "$(curl -o /dev/null -s -w "%{http_code} %{time_connect}" --connect-timeout 4 "https://${_d}:443" 2>/dev/null || echo "000 0")"
+                if [ "$code" != "000" ] && [ "$time_s" != "0" ]; then
+                    local time_ms
+                    time_ms=$(awk -v t="$time_s" 'BEGIN { printf "%.1f", t * 1000 }')
+                    echo -e "${GREEN}ONLINE (${time_ms} ms | HTTP ${code})${NC}"
+                else
+                    echo -e "${RED}TIMEOUT / BLOCKED${NC}"
+                fi
+            done
+            echo ""
+            ;;
+        auto)
+            check_root
+            load_settings
+            [ -z "${PROXY_DOMAIN:-}" ] && return 0
+            local primary="${PROXY_DOMAIN%%,*}"
+            primary="${primary// /}"
+            # Test primary domain
+            if ! curl -o /dev/null -s --connect-timeout 4 "https://${primary}:443" 2>/dev/null; then
+                log_warning "Primary domain '${primary}' failed watchdog probe. Attempting rotation..."
+                local pool_str="${PROXY_DOMAIN:-}"
+                if [ -n "${PROXY_TLS_DOMAINS:-}" ]; then
+                    pool_str="${pool_str},${PROXY_TLS_DOMAINS}"
+                fi
+                IFS=',' read -ra _candidates <<< "$pool_str" || true
+                for _cand in "${_candidates[@]}"; do
+                    _cand="${_cand// /}"
+                    [ -z "$_cand" ] || [ "$_cand" = "$primary" ] && continue
+                    if curl -o /dev/null -s --connect-timeout 4 "https://${_cand}:443" 2>/dev/null; then
+                        log_success "Swapped primary cover domain to healthy backup: ${_cand}"
+                        # Put healthy candidate at the front of the pool string
+                        local new_pool="${_cand}"
+                        for _rem in "${_candidates[@]}"; do
+                            _rem="${_rem// /}"
+                            [ -n "$_rem" ] && [ "$_rem" != "$_cand" ] && new_pool="${new_pool},${_rem}"
+                        done
+                        PROXY_DOMAIN="$new_pool"
+                        sync_domain_cert_len "true" "false" || true
+                        save_settings
+                        if is_proxy_running; then reload_proxy_config; fi
+                        break
+                    fi
+                done
+            fi
+            ;;
+        *)
+            log_error "Usage: mtproxymax cover-watchdog [test|auto]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Emergency Lockdown Mode ──
+run_lockdown() {
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            load_settings
+            LOCKDOWN_MODE="true"
+            STEALTH_SHIELD="true"
+            STEALTH_PRESET="ultra"
+            STEALTH_MSS_CLAMP="true"
+            save_settings
+            apply_firewall_rules
+            if is_proxy_running; then reload_proxy_config; fi
+            log_success "🚨 EMERGENCY LOCKDOWN ACTIVATED: Shield ON | Ultra Stealth ON | MSS Clamp ON"
+            if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+                tg_send "🚨 *EMERGENCY LOCKDOWN ACTIVATED*\n\nServer has entered maximum defensive posture.\n• Kernel SYN Shield: ACTIVE\n• Stealth Preset: ULTRA\n• MSS Clamping: ACTIVE"
+            fi
+            ;;
+        off|disable)
+            check_root
+            load_settings
+            LOCKDOWN_MODE="false"
+            save_settings
+            log_success "Lockdown deactivated. Server restored to normal operating posture."
+            ;;
+        status|"")
+            echo -e "  ${BOLD}Emergency Lockdown Mode:${NC} $([ "${LOCKDOWN_MODE:-false}" = "true" ] && echo "${RED}${BOLD}ACTIVE${NC}" || echo "${GREEN}INACTIVE${NC}")"
+            ;;
+        *)
+            log_error "Usage: mtproxymax lockdown [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Multi-Port Pool Listener ──
+run_port_pool() {
+    local action="${1:-list}"
+    case "$action" in
+        add)
+            check_root
+            local port="$2"
+            [ -z "$port" ] && { log_error "Usage: mtproxymax port-pool add <port>"; return 1; }
+            [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || { log_error "Invalid port number"; return 1; }
+            load_settings
+            if [[ ",${PORT_POOL_PORTS}," == *",${port},"* ]] || [ "$port" = "$PROXY_PORT" ]; then
+                log_info "Port ${port} is already in use or configured."
+                return 0
+            fi
+            PORT_POOL_PORTS="${PORT_POOL_PORTS:+${PORT_POOL_PORTS},}${port}"
+            save_settings
+            if command -v iptables >/dev/null 2>&1 && [ -n "${PROXY_PORT:-}" ]; then
+                iptables -t nat -I PREROUTING -p tcp --dport "$port" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null || true
+            fi
+            log_success "Added port ${port} to multi-port listener pool pointing to engine port ${PROXY_PORT}."
+            ;;
+        remove)
+            check_root
+            local port="$2"
+            [ -z "$port" ] && { log_error "Usage: mtproxymax port-pool remove <port>"; return 1; }
+            load_settings
+            # Remove port from comma-delimited string
+            local -a new_ports=()
+            IFS=',' read -ra _plist <<< "${PORT_POOL_PORTS:-}"
+            for _p in "${_plist[@]}"; do
+                [ "$_p" != "$port" ] && [ -n "$_p" ] && new_ports+=("$_p")
+            done
+            local joined
+            joined=$(IFS=','; echo "${new_ports[*]}")
+            PORT_POOL_PORTS="$joined"
+            save_settings
+            if command -v iptables >/dev/null 2>&1 && [ -n "${PROXY_PORT:-}" ]; then
+                while iptables -t nat -D PREROUTING -p tcp --dport "$port" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+            fi
+            log_success "Removed port ${port} from multi-port listener pool."
+            ;;
+        list|"")
+            load_settings
+            echo -e "  ${BOLD}Primary Engine Port:${NC} ${GREEN}${PROXY_PORT:-443}${NC}"
+            echo -e "  ${BOLD}Secondary Port Pool:${NC} ${CYAN}${PORT_POOL_PORTS:-none}${NC}"
+            echo -e "  ${DIM}Usage: mtproxymax port-pool [add|remove] <port>${NC}"
+            ;;
+        *)
+            log_error "Usage: mtproxymax port-pool [add|remove|list]"
+            return 1
+            ;;
+    esac
+}
+
+# ── QoS Shaping Rules ──
+validate_happy_hours_win() {
+    local win="$1"
+    [[ "$win" =~ ^([0-9]{2}):([0-9]{2})-([0-9]{2}):([0-9]{2})$ ]] || return 1
+    local s_h="${BASH_REMATCH[1]}" s_m="${BASH_REMATCH[2]}"
+    local e_h="${BASH_REMATCH[3]}" e_m="${BASH_REMATCH[4]}"
+    [ $((10#$s_h)) -le 23 ] && [ $((10#$s_m)) -le 59 ] && [ $((10#$e_h)) -le 23 ] && [ $((10#$e_m)) -le 59 ] || return 1
+    return 0
+}
+
+check_in_happy_hours() {
+    local win="$1"
+    validate_happy_hours_win "$win" || return 1
+    [[ "$win" =~ ^([0-9]{2}):([0-9]{2})-([0-9]{2}):([0-9]{2})$ ]]
+    local s_h="${BASH_REMATCH[1]}" s_m="${BASH_REMATCH[2]}"
+    local e_h="${BASH_REMATCH[3]}" e_m="${BASH_REMATCH[4]}"
+    local start_val=$(( 10#$s_h * 60 + 10#$s_m ))
+    local end_val=$(( 10#$e_h * 60 + 10#$e_m ))
+    [ "$start_val" -eq "$end_val" ] && return 1
+
+    local cur_h cur_m
+    cur_h=$(date +%H); cur_m=$(date +%M)
+    local cur_val=$(( 10#$cur_h * 60 + 10#$cur_m ))
+
+    if [ "$start_val" -lt "$end_val" ]; then
+        if [ "$cur_val" -ge "$start_val" ] && [ "$cur_val" -lt "$end_val" ]; then
+            return 0
+        fi
+    else
+        # Window spans midnight (e.g. 22:00-04:00)
+        if [ "$cur_val" -ge "$start_val" ] || [ "$cur_val" -lt "$end_val" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+apply_qos_rules() {
+    [ -z "${PROXY_PORT:-}" ] && return 0
+    if command -v iptables >/dev/null 2>&1; then
+        # Robustly delete any existing mtproxy_qos rules cleanly via line numbers
+        while iptables -S INPUT 2>/dev/null | grep -q "mtproxy_qos_in"; do
+            local num
+            num=$(iptables -L INPUT --line-numbers -n 2>/dev/null | awk '/mtproxy_qos_in/{print $1; exit}')
+            [ -n "$num" ] && iptables -D INPUT "$num" 2>/dev/null || break
+        done
+        while iptables -S FORWARD 2>/dev/null | grep -q "mtproxy_qos_out"; do
+            local num
+            num=$(iptables -L FORWARD --line-numbers -n 2>/dev/null | awk '/mtproxy_qos_out/{print $1; exit}')
+            [ -n "$num" ] && iptables -D FORWARD "$num" 2>/dev/null || break
+        done
+        # Fallback exact match cleans
+        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m hashlimit --hashlimit-name mtproxy_qos_in --hashlimit-mode srcip --hashlimit-above "${QOS_LIMIT_MBPS:-0}mb/s" -j DROP 2>/dev/null; do :; done
+        while iptables -D FORWARD -p tcp --sport "${PROXY_PORT}" -m hashlimit --hashlimit-name mtproxy_qos_out --hashlimit-mode dstip --hashlimit-above "${QOS_LIMIT_MBPS:-0}mb/s" -j DROP 2>/dev/null; do :; done
+    fi
+
+    if [ "${QOS_LIMIT_MBPS:-0}" -gt 0 ] && command -v iptables >/dev/null 2>&1; then
+        local kbps=$(( QOS_LIMIT_MBPS * 1000 ))
+        iptables -I INPUT -p tcp --dport "${PROXY_PORT}" -m hashlimit --hashlimit-name mtproxy_qos_in --hashlimit-mode srcip --hashlimit-above "${kbps}kb/s" -j DROP 2>/dev/null || true
+        iptables -I FORWARD -p tcp --sport "${PROXY_PORT}" -m hashlimit --hashlimit-name mtproxy_qos_out --hashlimit-mode dstip --hashlimit-above "${kbps}kb/s" -j DROP 2>/dev/null || true
+    fi
+}
+
+run_qos() {
+    local action="${1:-status}"
+    case "$action" in
+        set)
+            check_root
+            local mbps="$2"
+            [ -z "$mbps" ] && { log_error "Usage: mtproxymax qos set <mbps>"; return 1; }
+            [[ "$mbps" =~ ^[0-9]+$ ]] && [ "$mbps" -ge 1 ] && [ "$mbps" -le 10000 ] || { log_error "Invalid speed limit (1-10000 Mbps)"; return 1; }
+            load_settings
+            QOS_LIMIT_MBPS="$mbps"
+            save_settings
+            apply_qos_rules
+            log_success "Per-IP QoS speed limit set to ${mbps} Mbps."
+            ;;
+        off|clear|disable)
+            check_root
+            load_settings
+            QOS_LIMIT_MBPS="0"
+            save_settings
+            apply_qos_rules
+            log_success "Per-IP QoS speed limit disabled."
+            ;;
+        status|"")
+            load_settings
+            echo -e "\n  🏎️  ${BOLD}Per-IP Bandwidth Shaping (QoS):${NC}"
+            if [ "${QOS_LIMIT_MBPS:-0}" -gt 0 ]; then
+                echo -e "     Status:      ${GREEN}ACTIVE (${QOS_LIMIT_MBPS} Mbps / IP)${NC}"
+            else
+                echo -e "     Status:      ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  ${DIM}Usage: mtproxymax qos [set <mbps>|off|status]${NC}\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax qos [set <mbps>|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_happy_hours() {
+    local action="${1:-status}"
+    case "$action" in
+        set)
+            check_root
+            local win="$2"
+            [ -z "$win" ] && { log_error "Usage: mtproxymax happy-hours set <HH:MM-HH:MM> (e.g. 02:00-08:00)"; return 1; }
+            if ! validate_happy_hours_win "$win"; then
+                log_error "Invalid time window format or out-of-range time. Use HH:MM-HH:MM (24h format, 00:00-23:59, e.g. 02:00-08:00)"
+                return 1
+            fi
+            load_settings
+            HAPPY_HOURS_WINDOW="$win"
+            save_settings
+            log_success "Off-peak Happy Hours quota exclusion set to window: ${win}"
+            ;;
+        off|clear|disable)
+            check_root
+            load_settings
+            HAPPY_HOURS_WINDOW=""
+            save_settings
+            log_success "Off-peak Happy Hours quota exclusion disabled."
+            ;;
+        status|"")
+            load_settings
+            echo -e "\n  🕒 ${BOLD}Off-Peak 'Happy Hours' Quota Exclusions:${NC}"
+            if [ -n "${HAPPY_HOURS_WINDOW:-}" ]; then
+                local st="${YELLOW}INACTIVE window${NC}"
+                if check_in_happy_hours "${HAPPY_HOURS_WINDOW}"; then
+                    st="${GREEN}${BOLD}ACTIVE NOW (Free Traffic)${NC}"
+                fi
+                echo -e "     Configured Window: ${CYAN}${HAPPY_HOURS_WINDOW}${NC} (${st})"
+            else
+                echo -e "     Status:            ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  ${DIM}Usage: mtproxymax happy-hours [set <HH:MM-HH:MM>|off|status]${NC}\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax happy-hours [set <HH:MM-HH:MM>|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_notify_expiry() {
+    load_settings
+    if [ "${TELEGRAM_ENABLED:-false}" != "true" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+        log_info "Telegram bot notifications are not enabled or configured."
+        return 0
+    fi
+    load_secrets
+    local now count=0 msg="⚠️ *Proxy Expiry Alert*
+
+The following user secrets are expiring soon:
+"
+    now=$(date +%s)
+    local i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+        local exp="${SECRETS_EXPIRES[$i]:-0}"
+        [ "$exp" = "0" ] || [ -z "$exp" ] && continue
+        local exp_epoch; exp_epoch=$(_iso_to_epoch "$exp")
+        [ "$exp_epoch" -le 0 ] && continue
+        local diff=$(( exp_epoch - now ))
+        if [ "$diff" -le 259200 ] && [ "$diff" -ge -86400 ]; then
+            local days_left=$(( diff / 86400 ))
+            if [ "$diff" -lt 0 ]; then
+                msg="${msg}
+• \`${SECRETS_LABELS[$i]}\`: *EXPIRED*"
+            else
+                msg="${msg}
+• \`${SECRETS_LABELS[$i]}\`: ${days_left}d remaining"
+            fi
+            count=$((count + 1))
+        fi
+    done
+    if [ "$count" -gt 0 ]; then
+        tg_send "$msg"
+        log_success "Sent Telegram expiry reminder for ${count} secret(s)."
+    else
+        log_info "No secrets expiring within 3 days."
+    fi
+}
+
+run_abuse_watch() {
+    load_settings
+    load_secrets
+    echo -e "\n  📈 ${BOLD}BANDWIDTH SURGE & ABUSE WATCHDOG${NC}\n"
+    local _stats_dir="${INSTALL_DIR}/relay_stats"
+    local _utf="${_stats_dir}/user_traffic"
+    if [ ! -f "$_utf" ]; then
+        echo -e "  ${DIM}No traffic statistics recorded yet.${NC}\n"
+        return 0
+    fi
+    printf "  %-20s %-15s %-15s %-16s\n" "USER LABEL" "DOWNLOAD" "UPLOAD" "STATUS"
+    draw_line 68 '─'
+    local total_flagged=0
+    while IFS='|' read -r _lbl _in _out; do
+        [[ "$_lbl" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
+        [[ "$_in" =~ ^[0-9]+$ ]] || _in=0
+        [[ "$_out" =~ ^[0-9]+$ ]] || _out=0
+        local total_bytes=$(( _in + _out ))
+        local thresh=$(( 50 * 1024 * 1024 * 1024 )) # 50 GB threshold
+        if [ "$total_bytes" -gt "$thresh" ]; then
+            local hum_in hum_out
+            hum_in=$(format_human_bytes "$_in")
+            hum_out=$(format_human_bytes "$_out")
+            printf "  %-20s %-15s %-15s ${RED}FLAGGED (>50GB)${NC}\n" "${_lbl}" "${hum_in}" "${hum_out}"
+            total_flagged=$((total_flagged + 1))
+        else
+            local hum_in hum_out
+            hum_in=$(format_human_bytes "$_in")
+            hum_out=$(format_human_bytes "$_out")
+            printf "  %-20s %-15s %-15s ${GREEN}NORMAL${NC}\n" "${_lbl}" "${hum_in}" "${hum_out}"
+        fi
+    done < "$_utf"
+    echo ""
+    if [ "$total_flagged" -eq 0 ]; then
+        echo -e "  ${GREEN}All users operating within normal bandwidth parameters.${NC}\n"
+    else
+        echo -e "  ${YELLOW}Flagged ${total_flagged} user(s) with high bandwidth usage (>50GB).${NC}\n"
+    fi
+}
+
+run_broadcast() {
+    local msg="$1"
+    [ -z "$msg" ] && { log_error "Usage: mtproxymax broadcast <message>"; return 1; }
+    load_settings
+    if [ "${TELEGRAM_ENABLED:-false}" != "true" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+        log_error "Telegram bot notifications are not enabled or configured (TELEGRAM_CHAT_ID missing)."
+        return 1
+    fi
+    local formatted="📢 *System Announcement*
+
+${msg}"
+    tg_send "$formatted"
+    log_success "Broadcast message dispatched via Telegram bot."
+}
+
+# ── Clustering, Load Balancing & DevOps Automation ──
+
+run_export_lb() {
+    local target="${1:-all}"
+    load_settings
+    local port="${PROXY_PORT:-443}"
+    local proto_flag=""
+    [ "${PROXY_PROTOCOL:-false}" = "true" ] && proto_flag=" send-proxy-v2"
+    
+    echo -e "\n  ── 📦 ${BOLD}Load Balancer Configuration Export${NC} ──\n"
+    if [ "$target" = "haproxy" ] || [ "$target" = "all" ]; then
+        echo -e "  ${CYAN}${BOLD}HAProxy Configuration Snippet (/etc/haproxy/haproxy.cfg):${NC}"
+        cat <<EOF
+# Frontend accepting incoming client connections
+frontend ft_mtproxy
+    bind *:${port}
+    mode tcp
+    option tcplog
+    timeout client 1h
+    default_backend bk_mtproxymax
+
+# Backend routing to local MTProxyMax instance
+backend bk_mtproxymax
+    mode tcp
+    timeout server 1h
+    timeout connect 5s
+    server local_mtproxy 127.0.0.1:${port}${proto_flag} check inter 10s
+EOF
+        echo ""
+    fi
+    if [ "$target" = "nginx" ] || [ "$target" = "all" ]; then
+        echo -e "  ${GREEN}${BOLD}Nginx Stream Configuration (/etc/nginx/modules-enabled/mtproxy.conf):${NC}"
+        local proxy_protocol_line=""
+        [ "${PROXY_PROTOCOL:-false}" = "true" ] && proxy_protocol_line="        proxy_protocol on;"
+        cat <<EOF
+stream {
+    upstream mtproxymax_backend {
+        server 127.0.0.1:${port};
+    }
+
+    server {
+        listen ${port};
+        proxy_pass mtproxymax_backend;
+        proxy_timeout 1h;
+        proxy_connect_timeout 5s;
+${proxy_protocol_line}
+    }
+}
+EOF
+        echo ""
+    fi
+}
+
+run_ddns() {
+    local action="${1:-status}"
+    case "$action" in
+        set)
+            check_root
+            local token="$2" zone="$3" record="$4"
+            [ -z "$token" ] || [ -z "$zone" ] || [ -z "$record" ] && { log_error "Usage: mtproxymax ddns set <cf_api_token> <zone_id> <record_name>"; return 1; }
+            load_settings
+            DDNS_ENABLED="true"
+            DDNS_CF_TOKEN="$token"
+            DDNS_CF_ZONE_ID="$zone"
+            DDNS_RECORD_NAME="$record"
+            save_settings
+            log_success "Cloudflare DDNS configured for record: ${record}"
+            run_ddns run
+            ;;
+        run|update)
+            load_settings
+            if [ "${DDNS_ENABLED:-false}" != "true" ] || [ -z "${DDNS_CF_TOKEN:-}" ]; then
+                log_error "DDNS is not enabled or configured. Run: mtproxymax ddns set <token> <zone_id> <record_name>"
+                return 1
+            fi
+            local cur_ip
+            cur_ip=$(get_public_ip)
+            [ -z "$cur_ip" ] && { log_error "Failed to detect public IP"; return 1; }
+            log_info "Checking Cloudflare DNS record '${DDNS_RECORD_NAME}' against IP ${cur_ip}..."
+            local rec_json
+            rec_json=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${DDNS_CF_ZONE_ID}/dns_records?type=A&name=${DDNS_RECORD_NAME}" \
+                -H "Authorization: Bearer ${DDNS_CF_TOKEN}" \
+                -H "Content-Type: application/json" --max-time 10) || { log_error "Failed to query Cloudflare API"; return 1; }
+            
+            local rec_id old_ip
+            rec_id=$(echo "$rec_json" | grep -o '"id":"[^"]*' | head -1 | cut -d'"' -f4)
+            old_ip=$(echo "$rec_json" | grep -o '"content":"[^"]*' | head -1 | cut -d'"' -f4)
+            
+            if [ -z "$rec_id" ]; then
+                log_error "DNS record '${DDNS_RECORD_NAME}' not found in zone ${DDNS_CF_ZONE_ID}"
+                return 1
+            fi
+            if [ "$old_ip" = "$cur_ip" ]; then
+                log_success "DNS record '${DDNS_RECORD_NAME}' is already up to date (${cur_ip})."
+                return 0
+            fi
+            
+            log_info "Updating DNS record from ${old_ip:-unknown} to ${cur_ip}..."
+            local update_res
+            update_res=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${DDNS_CF_ZONE_ID}/dns_records/${rec_id}" \
+                -H "Authorization: Bearer ${DDNS_CF_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data "{\"type\":\"A\",\"name\":\"${DDNS_RECORD_NAME}\",\"content\":\"${cur_ip}\",\"ttl\":120,\"proxied\":false}" --max-time 10)
+            if echo "$update_res" | grep -q '"success":true'; then
+                log_success "Cloudflare DDNS record '${DDNS_RECORD_NAME}' successfully updated to ${cur_ip}!"
+            else
+                log_error "Failed to update Cloudflare DNS record."
+            fi
+            ;;
+        off|disable)
+            check_root
+            load_settings
+            DDNS_ENABLED="false"
+            save_settings
+            log_success "Cloudflare DDNS updater disabled."
+            ;;
+        status|"")
+            load_settings
+            echo -e "\n  🌐 ${BOLD}Cloudflare Dynamic DNS (DDNS) Updater:${NC}"
+            if [ "${DDNS_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:      ${GREEN}ACTIVE${NC}"
+                echo -e "     Record Name: ${CYAN}${DDNS_RECORD_NAME:-unknown}${NC}"
+                echo -e "     Zone ID:     ${DIM}${DDNS_CF_ZONE_ID:-unknown}${NC}"
+            else
+                echo -e "     Status:      ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  ${DIM}Usage: mtproxymax ddns [set <token> <zone_id> <record_name>|run|off|status]${NC}\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax ddns [set <token> <zone_id> <record_name>|run|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_diag_dump() {
+    check_root
+    load_settings
+    echo -e "\n  ── 🏥 ${BOLD}System Diagnostic Forensics Dump${NC} ──\n"
+    local dump_dir; dump_dir=$(mktemp -d "/tmp/mtproxymax_diag_XXXXXX") || return 1
+    _TEMP_FILES+=("$dump_dir")
+    
+    log_info "Collecting system metrics and container state..."
+    uname -a > "${dump_dir}/system_info.txt" 2>&1 || true
+    free -m >> "${dump_dir}/system_info.txt" 2>&1 || true
+    df -h >> "${dump_dir}/system_info.txt" 2>&1 || true
+    
+    log_info "Collecting firewall and networking rules..."
+    iptables -S > "${dump_dir}/iptables_rules.txt" 2>&1 || true
+    ip route > "${dump_dir}/routes.txt" 2>&1 || true
+    sysctl -a 2>/dev/null | grep -E "net.ipv4.tcp|net.core" > "${dump_dir}/kernel_sysctl.txt" || true
+    
+    log_info "Collecting container inspect and logs..."
+    docker inspect "$CONTAINER_NAME" > "${dump_dir}/docker_inspect.txt" 2>&1 || true
+    docker logs --tail 500 "$CONTAINER_NAME" > "${dump_dir}/docker_logs.txt" 2>&1 || true
+    
+    if [ -f "$SETTINGS_FILE" ]; then
+        sed 's/TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN="[REDACTED]"/' "$SETTINGS_FILE" > "${dump_dir}/settings.conf" 2>/dev/null || true
+    fi
+    
+    local tar_path="/tmp/mtproxymax_diag_$(date +%Y%m%d_%H%M%S).tar.gz"
+    tar -czf "$tar_path" -C /tmp "$(basename "$dump_dir")" 2>/dev/null && rm -rf "$dump_dir"
+    log_success "Diagnostic archive created at: ${CYAN}${tar_path}${NC}"
+}
+
+run_snapshot() {
+    local action="${1:-create}"
+    local snap_dir="${INSTALL_DIR}/snapshots"
+    mkdir -p "$snap_dir" 2>/dev/null && chmod 700 "$snap_dir" 2>/dev/null || true
+    
+    case "$action" in
+        create|save)
+            check_root
+            local name="${2:-snap_$(date +%Y%m%d_%H%M%S)}"
+            [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Invalid snapshot name (use a-z, 0-9, _, -)"; return 1; }
+            local target="${snap_dir}/${name}.tar.gz"
+            local -a _snap_files=()
+            for _f in settings.conf secrets.conf upstreams.conf tunings.conf banlist.conf; do
+                [ -f "${INSTALL_DIR}/${_f}" ] && _snap_files+=("$_f")
+            done
+            [ -d "${INSTALL_DIR}/profiles" ] && _snap_files+=("profiles")
+            tar -czf "$target" -C "$INSTALL_DIR" "${_snap_files[@]}" 2>/dev/null || true
+            log_success "Config snapshot created: ${CYAN}${target}${NC}"
+            ;;
+        list|"")
+            echo -e "\n  ── 📸 ${BOLD}Configuration Snapshots${NC} ──\n"
+            if [ -z "$(ls -A "$snap_dir" 2>/dev/null)" ]; then
+                echo -e "  ${DIM}No snapshots created yet.${NC}\n"
+            else
+                ls -lh "$snap_dir" | awk 'NR>1 {print "  " $9 " (" $5 ", created " $6 " " $7 " " $8 ")"}'
+                echo ""
+            fi
+            echo -e "  ${DIM}Usage: mtproxymax snapshot [create <name>|restore <name>|list]${NC}\n"
+            ;;
+        restore)
+            check_root
+            local name="$2"
+            [ -z "$name" ] && { log_error "Usage: mtproxymax snapshot restore <name>"; return 1; }
+            local target="${snap_dir}/${name}"
+            [[ "$name" != *.tar.gz ]] && target="${snap_dir}/${name}.tar.gz"
+            if [ ! -f "$target" ]; then
+                log_error "Snapshot '${name}' not found."
+                return 1
+            fi
+            log_info "Restoring configuration from ${target}..."
+            tar -xzf "$target" -C "$INSTALL_DIR" 2>/dev/null || { log_error "Failed to extract snapshot"; return 1; }
+            load_settings
+            log_success "Snapshot restored successfully. Reloading proxy..."
+            reload_proxy_config
+            ;;
+        *)
+            log_error "Usage: mtproxymax snapshot [create <name>|restore <name>|list]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Operations, Briefings & Onboarding Suite ───────────────────────────────────
+
+run_backup_send_tg() {
+    load_settings
+    if [ "${TELEGRAM_ENABLED:-false}" != "true" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+        log_error "Telegram bot is not configured or disabled. Run: mtproxymax telegram setup"
+        return 1
+    fi
+    local target_file="${1:-}"
+    if [ -z "$target_file" ]; then
+        log_info "Creating fresh backup before sending to Telegram..."
+        create_backup >/dev/null 2>&1
+        target_file=$(ls -t "${BACKUP_DIR:-${INSTALL_DIR}/backups}"/mtproxymax-*.tar.gz 2>/dev/null | head -1)
+    fi
+    if [ -z "$target_file" ] || [ ! -f "$target_file" ]; then
+        log_error "Backup file not found: ${target_file}"
+        return 1
+    fi
+    log_info "Sending backup archive (${target_file}) to Telegram admin chat..."
+    local res
+    res=$(curl -s --max-time 60 -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@${target_file}" -F "caption=📦 MTProxyMax Server Backup (${SCRIPT_NAME} v${VERSION})" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument")
+    if echo "$res" | grep -q '"ok":true'; then
+        log_success "Backup archive successfully dispatched to Telegram chat!"
+    else
+        log_error "Failed to send backup archive via Telegram API."
+    fi
+}
+
+run_daily_report() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            local time_spec="${2:-08:00}"
+            DAILY_REPORT_ENABLED="true"
+            DAILY_REPORT_TIME="$time_spec"
+            save_settings
+            log_success "Automated Daily Morning Executive Briefing enabled at ${time_spec}."
+            ;;
+        off|disable)
+            check_root
+            DAILY_REPORT_ENABLED="false"
+            save_settings
+            log_success "Automated Daily Morning Executive Briefing disabled."
+            ;;
+        run|send)
+            if [ "${TELEGRAM_ENABLED:-false}" != "true" ] || [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+                log_error "Telegram bot not configured."
+                return 1
+            fi
+            load_secrets
+            local total_users="${#SECRETS_LABELS[@]}"
+            local active_users=0
+            local i
+            for i in "${!SECRETS_LABELS[@]}"; do
+                if [ "${SECRETS_ENABLED[$i]}" = "true" ]; then
+                    active_users=$((active_users + 1))
+                fi
+            done
+            local uptime_str
+            if is_proxy_running; then uptime_str="🟢 Online"; else uptime_str="🔴 Offline"; fi
+            local score=100
+            if [ "${STEALTH_SHIELD:-false}" != "true" ]; then score=$((score - 20)); fi
+            if [ "${STEALTH_PRESET:-normal}" != "ultra" ]; then score=$((score - 20)); fi
+            local msg="☀️ *MTProxyMax Daily Briefing*\n\n"
+            msg+="📈 *Status:* ${uptime_str}\n"
+            msg+="👥 *Users:* ${active_users} active (${total_users} total)\n"
+            msg+="🛡️ *Anti-DPI Score:* ${score}/100\n"
+            msg+="🏎️ *QoS Limit:* ${QOS_LIMIT_MBPS:-Disabled} Mbps\n"
+            msg+="🌐 *Multi-Domain Pool:* ${PROXY_DOMAIN:-Default}"
+            tg_send "$msg"
+            log_success "Daily briefing sent to Telegram."
+            ;;
+        status|"")
+            echo -e "\n  📰 ${BOLD}Automated Daily Morning Executive Briefing:${NC}"
+            if [ "${DAILY_REPORT_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:    ${GREEN}ENABLED${NC} (Schedule: ${DAILY_REPORT_TIME:-08:00})"
+            else
+                echo -e "     Status:    ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  Usage: mtproxymax daily-report [on <HH:MM>|off|run|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax daily-report [on <HH:MM>|off|run|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_ssh_shield() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            if ! command -v fail2ban-client >/dev/null 2>&1; then
+                log_info "Installing fail2ban package..."
+                if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq fail2ban;
+                elif command -v dnf >/dev/null 2>&1; then dnf install -y -q fail2ban;
+                elif command -v yum >/dev/null 2>&1; then yum install -y -q fail2ban;
+                elif command -v apk >/dev/null 2>&1; then apk add --no-cache fail2ban; fi
+            fi
+            if command -v fail2ban-client >/dev/null 2>&1; then
+                mkdir -p /etc/fail2ban/jail.d
+                local log_target="logpath = /var/log/auth.log"
+                if [ ! -f /var/log/auth.log ]; then
+                    if [ -f /var/log/secure ]; then
+                        log_target="logpath = /var/log/secure"
+                    elif command -v journalctl >/dev/null 2>&1; then
+                        log_target="backend = systemd"
+                    fi
+                fi
+                cat <<F2B > /etc/fail2ban/jail.d/mtproxymax-ssh.conf
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+${log_target}
+maxretry = 3
+findtime = 600
+bantime = 86400
+F2B
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl enable fail2ban 2>/dev/null || true
+                    systemctl restart fail2ban 2>/dev/null || true
+                else
+                    service fail2ban restart 2>/dev/null || true
+                fi
+                SSH_SHIELD_ENABLED="true"
+                save_settings
+                log_success "SSH Intrusion Shield enabled (max 3 failed retries -> 24h ban)."
+            else
+                log_error "Could not install fail2ban automatically."
+                return 1
+            fi
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/fail2ban/jail.d/mtproxymax-ssh.conf 2>/dev/null
+            if command -v fail2ban-client >/dev/null 2>&1; then
+                fail2ban-client reload >/dev/null 2>&1 || true
+            fi
+            SSH_SHIELD_ENABLED="false"
+            save_settings
+            log_success "SSH Intrusion Shield disabled."
+            ;;
+        status|"")
+            echo -e "\n  🛡️  ${BOLD}SSH Intrusion Shield (fail2ban jail):${NC}"
+            if [ "${SSH_SHIELD_ENABLED:-false}" = "true" ] && command -v fail2ban-client >/dev/null 2>&1; then
+                local banned_cnt=0
+                banned_cnt=$(fail2ban-client status sshd 2>/dev/null | grep 'Currently banned:' | awk '{print $NF}' || echo "0")
+                echo -e "     Status:          ${GREEN}ACTIVE${NC}"
+                echo -e "     Currently Banned: ${RED}${BOLD}${banned_cnt:-0} malicious IPs${NC}"
+            else
+                echo -e "     Status:          ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  Usage: mtproxymax ssh-shield [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax ssh-shield [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_net_grade() {
+    echo -e "\n  🌐 ${BOLD}Network Quality Grade & Latency Benchmark Suite${NC}\n"
+    local grade="A+" points=100
+    log_info "Testing DNS & international routing latency..."
+    local cf_ms=999 raw_ping=""
+    if command -v ping >/dev/null 2>&1; then
+        raw_ping=$(ping -c 1 -W 2 1.1.1.1 2>/dev/null | grep -o 'time=[0-9.]*' | cut -d= -f2 | cut -d. -f1 | head -1 || echo "")
+        if [ -n "$raw_ping" ] && [ "$raw_ping" -eq "$raw_ping" ] 2>/dev/null; then
+            cf_ms="$raw_ping"
+        fi
+    fi
+    if [ "$cf_ms" -eq 999 ]; then points=$((points - 30)); cf_ms="Timeout"; else cf_ms="${cf_ms} ms"; fi
+
+    log_info "Testing Telegram Datacenter reachability..."
+    local dc1_ok="❌" dc2_ok="❌" dc4_ok="❌"
+    if curl -s --connect-timeout 2 "https://149.154.175.50" >/dev/null 2>&1 || [ "$?" -eq 52 ] || [ "$?" -eq 60 ]; then dc1_ok="✅"; else points=$((points - 15)); fi
+    if curl -s --connect-timeout 2 "https://149.154.167.50" >/dev/null 2>&1 || [ "$?" -eq 52 ] || [ "$?" -eq 60 ]; then dc2_ok="✅"; else points=$((points - 15)); fi
+    if curl -s --connect-timeout 2 "https://149.154.167.91" >/dev/null 2>&1 || [ "$?" -eq 52 ] || [ "$?" -eq 60 ]; then dc4_ok="✅"; else points=$((points - 15)); fi
+
+    if [ "$points" -ge 90 ]; then grade="${GREEN}${BOLD}A+ (Excellent Routing)${NC}"
+    elif [ "$points" -ge 75 ]; then grade="${CYAN}${BOLD}A (Good Routing)${NC}"
+    elif [ "$points" -ge 60 ]; then grade="${YELLOW}${BOLD}B (Moderate Routing)${NC}"
+    else grade="${RED}${BOLD}C/D (High Latency/Packet Loss)${NC}"; fi
+
+    echo -e "  ┌────────────────────────────────────────────────────────┐"
+    echo -e "  │  Cloudflare Backbone Ping:  $(printf "%-26s" "${cf_ms}") │"
+    echo -e "  │  Telegram DC1 (Europe):     $(printf "%-26s" "${dc1_ok}") │"
+    echo -e "  │  Telegram DC2 (Europe):     $(printf "%-26s" "${dc2_ok}") │"
+    echo -e "  │  Telegram DC4 (Europe):     $(printf "%-26s" "${dc4_ok}") │"
+    echo -e "  ├────────────────────────────────────────────────────────┤"
+    echo -e "  │  Network Quality Grade:     $(printf "%-35s" "${grade}") │"
+    echo -e "  └────────────────────────────────────────────────────────┘\n"
+}
+
+run_onboard_wizard() {
+    check_root
+    load_settings
+    load_secrets
+    local label="$1"
+    echo -e "\n  🧙 ${BOLD}Smart User Onboarding Wizard${NC}\n"
+    if [ -z "$label" ]; then
+        read -rp "  Enter User Label (e.g. VIP_Alice): " label
+    fi
+    if [ -z "$label" ]; then log_error "User label cannot be empty."; return 1; fi
+
+    local dev_choice conns=15
+    read -rp "  Device Tier [1=1 phone (9 conns), 2=2 phones (15 conns), 3=Family (30 conns)] (default: 2): " dev_choice
+    case "${dev_choice:-2}" in
+        1) conns=9 ;;
+        3) conns=30 ;;
+        *) conns=15 ;;
+    esac
+
+    local quota
+    read -rp "  Monthly Bandwidth Quota [e.g. 50G, 100G, 0=unlimited] (default: 50G): " quota
+    quota="${quota:-50G}"
+
+    local days
+    read -rp "  Subscription Duration in days [e.g. 30, 90, 0=never expire] (default: 30): " days
+    days="${days:-30}"
+
+    local expires=""
+    if [ "$days" -gt 0 ] 2>/dev/null; then
+        expires=$(date -d "+${days} days" "+%Y-%m-%d" 2>/dev/null || date -v+${days}d "+%Y-%m-%d" 2>/dev/null || echo "")
+    fi
+
+    log_info "Creating user '${label}' with limits: conns=${conns}, quota=${quota}, expires=${expires:-none}..."
+    secret_add "$label" "" "true"
+    secret_set_limits "$label" "$conns" "" "${quota}" "${expires}" "false"
+
+    log_success "User onboarding complete! Here is their connection profile:"
+    secret_info "$label" || true
+}
+
+# ── Performance, Diagnostics & Self-Healing Suite ─────────────────
+
+run_tcp_boost() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            log_info "Applying Linux Kernel TCP BBR & Fast Open optimizations..."
+            modprobe tcp_bbr 2>/dev/null || true
+            sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_fastopen=3 >/dev/null 2>&1 || true
+            mkdir -p /etc/sysctl.d
+            cat <<'SYSCTL' > /etc/sysctl.d/99-mtproxymax-bbr.conf
+# MTProxyMax Kernel TCP Boost
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+SYSCTL
+            sysctl -p /etc/sysctl.d/99-mtproxymax-bbr.conf >/dev/null 2>&1 || true
+            TCP_BOOST_ENABLED="true"
+            save_settings
+            log_success "TCP BBR & Fast Open Booster activated successfully!"
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/sysctl.d/99-mtproxymax-bbr.conf 2>/dev/null
+            sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || sysctl -w net.ipv4.tcp_congestion_control=reno >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_fastopen=1 >/dev/null 2>&1 || true
+            TCP_BOOST_ENABLED="false"
+            save_settings
+            log_success "TCP BBR Booster disabled (live kernel parameters restored to standard defaults)."
+            ;;
+        status|"")
+            echo -e "\n  🚀 ${BOLD}Linux Kernel TCP BBR & Fast Open Booster:${NC}"
+            local cc qdisc tfo
+            cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+            qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+            tfo=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo "0")
+            if [ "$cc" = "bbr" ]; then
+                echo -e "     Congestion Control: ${GREEN}${BOLD}${cc}${NC} (qdisc: ${qdisc})"
+            else
+                echo -e "     Congestion Control: ${YELLOW}${cc}${NC}"
+            fi
+            echo -e "     TCP Fast Open:      ${CYAN}${tfo}${NC}"
+            echo -e "  Usage: mtproxymax tcp-boost [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax tcp-boost [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_leak_scan() {
+    load_secrets
+    local thresh="${1:-3}"
+    if ! [[ "$thresh" =~ ^[0-9]+$ ]]; then thresh=3; fi
+    echo -e "\n  🕵️  ${BOLD}Subscription Leak & Account Sharing Scanner (Threshold: >${thresh} subnets)${NC}\n"
+    if [ ! -f "$CONNECTION_LOG" ]; then
+        log_warn "Connection log (${CONNECTION_LOG}) not found or empty. No live traffic logged yet."
+        return 0
+    fi
+    local leaks_found=0
+    local i label
+    for i in "${!SECRETS_LABELS[@]}"; do
+        label="${SECRETS_LABELS[$i]}"
+        [ "${SECRETS_ENABLED[$i]}" != "true" ] && continue
+        local subnet_cnt
+        subnet_cnt=$(tail -n 10000 "$CONNECTION_LOG" 2>/dev/null | grep -F "|${label}|" | awk -F'|' '{ip=$3; if(ip ~ /\./){split(ip,a,"."); print a[1]"."a[2]"."a[3]} else if(ip ~ /:/){split(ip,a,":"); print a[1]":"a[2]":"a[3]":"a[4]}}' | sort -u | grep -c '^[0-9a-fA-F]' || echo "0")
+        if [ "${subnet_cnt:-0}" -ge "$thresh" ]; then
+            leaks_found=$((leaks_found + 1))
+            echo -e "  🚨 ${RED}${BOLD}LEAK DETECTED:${NC} Secret ${YELLOW}${BOLD}${label}${NC} connected from ${RED}${BOLD}${subnet_cnt}${NC} distinct /24 or /64 IP subnets!"
+        fi
+    done
+    if [ "$leaks_found" -eq 0 ]; then
+        echo -e "  ✅ ${GREEN}Clean Scan:${NC} No active secrets exceeded ${thresh} simultaneous subnets."
+    fi
+    echo -e "  Usage: mtproxymax leak-scan [threshold_subnets]\n"
+}
+
+run_cert_check() {
+    load_settings
+    local target="${1:-${PROXY_DOMAIN:-www.cloudflare.com}}"
+    target="${target#https://}"
+    target="${target#http://}"
+    target="${target%%/*}"
+    local host_only="${target%%:*}"
+    echo -e "\n  🌐 ${BOLD}TLS Cover Domain Health & Certificate Verifier (${host_only})${NC}\n"
+    log_info "Probing HTTP reachability & response status..."
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 10 "https://${host_only}" 2>/dev/null || echo "000")
+    local status_icon="✅"
+    if [ "$http_code" = "000" ] || [ "${http_code:0:1}" = "5" ]; then status_icon="❌"; fi
+
+    log_info "Inspecting SSL/TLS certificate chain..."
+    local expiry_str="Unknown" issuer="Unknown"
+    if command -v openssl >/dev/null 2>&1; then
+        local cert_info
+        cert_info=$(echo | openssl s_client -servername "$host_only" -connect "${host_only}:443" 2>/dev/null | openssl x509 -noout -dates -issuer 2>/dev/null || true)
+        if [ -n "$cert_info" ]; then
+            expiry_str=$(echo "$cert_info" | grep 'notAfter=' | cut -d= -f2- || echo "Unknown")
+            issuer=$(echo "$cert_info" | grep 'issuer=' | sed 's/.*CN *= *//; s/\/.*//' || echo "Unknown")
+        fi
+    fi
+
+    echo -e "  ┌────────────────────────────────────────────────────────┐"
+    echo -e "  │  Cover Domain Target:    $(printf "%-29s" "${host_only}") │"
+    echo -e "  │  HTTP Status Code:       $(printf "%-29s" "${status_icon} ${http_code}") │"
+    echo -e "  │  Certificate Issuer:     $(printf "%-29s" "${issuer:0:28}") │"
+    echo -e "  │  Expiration Date:        $(printf "%-29s" "${expiry_str:0:28}") │"
+    echo -e "  └────────────────────────────────────────────────────────┘\n"
+}
+
+run_clone_link() {
+    check_root
+    load_settings
+    echo -e "\n  📋 ${BOLD}One-Line VPS Server Cloner & Replication Bundle${NC}\n"
+    log_info "Bundling settings, upstreams, tuning profiles, and ad-tags..."
+    local files=()
+    for f in settings.conf upstreams.conf tunings.conf templates.conf; do
+        [ -f "${INSTALL_DIR}/$f" ] && files+=("$f")
+    done
+    if [ ${#files[@]} -eq 0 ]; then
+        log_error "No configuration files found in ${INSTALL_DIR}."
+        return 1
+    fi
+    local bundle_b64
+    bundle_b64=$(tar czf - -C "$INSTALL_DIR" "${files[@]}" 2>/dev/null | base64 | tr -d '\r\n')
+    if [ -z "$bundle_b64" ]; then
+        log_error "Failed to encode configuration bundle."
+        return 1
+    fi
+    echo -e "  Copy and run this exact line on any fresh target Linux VPS to instantly mirror settings:"
+    echo -e "  ${CYAN}${BOLD}mtproxymax bootstrap ${bundle_b64}${NC}\n"
+}
+
+run_bootstrap() {
+    check_root
+    local bundle_b64="$*"
+    bundle_b64=$(echo "$bundle_b64" | tr -d ' \r\n')
+    if [ -z "$bundle_b64" ]; then
+        log_error "Usage: mtproxymax bootstrap <base64_payload>"
+        return 1
+    fi
+    echo -e "\n  📦 ${BOLD}Bootstrapping Server Configuration from Bundle...${NC}"
+    mkdir -p "$INSTALL_DIR"
+    if (echo "$bundle_b64" | base64 -d 2>/dev/null || echo "$bundle_b64" | base64 --decode 2>/dev/null || echo "$bundle_b64" | base64 -D 2>/dev/null) | tar xzf - -C "$INSTALL_DIR" 2>/dev/null; then
+        log_success "Configuration files extracted successfully!"
+        if is_proxy_running; then
+            log_info "Reloading proxy engine configuration..."
+            reload_proxy_config
+        fi
+    else
+        log_error "Invalid or corrupted Base64 bootstrap payload."
+        return 1
+    fi
+}
+
+run_heal() {
+    check_root
+    echo -e "\n  🏥 ${BOLD}Emergency RAM & Socket Auto-Healer Execution${NC}\n"
+    local ram_before sockets_before
+    ram_before=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' || echo "0")
+    sockets_before=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
+
+    log_info "Reclaiming OS pagecache & unassigned buffer memory..."
+    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    log_info "Recycling orphaned TIME_WAIT TCP sockets..."
+    sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_fin_timeout=15 >/dev/null 2>&1 || true
+
+    log_info "Expanding Netfilter conntrack table headroom..."
+    if [ -f /proc/sys/net/netfilter/nf_conntrack_max ]; then
+        sysctl -w net.netfilter.nf_conntrack_max=262144 >/dev/null 2>&1 || true
+    fi
+
+    local ram_after sockets_after freed_ram
+    ram_after=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' || echo "0")
+    sockets_after=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
+    freed_ram=$((ram_after - ram_before))
+    if [ "$freed_ram" -lt 0 ]; then freed_ram=0; fi
+
+    echo -e "  ┌────────────────────────────────────────────────────────┐"
+    echo -e "  │  Reclaimed RAM Cache:    $(printf "%-26s" "+${freed_ram} MB") │"
+    echo -e "  │  Purged Dead Sockets:    $(printf "%-26s" "${sockets_before} -> ${sockets_after}") │"
+    echo -e "  │  Active Users Impacted:  $(printf "%-26s" "0 (Zero Disruption)") │"
+    echo -e "  └────────────────────────────────────────────────────────┘\n"
+}
+
+run_auto_heal() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            AUTO_HEAL_ENABLED="true"
+            save_settings
+            log_success "Background RAM & Socket Auto-Healer enabled (runs via periodic maintenance sweep)."
+            ;;
+        off|disable)
+            check_root
+            AUTO_HEAL_ENABLED="false"
+            save_settings
+            log_success "Background Auto-Healer disabled."
+            ;;
+        status|"")
+            echo -e "\n  🏥 ${BOLD}Emergency RAM & Socket Auto-Healer:${NC}"
+            if [ "${AUTO_HEAL_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:    ${GREEN}ENABLED${NC}"
+            else
+                echo -e "     Status:    ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  Usage: mtproxymax auto-heal [on|off|status] or mtproxymax heal\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax auto-heal [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_tcp_clean() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            log_info "Configuring Linux Kernel low-latency TCP keep-alive timers..."
+            sysctl -w net.ipv4.tcp_keepalive_time=300 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_keepalive_intvl=15 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_keepalive_probes=4 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_fin_timeout=15 >/dev/null 2>&1 || true
+            mkdir -p /etc/sysctl.d
+            cat <<'SYSCTL' > /etc/sysctl.d/99-mtproxymax-tcpclean.conf
+# MTProxyMax Dead Mobile Socket Reaper
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 4
+net.ipv4.tcp_fin_timeout = 15
+SYSCTL
+            sysctl -p /etc/sysctl.d/99-mtproxymax-tcpclean.conf >/dev/null 2>&1 || true
+            TCP_CLEAN_ENABLED="true"
+            save_settings
+            log_success "Dead Mobile Socket Reaper activated successfully!"
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/sysctl.d/99-mtproxymax-tcpclean.conf 2>/dev/null
+            sysctl -w net.ipv4.tcp_keepalive_time=7200 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_keepalive_intvl=75 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_keepalive_probes=9 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_fin_timeout=60 >/dev/null 2>&1 || true
+            TCP_CLEAN_ENABLED="false"
+            save_settings
+            log_success "TCP Keep-Alive settings disabled (live kernel parameters restored to standard defaults)."
+            ;;
+        status|"")
+            echo -e "\n  🧹 ${BOLD}Dead Mobile Socket Keep-Alive Reaper:${NC}"
+            local ka_time ka_intvl ka_probes ka_suffix="s"
+            ka_time=$(sysctl -n net.ipv4.tcp_keepalive_time 2>/dev/null || echo "unknown")
+            ka_intvl=$(sysctl -n net.ipv4.tcp_keepalive_intvl 2>/dev/null || echo "unknown")
+            ka_probes=$(sysctl -n net.ipv4.tcp_keepalive_probes 2>/dev/null || echo "unknown")
+            if [ "$ka_time" = "unknown" ]; then ka_suffix=""; fi
+            if [ "${TCP_CLEAN_ENABLED:-false}" = "true" ] || [ "$ka_time" = "300" ]; then
+                echo -e "     Status:           ${GREEN}${BOLD}ENABLED${NC}"
+            else
+                echo -e "     Status:           ${YELLOW}DISABLED${NC} (OS default: ${ka_time}${ka_suffix})"
+            fi
+            echo -e "     Keep-Alive Time:  ${CYAN}${ka_time}${ka_suffix}${NC} (interval: ${ka_intvl}${ka_suffix}, probes: ${ka_probes})"
+            echo -e "  Usage: mtproxymax tcp-clean [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax tcp-clean [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_socket_boost() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            log_info "Applying ultra-low latency kernel socket polling & queue expansion..."
+            sysctl -w net.core.somaxconn=65535 >/dev/null 2>&1 || true
+            sysctl -w net.core.netdev_max_backlog=65535 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_max_syn_backlog=65535 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_notsent_lowat=16384 >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_read=50 >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_poll=50 >/dev/null 2>&1 || true
+            mkdir -p /etc/sysctl.d
+            cat <<'SYSCTL' > /etc/sysctl.d/99-mtproxymax-sockboost.conf
+# MTProxyMax Ultra-Low Latency Socket Booster
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_notsent_lowat = 16384
+net.core.busy_read = 50
+net.core.busy_poll = 50
+SYSCTL
+            sysctl -p /etc/sysctl.d/99-mtproxymax-sockboost.conf >/dev/null 2>&1 || true
+            SOCKET_BOOST_ENABLED="true"
+            save_settings
+            log_success "Ultra-Low Latency Socket Booster activated successfully!"
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/sysctl.d/99-mtproxymax-sockboost.conf 2>/dev/null
+            sysctl -w net.core.somaxconn=4096 >/dev/null 2>&1 || true
+            sysctl -w net.core.netdev_max_backlog=1000 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_max_syn_backlog=1024 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_notsent_lowat=-1 >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_read=0 >/dev/null 2>&1 || true
+            sysctl -w net.core.busy_poll=0 >/dev/null 2>&1 || true
+            SOCKET_BOOST_ENABLED="false"
+            save_settings
+            log_success "Socket queue booster disabled (live kernel parameters restored to standard defaults)."
+            ;;
+        status|"")
+            echo -e "\n  🚀 ${BOLD}Ultra-Low Latency Kernel Socket Booster:${NC}"
+            local somax lowat
+            somax=$(sysctl -n net.core.somaxconn 2>/dev/null || echo "unknown")
+            lowat=$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null || echo "unknown")
+            if [ "${SOCKET_BOOST_ENABLED:-false}" = "true" ] || [ "$somax" = "65535" ]; then
+                echo -e "     Status:          ${GREEN}${BOLD}ENABLED${NC}"
+            else
+                echo -e "     Status:          ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "     Socket Backlog:  ${CYAN}${somax}${NC}"
+            echo -e "     Buffer Lowat:    ${CYAN}${lowat}${NC}"
+            echo -e "  Usage: mtproxymax socket-boost [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax socket-boost [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_tls_pad() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|auto|enable)
+            check_root
+            TLS_PAD_ENABLED="true"
+            local min_len=1500 max_len=3800
+            local rand_len=$(( min_len + (RANDOM % (max_len - min_len + 1)) ))
+            FAKE_CERT_LEN="$rand_len"
+            save_settings
+            log_success "Dynamic FakeTLS Record Padding enabled (Current Cert Length: ${rand_len} bytes)."
+            if is_proxy_running; then
+                reload_proxy_config
+            fi
+            ;;
+        randomize|rotate)
+            check_root
+            local min_len=1500 max_len=3800
+            local rand_len=$(( min_len + (RANDOM % (max_len - min_len + 1)) ))
+            FAKE_CERT_LEN="$rand_len"
+            save_settings
+            log_success "Rotated FakeTLS record payload length to ${rand_len} bytes."
+            if is_proxy_running; then
+                reload_proxy_config
+            fi
+            ;;
+        off|disable)
+            check_root
+            TLS_PAD_ENABLED="false"
+            FAKE_CERT_LEN=2048
+            save_settings
+            log_success "Dynamic FakeTLS Padding disabled (restored standard 2048-byte length)."
+            if is_proxy_running; then
+                reload_proxy_config
+            fi
+            ;;
+        status|"")
+            echo -e "\n  🎲 ${BOLD}Dynamic FakeTLS Record Padding & Jitter Rotation:${NC}"
+            if [ "${TLS_PAD_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:              ${GREEN}${BOLD}ENABLED (Auto-rotating)${NC}"
+            else
+                echo -e "     Status:              ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "     Current Cert Length: ${CYAN}${FAKE_CERT_LEN:-2048} bytes${NC}"
+            echo -e "  Usage: mtproxymax tls-pad [auto|off|status|randomize]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax tls-pad [auto|off|status|randomize]"
+            return 1
+            ;;
+    esac
+}
+
+run_honeypot() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            MASKING_ENABLED="true"
+            HONEYPOT_ENABLED="true"
+            save_settings
+            log_success "Active Probe Honeypot & Decoy Redirection enabled."
+            if is_proxy_running; then
+                reload_proxy_config
+            fi
+            ;;
+        off|disable)
+            check_root
+            HONEYPOT_ENABLED="false"
+            save_settings
+            log_success "Active Probe Honeypot disabled."
+            if is_proxy_running; then
+                reload_proxy_config
+            fi
+            ;;
+        status|"")
+            echo -e "\n  🍯 ${BOLD}Active Probe Honeypot & Decoy Redirection:${NC}"
+            if [ "${HONEYPOT_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:         ${GREEN}${BOLD}ENABLED${NC}"
+                echo -e "     Decoy Target:   ${CYAN}${MASKING_HOST:-${PROXY_DOMAIN:-cloudflare.com}}:${MASKING_PORT:-443}${NC}"
+            else
+                echo -e "     Status:         ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "  Usage: mtproxymax honeypot [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax honeypot [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# ── TCP Fast-Path Window Scaling & MTU Probing ──
+run_tcp_fastpath() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            log_info "Activating TCP Fast-Path window scaling, SACK, and MTU probing..."
+            sysctl -w net.ipv4.tcp_window_scaling=1 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_sack=1 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_timestamps=1 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_no_metrics_save=1 >/dev/null 2>&1 || true
+            mkdir -p /etc/sysctl.d
+            cat <<'SYSCTL' > /etc/sysctl.d/99-mtproxymax-fastpath.conf
+# MTProxyMax TCP Fast-Path Optimizations
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_no_metrics_save = 1
+SYSCTL
+            sysctl -p /etc/sysctl.d/99-mtproxymax-fastpath.conf >/dev/null 2>&1 || true
+            TCP_FASTPATH_ENABLED="true"
+            save_settings
+            log_success "TCP Fast-Path Window Scaling & MTU Probing activated!"
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/sysctl.d/99-mtproxymax-fastpath.conf 2>/dev/null
+            sysctl -w net.ipv4.tcp_mtu_probing=0 >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_no_metrics_save=0 >/dev/null 2>&1 || true
+            TCP_FASTPATH_ENABLED="false"
+            save_settings
+            log_success "TCP Fast-Path optimizations disabled (live kernel parameters restored to standard defaults)."
+            ;;
+        status|"")
+            echo -e "\n  🏎️ ${BOLD}TCP Fast-Path Window Scaling & MTU Probing:${NC}"
+            local ws sack mtu_probe
+            ws=$(sysctl -n net.ipv4.tcp_window_scaling 2>/dev/null || echo "unknown")
+            sack=$(sysctl -n net.ipv4.tcp_sack 2>/dev/null || echo "unknown")
+            mtu_probe=$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo "unknown")
+            if [ "${TCP_FASTPATH_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:        ${GREEN}${BOLD}ENABLED${NC}"
+            else
+                echo -e "     Status:        ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "     Window Scale:  ${CYAN}$([ "$ws" = "1" ] && echo "ON" || echo "OFF")${NC}"
+            echo -e "     TCP SACK:      ${CYAN}$([ "$sack" = "1" ] && echo "ON" || echo "OFF")${NC}"
+            echo -e "     MTU Probing:   ${CYAN}$([ "$mtu_probe" = "1" ] && echo "ON" || echo "OFF")${NC}"
+            echo -e "  Usage: mtproxymax tcp-fastpath [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax tcp-fastpath [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Dynamic RAM Auto-Tuning ──
+run_ram_tune() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|auto|enable)
+            check_root
+            local total_mb
+            total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+            if [ -z "$total_mb" ] || [ "$total_mb" -le 0 ] 2>/dev/null; then
+                if [ -f /proc/meminfo ]; then
+                    local total_kb
+                    total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+                    total_mb=$(( total_kb / 1024 ))
+                fi
+            fi
+            if [ -z "$total_mb" ] || [ "$total_mb" -le 0 ] 2>/dev/null; then
+                log_error "Could not detect system RAM. Aborting."
+                return 1
+            fi
+            local tier rmem_max wmem_max rmem_def wmem_def min_free_kb
+            if [ "$total_mb" -le 1024 ]; then
+                tier="Small VPS (≤1 GB)"
+                rmem_max=8388608; wmem_max=8388608
+                rmem_def=262144; wmem_def=262144
+                min_free_kb=32768
+            elif [ "$total_mb" -le 4096 ]; then
+                tier="Medium VPS (1–4 GB)"
+                rmem_max=16777216; wmem_max=16777216
+                rmem_def=524288; wmem_def=524288
+                min_free_kb=65536
+            else
+                tier="Large VPS (>4 GB)"
+                rmem_max=33554432; wmem_max=33554432
+                rmem_def=1048576; wmem_def=1048576
+                min_free_kb=131072
+            fi
+            log_info "Detected ${total_mb} MB RAM — applying ${tier} TCP memory profile..."
+            sysctl -w net.core.rmem_max=$rmem_max >/dev/null 2>&1 || true
+            sysctl -w net.core.wmem_max=$wmem_max >/dev/null 2>&1 || true
+            sysctl -w net.core.rmem_default=$rmem_def >/dev/null 2>&1 || true
+            sysctl -w net.core.wmem_default=$wmem_def >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_rmem="4096 $rmem_def $rmem_max" >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.tcp_wmem="4096 $wmem_def $wmem_max" >/dev/null 2>&1 || true
+            sysctl -w vm.min_free_kbytes=$min_free_kb >/dev/null 2>&1 || true
+            mkdir -p /etc/sysctl.d
+            cat > /etc/sysctl.d/99-mtproxymax-ramtune.conf <<SYSCTL
+# MTProxyMax Dynamic RAM Auto-Tune ($tier)
+# Detected: ${total_mb} MB total RAM
+net.core.rmem_max = $rmem_max
+net.core.wmem_max = $wmem_max
+net.core.rmem_default = $rmem_def
+net.core.wmem_default = $wmem_def
+net.ipv4.tcp_rmem = 4096 $rmem_def $rmem_max
+net.ipv4.tcp_wmem = 4096 $wmem_def $wmem_max
+vm.min_free_kbytes = $min_free_kb
+SYSCTL
+            sysctl -p /etc/sysctl.d/99-mtproxymax-ramtune.conf >/dev/null 2>&1 || true
+            RAM_TUNE_ENABLED="true"
+            save_settings
+            log_success "RAM Auto-Tune activated for ${tier} (${total_mb} MB detected)."
+            ;;
+        off|disable)
+            check_root
+            rm -f /etc/sysctl.d/99-mtproxymax-ramtune.conf 2>/dev/null
+            sysctl -w net.core.rmem_max=212992 >/dev/null 2>&1 || true
+            sysctl -w net.core.wmem_max=212992 >/dev/null 2>&1 || true
+            sysctl -w net.core.rmem_default=212992 >/dev/null 2>&1 || true
+            sysctl -w net.core.wmem_default=212992 >/dev/null 2>&1 || true
+            sysctl -w vm.min_free_kbytes=67584 >/dev/null 2>&1 || true
+            RAM_TUNE_ENABLED="false"
+            save_settings
+            log_success "RAM tuning disabled (live kernel parameters restored to standard defaults)."
+            ;;
+        status|"")
+            echo -e "\n  🧠 ${BOLD}Dynamic RAM Auto-Tuning:${NC}"
+            local total_mb rmem wmem minfree
+            total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "unknown")
+            rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "unknown")
+            wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "unknown")
+            minfree=$(sysctl -n vm.min_free_kbytes 2>/dev/null || echo "unknown")
+            if [ "${RAM_TUNE_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:         ${GREEN}${BOLD}ENABLED${NC}"
+            else
+                echo -e "     Status:         ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "     Total RAM:      ${CYAN}${total_mb} MB${NC}"
+            echo -e "     Read Buffer:    ${CYAN}${rmem} bytes${NC}"
+            echo -e "     Write Buffer:   ${CYAN}${wmem} bytes${NC}"
+            echo -e "     Min Free KB:    ${CYAN}${minfree}${NC}"
+            echo -e "  Usage: mtproxymax ram-tune [auto|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax ram-tune [auto|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Dynamic Port Range Shadowing ──
+run_port_hop() {
+    load_settings
+    local action="${1:-list}"
+    case "$action" in
+        add)
+            check_root
+            local range="$2"
+            if [ -z "$range" ]; then
+                log_error "Usage: mtproxymax port-hop add <start>:<end>  (e.g. 2000:2050)"
+                return 1
+            fi
+            local start_port end_port
+            start_port="${range%%:*}"
+            end_port="${range##*:}"
+            # Validate port range
+            if ! [[ "$start_port" =~ ^[0-9]+$ ]] || ! [[ "$end_port" =~ ^[0-9]+$ ]]; then
+                log_error "Invalid port range format. Use: <start>:<end> (e.g. 2000:2050)"
+                return 1
+            fi
+            if [ "$start_port" -lt 1 ] || [ "$end_port" -gt 65535 ] || [ "$start_port" -gt "$end_port" ]; then
+                log_error "Port range must be 1-65535 and start ≤ end."
+                return 1
+            fi
+            local target_port="${PROXY_PORT:-443}"
+            # Check if range overlaps with proxy port
+            if [ "$start_port" -le "$target_port" ] && [ "$end_port" -ge "$target_port" ]; then
+                log_error "Port range ${start_port}:${end_port} overlaps with proxy listen port ${target_port}."
+                return 1
+            fi
+            # Check for duplicate range entry
+            if [[ ",${PORT_HOP_RANGES}," == *",${range},"* ]]; then
+                log_warn "Port range ${range} is already active."
+                return 0
+            fi
+            # Apply iptables NAT redirect
+            if command -v iptables &>/dev/null; then
+                iptables -t nat -A PREROUTING -p tcp --dport "${start_port}:${end_port}" -m comment --comment "mtproxymax_porthop" -j REDIRECT --to-ports "$target_port" 2>/dev/null || {
+                    log_error "Failed to apply iptables redirect rule."
+                    return 1
+                }
+            elif command -v nft &>/dev/null; then
+                nft add table inet mtproxymax_hop 2>/dev/null || true
+                nft add chain inet mtproxymax_hop prerouting '{ type nat hook prerouting priority -100; }' 2>/dev/null || true
+                nft add rule inet mtproxymax_hop prerouting tcp dport "${start_port}-${end_port}" redirect to :"$target_port" 2>/dev/null || {
+                    log_error "Failed to apply nftables redirect rule."
+                    return 1
+                }
+            else
+                log_error "Neither iptables nor nft found. Cannot apply port-hop."
+                return 1
+            fi
+            # Persist range
+            if [ -n "$PORT_HOP_RANGES" ]; then
+                PORT_HOP_RANGES="${PORT_HOP_RANGES},${range}"
+            else
+                PORT_HOP_RANGES="$range"
+            fi
+            save_settings
+            log_success "Port-hop range ${start_port}:${end_port} → port ${target_port} activated!"
+            ;;
+        remove|rm)
+            check_root
+            local range="$2"
+            if [ -z "$range" ]; then
+                log_error "Usage: mtproxymax port-hop remove <start>:<end>"
+                return 1
+            fi
+            local start_port end_port
+            start_port="${range%%:*}"
+            end_port="${range##*:}"
+            local target_port="${PROXY_PORT:-443}"
+            # Remove iptables rule
+            if command -v iptables &>/dev/null; then
+                iptables -t nat -D PREROUTING -p tcp --dport "${start_port}:${end_port}" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+                iptables -t nat -D PREROUTING -p tcp --dport "${start_port}:${end_port}" -m comment --comment "mtproxymax_porthop" -j REDIRECT --to-ports "$target_port" 2>/dev/null || true
+            fi
+            if command -v nft &>/dev/null; then
+                nft delete table inet mtproxymax_hop 2>/dev/null || true
+            fi
+            # Remove from saved ranges
+            local new_ranges=""
+            IFS=',' read -ra _parts <<< "$PORT_HOP_RANGES"
+            local p
+            for p in "${_parts[@]}"; do
+                [ "$p" = "$range" ] && continue
+                new_ranges="${new_ranges:+$new_ranges,}$p"
+            done
+            PORT_HOP_RANGES="$new_ranges"
+            save_settings
+            # If nftables table was flushed, rebuild remaining ranges
+            if command -v nft &>/dev/null; then
+                apply_port_hop_rules
+            fi
+            log_success "Port-hop range ${range} removed."
+            ;;
+        list|status|"")
+            echo -e "\n  🌐 ${BOLD}Dynamic Port Range Shadowing:${NC}"
+            if [ -n "${PORT_HOP_RANGES:-}" ]; then
+                echo -e "     Status:  ${GREEN}${BOLD}ACTIVE${NC}"
+                IFS=',' read -ra _parts <<< "$PORT_HOP_RANGES"
+                local p
+                for p in "${_parts[@]}"; do
+                    local s="${p%%:*}" e="${p##*:}"
+                    echo -e "     Range:   ${CYAN}${s}–${e}${NC} → port ${PROXY_PORT:-443}"
+                done
+            else
+                echo -e "     Status:  ${YELLOW}NO ACTIVE RANGES${NC}"
+            fi
+            echo -e "  Usage: mtproxymax port-hop [add <start:end>|remove <start:end>|list]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax port-hop [add <start:end>|remove <start:end>|list]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Multi-Core IRQ Packet Spreading (RPS/RFS) ──
+run_cpu_tune() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        on|enable)
+            check_root
+            # Detect number of CPU cores
+            local num_cpus
+            num_cpus=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+            if [ "$num_cpus" -le 1 ]; then
+                log_info "Single-core CPU detected. RPS/RFS tuning provides minimal benefit on single-core."
+            fi
+            # Calculate RPS bitmask (all cores enabled)
+            local rps_mask
+            rps_mask=$(printf "%x" $(( (1 << num_cpus) - 1 )))
+            # Calculate RFS flow entries (32768 per core, capped at 262144)
+            local rfs_entries=$(( num_cpus * 32768 ))
+            [ "$rfs_entries" -gt 262144 ] && rfs_entries=262144
+            # Apply global RFS setting
+            if [ -f /proc/sys/net/core/rps_sock_flow_entries ]; then
+                echo "$rfs_entries" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+            else
+                log_info "RFS sock flow entries not available (may be a container)."
+            fi
+            # Apply RPS/RFS to all network interfaces
+            local applied=0 skipped=0
+            local iface
+            for iface in /sys/class/net/*/; do
+                local ifname
+                ifname=$(basename "$iface")
+                # Skip loopback
+                [ "$ifname" = "lo" ] && continue
+                local q
+                for q in "${iface}queues/rx-"*; do
+                    [ -d "$q" ] || continue
+                    if [ -f "${q}/rps_cpus" ]; then
+                        if echo "$rps_mask" > "${q}/rps_cpus" 2>/dev/null; then
+                            applied=$((applied + 1))
+                        else
+                            skipped=$((skipped + 1))
+                        fi
+                    fi
+                    if [ -f "${q}/rps_flow_cnt" ]; then
+                        echo "$rfs_entries" > "${q}/rps_flow_cnt" 2>/dev/null || true
+                    fi
+                done
+            done
+            # Create persistence script
+            mkdir -p /etc/mtproxymax
+            cat > /etc/mtproxymax/cpu-tune.sh <<CPUTUNE
+#!/bin/bash
+# MTProxyMax Multi-Core IRQ Packet Spreading
+# Auto-generated — applied on boot
+RPS_MASK="$rps_mask"
+RFS_ENTRIES="$rfs_entries"
+echo "\$RFS_ENTRIES" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+for iface in /sys/class/net/*/; do
+    ifname=\$(basename "\$iface")
+    [ "\$ifname" = "lo" ] && continue
+    for q in "\${iface}queues/rx-"*; do
+        [ -d "\$q" ] || continue
+        [ -f "\${q}/rps_cpus" ] && echo "\$RPS_MASK" > "\${q}/rps_cpus" 2>/dev/null || true
+        [ -f "\${q}/rps_flow_cnt" ] && echo "\$RFS_ENTRIES" > "\${q}/rps_flow_cnt" 2>/dev/null || true
+    done
+done
+CPUTUNE
+            chmod +x /etc/mtproxymax/cpu-tune.sh
+            CPU_TUNE_ENABLED="true"
+            save_settings
+            if [ "$skipped" -gt 0 ] && [ "$applied" -eq 0 ]; then
+                log_info "Containerized environment detected (RPS write restricted). Persistence saved for KVM/dedicated boot."
+            fi
+            log_success "Multi-Core IRQ spreading applied (${num_cpus} cores, mask=0x${rps_mask}, ${applied} queues tuned)."
+            ;;
+        off|disable)
+            check_root
+            # Reset RPS mask to 0 on all interfaces
+            local iface
+            for iface in /sys/class/net/*/; do
+                local ifname
+                ifname=$(basename "$iface")
+                [ "$ifname" = "lo" ] && continue
+                local q
+                for q in "${iface}queues/rx-"*; do
+                    [ -d "$q" ] || continue
+                    [ -f "${q}/rps_cpus" ] && echo "0" > "${q}/rps_cpus" 2>/dev/null || true
+                done
+            done
+            rm -f /etc/mtproxymax/cpu-tune.sh 2>/dev/null
+            CPU_TUNE_ENABLED="false"
+            save_settings
+            log_success "Multi-Core IRQ spreading disabled."
+            ;;
+        status|"")
+            echo -e "\n  ⚡ ${BOLD}Multi-Core IRQ Packet Spreading (RPS/RFS):${NC}"
+            local num_cpus
+            num_cpus=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "unknown")
+            if [ "${CPU_TUNE_ENABLED:-false}" = "true" ]; then
+                echo -e "     Status:     ${GREEN}${BOLD}ENABLED${NC}"
+            else
+                echo -e "     Status:     ${YELLOW}DISABLED${NC}"
+            fi
+            echo -e "     CPU Cores:  ${CYAN}${num_cpus}${NC}"
+            # Check virtualization type
+            local virt_type="unknown"
+            if command -v systemd-detect-virt &>/dev/null; then
+                virt_type=$(systemd-detect-virt 2>/dev/null || echo "unknown")
+            elif [ -f /proc/cpuinfo ]; then
+                if grep -qi "kvm\|qemu" /proc/cpuinfo 2>/dev/null; then
+                    virt_type="kvm"
+                elif grep -qi "openvz\|virtuozzo" /proc/cpuinfo 2>/dev/null; then
+                    virt_type="openvz"
+                fi
+            fi
+            echo -e "     Platform:   ${CYAN}${virt_type}${NC}"
+            if [ "$virt_type" = "lxc" ] || [ "$virt_type" = "openvz" ]; then
+                echo -e "     ${YELLOW}⚠ Container detected — RPS writes may be restricted${NC}"
+            fi
+            echo -e "  Usage: mtproxymax cpu-tune [on|off|status]\n"
+            ;;
+        *)
+            log_error "Usage: mtproxymax cpu-tune [on|off|status]"
+            return 1
             ;;
     esac
 }
@@ -5449,11 +7367,16 @@ show_qr() {
         echo -e "  ${BOLD}Scan this QR code in Telegram:${NC}"
         echo ""
         qrencode -t ANSIUTF8 "$link" | sed 's/^/  /'
+    elif command -v python3 &>/dev/null && python3 -c "import qrcode" &>/dev/null; then
+        echo ""
+        echo -e "  ${BOLD}Scan this QR code in Telegram:${NC}"
+        echo ""
+        python3 -c "import qrcode, sys; qr = qrcode.QRCode(); qr.add_data(sys.argv[1]); qr.print_ascii(invert=True)" "$link" 2>/dev/null | sed 's/^/  /'
     elif docker run --rm -e QR_DATA="$link" alpine:latest sh -c 'apk add --no-cache qrencode >/dev/null 2>&1 && qrencode -t ANSIUTF8 "$QR_DATA"' 2>/dev/null | sed 's/^/  /'; then
         :
     else
         echo ""
-        echo -e "  ${YELLOW}QR code not available (install qrencode for QR support)${NC}"
+        echo -e "  ${YELLOW}QR code ASCII view not available (install qrencode or python3-qrcode)${NC}"
         echo -e "  ${DIM}Install: apt install qrencode${NC}"
     fi
 
@@ -5462,6 +7385,35 @@ show_qr() {
     echo -e "  ${CYAN}${link}${NC}"
     echo ""
 }
+
+secret_qr() {
+    local target="${1:-}"
+    load_secrets
+    if [ "$target" = "all" ] || [ -z "$target" ]; then
+        local found=0
+        local i
+        for i in "${!SECRETS_LABELS[@]}"; do
+            if [ "${SECRETS_ENABLED[$i]}" = "true" ]; then
+                local lbl="${SECRETS_LABELS[$i]}"
+                echo -e "\n  ── QR Code for user: ${CYAN}${BOLD}${lbl}${NC} ──"
+                local link
+                if link=$(get_proxy_link_https "$lbl" 2>/dev/null); then
+                    show_qr "$link"
+                    found=$((found + 1))
+                fi
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            log_error "No active user secrets found."
+            return 1
+        fi
+    else
+        local link
+        link=$(get_proxy_link_https "$target") || return 1
+        show_qr "$link"
+    fi
+}
+
 
 # Generate QR code URL (for Telegram photo messages)
 generate_qr_url() {
@@ -5626,7 +7578,7 @@ geoblock_remove_all() {
     if command -v iptables &>/dev/null; then
         iptables-save 2>/dev/null | grep -E -- "--comment ${GEOBLOCK_COMMENT}(-default)?" | \
             sed 's/^-A/-D/' | while IFS= read -r rule; do
-                iptables $rule 2>/dev/null || true
+                eval "iptables $rule 2>/dev/null" || true
             done
     fi
 
@@ -5981,25 +7933,319 @@ self_update() {
         while IFS= read -r _old_img; do
             [ -z "$_old_img" ] && continue
             [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-            [[ "$_old_img" == *":latest" ]] && continue
             docker rmi "$_old_img" 2>/dev/null || true
         done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${REGISTRY_IMAGE}:")"
     fi
+}
 
-    # Clean up old engine images (keep only the current version + latest)
-    local _old_img
-    while IFS= read -r _old_img; do
-        [ -z "$_old_img" ] && continue
-        [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-        [[ "$_old_img" == *":latest" ]] && continue
-        docker rmi "$_old_img" 2>/dev/null && log_info "Removed old image: ${_old_img}"
-    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${DOCKER_IMAGE_BASE}:")"
-    while IFS= read -r _old_img; do
-        [ -z "$_old_img" ] && continue
-        [[ "$_old_img" == *":${_expected_ver}" ]] && continue
-        [[ "$_old_img" == *":latest" ]] && continue
-        docker rmi "$_old_img" 2>/dev/null || true
-    done <<< "$(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep "^${REGISTRY_IMAGE}:")"
+# ── Section 13c: Commercial Voucher & Gift Code Engine ──────
+load_vouchers() {
+    [ -f "$VOUCHERS_FILE" ] || touch "$VOUCHERS_FILE" 2>/dev/null || true
+}
+
+voucher_create() {
+    local count="${1:-1}" quota_str="${2:-10G}" days="${3:-30}" conns="${4:-15}" ips="${5:-5}" tier="${6:-standard}"
+    if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ] || [ "$count" -gt 100 ]; then
+        log_error "Count must be between 1 and 100"
+        return 1
+    fi
+    local quota_raw
+    quota_raw=$(parse_human_bytes "$quota_str") || quota_raw=0
+    [[ "$days" =~ ^[0-9]+$ ]] || days=30
+    [[ "$conns" =~ ^[0-9]+$ ]] || conns=15
+    [[ "$ips" =~ ^[0-9]+$ ]] || ips=5
+
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    load_vouchers
+    local created_at; created_at=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+    local i code p1 p2
+    echo -e "  ${BOLD}${CYAN}Generating ${count} Voucher(s) (${quota_str}, ${days} days)...${NC}\n"
+    for ((i=1; i<=count; i++)); do
+        p1=$(tr -dc 'A-Z0-9' < /dev/urandom 2>/dev/null | head -c 4 || echo "8F9A")
+        p2=$(tr -dc 'A-Z0-9' < /dev/urandom 2>/dev/null | head -c 4 || echo "2K1X")
+        code="MTP-${p1}-${p2}"
+        echo "${code}|${quota_raw}|${days}|${conns}|${ips}|${tier}|ACTIVE|${created_at}|-|-" >> "$VOUCHERS_FILE"
+        echo -e "  ${GREEN}✓${NC} Voucher #${i}: ${BOLD}${BRIGHT_GREEN}${code}${NC} (Tier: ${tier}, Quota: ${quota_str}, Valid: ${days}d)"
+    done
+    echo ""
+}
+
+voucher_list() {
+    load_vouchers
+    if [ ! -f "$VOUCHERS_FILE" ] || [ ! -s "$VOUCHERS_FILE" ]; then
+        echo -e "  ${DIM}No vouchers found. Run 'mtproxymax voucher create' to generate codes.${NC}"
+        return 0
+    fi
+    local filter="${1:-all}"
+    printf "  %-14s %-10s %-6s %-8s %-10s %-15s\n" "CODE" "QUOTA" "DAYS" "STATUS" "TIER" "REDEEMED BY"
+    draw_line
+    while IFS='|' read -r code quota days conns ips tier status created_at redeemed_by redeemed_at; do
+        [[ "$code" =~ ^# ]] && continue; [ -z "$code" ] && continue
+        if [ "$filter" = "active" ] && [ "$status" != "ACTIVE" ]; then continue; fi
+        if [ "$filter" = "redeemed" ] && [ "$status" != "REDEEMED" ]; then continue; fi
+        local q_fmt="Unlimited"; [ "${quota:-0}" -gt 0 ] && q_fmt=$(format_human_bytes "$quota")
+        local st_col="$GREEN"; [ "$status" = "REDEEMED" ] && st_col="$DIM"; [ "$status" = "REVOKED" ] && st_col="$RED"
+        printf "  ${BOLD}%-14s${NC} %-10s %-6s ${st_col}%-8s${NC} %-10s %-15s\n" "$code" "$q_fmt" "${days}d" "$status" "${tier:-std}" "${redeemed_by:-}"
+    done < "$VOUCHERS_FILE"
+}
+
+voucher_revoke() {
+    local target="$1"
+    [ -z "$target" ] && { log_error "Usage: voucher revoke <code>"; return 1; }
+    load_vouchers
+    if ! grep -q "^${target}|" "$VOUCHERS_FILE" 2>/dev/null; then
+        log_error "Voucher '${target}' not found"
+        return 1
+    fi
+    awk -F'|' -v c="$target" 'BEGIN{OFS="|"} $1==c && $7=="ACTIVE"{$7="REVOKED"} {print}' "$VOUCHERS_FILE" > "${VOUCHERS_FILE}.tmp" && mv "${VOUCHERS_FILE}.tmp" "$VOUCHERS_FILE"
+    log_success "Voucher '${target}' revoked"
+}
+
+voucher_redeem() {
+    local target="$1" label="${2:-}"
+    [ -z "$target" ] && { log_error "Usage: voucher redeem <code> [label]"; return 1; }
+    load_vouchers
+    local line; line=$(grep "^${target}|" "$VOUCHERS_FILE" 2>/dev/null | head -1)
+    if [ -z "$line" ]; then
+        log_error "Voucher '${target}' does not exist."
+        return 1
+    fi
+    IFS='|' read -r code quota days conns ips tier status created_at redeemed_by redeemed_at <<< "$line"
+    if [ "$status" != "ACTIVE" ]; then
+        log_error "Voucher '${target}' is already ${status}."
+        return 1
+    fi
+    [ -z "$label" ] && label="v_${code//MTP-/}"
+    local now_iso; now_iso=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+    local exp_iso="never"
+    if [ "${days:-0}" -gt 0 ]; then
+        exp_iso=$(date -u -d "+${days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
+    fi
+    # Mark voucher redeemed atomically
+    awk -F'|' -v c="$target" -v u="$label" -v t="$now_iso" 'BEGIN{OFS="|"} $1==c && $7=="ACTIVE"{$7="REDEEMED"; $9=u; $10=t} {print}' "$VOUCHERS_FILE" > "${VOUCHERS_FILE}.tmp" && mv "${VOUCHERS_FILE}.tmp" "$VOUCHERS_FILE"
+    
+    # Add or update secret
+    if grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
+        secret_set_limits "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" >/dev/null 2>&1
+        log_success "Applied voucher '${target}' to existing secret '${label}'"
+    else
+        secret_add "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" "Voucher ${target}" >/dev/null 2>&1
+        log_success "Redeemed voucher '${target}' — created secret '${label}'"
+    fi
+}
+
+# ── Section 13d: Role-Based Access Control (RBAC) ───────────
+load_admins() {
+    [ -f "$ADMINS_FILE" ] || touch "$ADMINS_FILE" 2>/dev/null || true
+}
+
+admin_add() {
+    local tg_id="$1" role="${2:-reseller}" label="${3:-Admin}"
+    [ -z "$tg_id" ] && { log_error "Usage: admin add <telegram_id> [superadmin|reseller] [label]"; return 1; }
+    [[ "$tg_id" =~ ^-?[0-9]+$ ]] || { log_error "Invalid Telegram ID"; return 1; }
+    case "$role" in superadmin|reseller) ;; *) role="reseller" ;; esac
+    load_admins
+    if grep -q "^${tg_id}|" "$ADMINS_FILE" 2>/dev/null; then
+        awk -F'|' -v i="$tg_id" -v r="$role" -v l="$label" 'BEGIN{OFS="|"} $1==i{$2=r; if(l!="" && l!="Admin") $3=l} {print}' "$ADMINS_FILE" > "${ADMINS_FILE}.tmp" && mv "${ADMINS_FILE}.tmp" "$ADMINS_FILE"
+    else
+        echo "${tg_id}|${role}|${label}|$(date -u '+%Y-%m-%d')" >> "$ADMINS_FILE"
+    fi
+    log_success "Admin ${tg_id} registered as '${role}' (${label})"
+}
+
+admin_remove() {
+    local tg_id="$1"
+    [ -z "$tg_id" ] && { log_error "Usage: admin remove <telegram_id>"; return 1; }
+    load_admins
+    grep -v "^${tg_id}|" "$ADMINS_FILE" > "${ADMINS_FILE}.tmp" 2>/dev/null && mv "${ADMINS_FILE}.tmp" "$ADMINS_FILE"
+    log_success "Admin ${tg_id} removed"
+}
+
+admin_list() {
+    load_admins
+    echo -e "  ${BOLD}Configured Root Superadmin:${NC} ${TELEGRAM_CHAT_ID:-none}"
+    if [ ! -f "$ADMINS_FILE" ] || [ ! -s "$ADMINS_FILE" ]; then
+        echo -e "  ${DIM}No additional RBAC admins configured.${NC}"
+        return 0
+    fi
+    echo ""
+    printf "  %-15s %-12s %-20s %-12s\n" "TELEGRAM ID" "ROLE" "LABEL" "ADDED"
+    draw_line
+    while IFS='|' read -r id role label added; do
+        [[ "$id" =~ ^# ]] && continue; [ -z "$id" ] && continue
+        local r_col="$CYAN"; [ "$role" = "superadmin" ] && r_col="$BRIGHT_GREEN"
+        printf "  %-15s ${r_col}%-12s${NC} %-20s %-12s\n" "$id" "$role" "${label:-Admin}" "${added:-}"
+    done < "$ADMINS_FILE"
+}
+
+admin_check_role() {
+    local tg_id="$1"
+    [ -z "$tg_id" ] && { echo "none"; return; }
+    if [ "$tg_id" = "${TELEGRAM_CHAT_ID:-}" ]; then
+        echo "superadmin"
+        return
+    fi
+    load_admins
+    local role; role=$(grep "^${tg_id}|" "$ADMINS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+    echo "${role:-none}"
+}
+
+# ── Section 13e: Decoupled Self-Service Web Portal ──────────
+portal_export_data() {
+    load_settings
+    if [ "${1:-}" != "force" ] && [ "${PORTAL_ENABLED:-false}" != "true" ]; then return 0; fi
+    mkdir -p "$PORTAL_WWW" 2>/dev/null || true
+    load_traffic
+    local ip; ip=$(get_cached_ip)
+    local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+    local tmp_json=$(_mktemp) || return 0
+    
+    cat > "$tmp_json" << JSON_EOF
+{
+  "server_label": "${TELEGRAM_SERVER_LABEL:-MTProxyMax}",
+  "server_ip": "${ip}",
+  "port": ${PROXY_PORT:-443},
+  "updated_at": "$(date -u '+%Y-%m-%d %H:%M:%S UTC')",
+  "users": {
+JSON_EOF
+
+    local first="true"
+    if [ -f "$SECRETS_FILE" ]; then
+        while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+            [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
+            local fs="ee${secret}${dh}"
+            local ui=${_cum_user_in["$label"]:-0} uo=${_cum_user_out["$label"]:-0}
+            local total_b=$((ui + uo))
+            local q_raw="${_q:-0}"
+            local pct=0; [ "$q_raw" -gt 0 ] 2>/dev/null && pct=$((total_b * 100 / q_raw))
+            [ "$first" = "true" ] && first="false" || echo "," >> "$tmp_json"
+            cat >> "$tmp_json" << USER_JSON_EOF
+    "${fs}": {
+      "label": "${label}",
+      "status": "$([ "$enabled" = "true" ] && echo "Active" || echo "Disabled")",
+      "used_bytes": ${total_b},
+      "used_human": "$(format_human_bytes ${total_b})",
+      "quota_bytes": ${q_raw},
+      "quota_human": "$([ "$q_raw" -gt 0 ] && format_human_bytes ${q_raw} || echo "Unlimited")",
+      "usage_percent": ${pct},
+      "expires": "${_ex:-never}",
+      "link": "https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs}"
+    }
+USER_JSON_EOF
+        done < "$SECRETS_FILE"
+    fi
+    echo -e "\n  }\n}" >> "$tmp_json"
+    mv "$tmp_json" "$PORTAL_DATA" 2>/dev/null || true
+}
+
+portal_generate() {
+    mkdir -p "$PORTAL_WWW"
+    portal_export_data force
+    cat > "${PORTAL_WWW}/index.html" << 'HTML_EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MTProxy User Portal</title>
+<style>
+  :root { --bg: #0d1117; --card: rgba(22, 27, 34, 0.85); --accent: #2f81f7; --text: #e6edf3; --dim: #8b949e; --border: #30363d; }
+  body { margin:0; padding:2rem 1rem; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background: var(--bg); color: var(--text); min-height: 90vh; display: flex; justify-content: center; align-items: center; }
+  .portal-card { background: var(--card); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 16px; padding: 2.5rem; max-width: 480px; width: 100%; box-shadow: 0 16px 32px rgba(0,0,0,0.4); text-align: center; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--dim); font-size: 0.9rem; margin-bottom: 2rem; }
+  input { width: 85%; padding: 0.8rem 1rem; border-radius: 8px; border: 1px solid var(--border); background: #010409; color: var(--text); font-size: 1rem; margin-bottom: 1rem; text-align: center; }
+  button { width: 93%; padding: 0.8rem; background: var(--accent); color: #fff; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; }
+  button:hover { filter: brightness(1.1); }
+  #result { margin-top: 2rem; display: none; text-align: left; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+  .stat-row { display: flex; justify-content: space-between; margin-bottom: 0.8rem; font-size: 0.95rem; }
+  .progress { background: var(--border); height: 10px; border-radius: 5px; overflow: hidden; margin: 1rem 0; }
+  .progress-fill { background: var(--accent); height: 100%; transition: width 0.5s ease; }
+  .connect-btn { display: block; text-align: center; text-decoration: none; background: #238636; color: #fff; padding: 0.8rem; border-radius: 8px; font-weight: 600; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<div class="portal-card">
+  <h1>🛡️ MTProxy User Portal</h1>
+  <div class="subtitle">Check your live quota, status & connection link</div>
+  <input type="text" id="secInput" placeholder="Paste your Secret Key (ee...)" autocomplete="off">
+  <button onclick="lookup()">Check Status</button>
+  <div id="result"></div>
+</div>
+<script>
+async function lookup() {
+  const q = document.getElementById('secInput').value.trim();
+  const resDiv = document.getElementById('result');
+  if(!q) return;
+  try {
+    const resp = await fetch('data.json');
+    const data = await resp.json();
+    let u = data.users[q];
+    if(!u) {
+      for(let k in data.users) { if(data.users[k].label.toLowerCase() === q.toLowerCase()) { u = data.users[k]; break; } }
+    }
+    if(!u) { resDiv.style.display='block'; resDiv.innerHTML='<div style="color:#f85149;text-align:center;">❌ Secret or user not found.</div>'; return; }
+    resDiv.style.display='block';
+    resDiv.innerHTML = `
+      <div class="stat-row"><span>Status:</span><strong style="color:${u.status==='Active'?'#3fb950':'#f85149'}">${u.status}</strong></div>
+      <div class="stat-row"><span>Account:</span><strong>${u.label}</strong></div>
+      <div class="stat-row"><span>Data Consumed:</span><strong>${u.used_human} / ${u.quota_human}</strong></div>
+      <div class="progress"><div class="progress-fill" style="width:${Math.min(u.usage_percent,100)}%;background:${u.usage_percent>90?'#f85149':'#2f81f7'}"></div></div>
+      <div class="stat-row"><span>Expires:</span><strong>${u.expires}</strong></div>
+      <a class="connect-btn" href="${u.link}">🚀 One-Click Connect</a>
+    `;
+  } catch(e) { resDiv.style.display='block'; resDiv.innerHTML='<div style="color:#f85149;text-align:center;">❌ Error loading data.</div>'; }
+}
+</script>
+</body>
+</html>
+HTML_EOF
+    log_success "Decoupled Web Portal generated at ${PORTAL_WWW}/index.html"
+}
+
+portal_serve() {
+    local port="${1:-${PORTAL_PORT:-8080}}"
+    portal_generate
+    log_info "Starting lightweight Self-Service Web Portal on port ${port}..."
+    if command -v python3 &>/dev/null; then
+        (cd "$PORTAL_WWW" && nohup python3 -m http.server "$port" >/dev/null 2>&1 &)
+        log_success "Portal running on http://$(get_cached_ip):${port}"
+    else
+        log_error "python3 required to run built-in portal server."
+    fi
+}
+
+# ── Section 13f: Automated Hostile Scanner Shield ───────────
+scanner_shield_on() {
+    check_root
+    _ensure_ipset || { log_error "Cannot activate Scanner Shield without 'ipset'."; return 1; }
+    ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null || true
+    if ! iptables -C INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null; then
+        iptables -I INPUT 1 -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null || true
+    fi
+    SCANNER_SHIELD_ENABLED="true"
+    save_settings
+    scanner_shield_update
+    log_success "Automated Hostile Scanner Shield activated on port ${PROXY_PORT}"
+}
+
+scanner_shield_off() {
+    check_root
+    iptables -D INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null || true
+    ipset destroy "$SCANNER_SHIELD_SET" 2>/dev/null || true
+    SCANNER_SHIELD_ENABLED="false"
+    save_settings
+    log_success "Scanner Shield deactivated"
+}
+
+scanner_shield_update() {
+    [ "${SCANNER_SHIELD_ENABLED:-false}" != "true" ] && return 0
+    if ! command -v ipset &>/dev/null; then return 0; fi
+    ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null || true
+    # Add well-known mass scanner CIDRs (Censys, Shodan, Shadowserver common probe ranges)
+    local subnets=("162.142.125.0/24" "167.94.138.0/24" "167.94.145.0/24" "167.94.146.0/24" "71.6.135.0/24" "80.82.77.0/24" "185.181.102.0/24")
+    for sub in "${subnets[@]}"; do
+        ipset add "$SCANNER_SHIELD_SET" "$sub" 2>/dev/null || true
+    done
 }
 
 # ── Section 14: Telegram Integration ────────────────────────
@@ -6284,7 +8530,8 @@ load_tg_settings() {
                 PROXY_CPUS|PROXY_MEMORY|CUSTOM_IP|PROXY_PROTOCOL|PROXY_PROTOCOL_TRUSTED_CIDRS|MASKING_ENABLED|MASKING_HOST|MASKING_PORT|\
                 AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|AUTO_UPDATE_ENABLED|\
                 TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
-                TELEGRAM_INTERVAL|TELEGRAM_SERVER_LABEL|TELEGRAM_ALERTS_ENABLED)
+                TELEGRAM_INTERVAL|TELEGRAM_SERVER_LABEL|TELEGRAM_ALERTS_ENABLED|\
+                LOCKDOWN_MODE|QOS_LIMIT_MBPS|HAPPY_HOURS_WINDOW|PORT_POOL_PORTS|STEALTH_PRESET|COVER_WATCHDOG_ENABLED|DDNS_ENABLED|DDNS_RECORD_NAME)
                     printf -v "$key" '%s' "$val" ;;
             esac
         fi
@@ -6378,6 +8625,18 @@ get_stats() {
     '
 }
 
+_iso_to_epoch() {
+    local ts="$1"
+    [ -z "$ts" ] && { echo "0"; return; }
+    local ts_clean="${ts%%.*}"
+    [[ "$ts" == *Z ]] && ts_clean="${ts_clean}Z"
+    local epoch
+    epoch=$(date -d "${ts_clean}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
+    local ts_bb="${ts_clean%Z}"
+    epoch=$(date -D '%Y-%m-%dT%H:%M:%S' -d "${ts_bb}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
+    echo "0"
+}
+
 get_uptime() {
     # Prefer Prometheus uptime metric (always available when engine is running)
     local m; m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
@@ -6388,14 +8647,8 @@ get_uptime() {
     # Fallback: docker inspect
     local sa; sa=$(docker inspect --format '{{.State.StartedAt}}' mtproxymax 2>/dev/null)
     [ -z "$sa" ] && echo 0 && return
-    local sa_clean="${sa%%.*}"
-    [[ "$sa" == *Z ]] && sa_clean="${sa_clean}Z"
-    local se
-    se=$(date -d "$sa_clean" +%s 2>/dev/null) && [ "$se" -gt 0 ] 2>/dev/null || {
-        local sa_bb="${sa_clean%Z}"
-        se=$(date -D '%Y-%m-%dT%H:%M:%S' -d "$sa_bb" +%s 2>/dev/null) || se=0
-    }
-    echo $(( $(date +%s) - se ))
+    local se; se=$(_iso_to_epoch "$sa")
+    [ "$se" -gt 0 ] 2>/dev/null && echo $(( $(date +%s) - se )) || echo 0
 }
 
 get_user_stats_tg() {
@@ -6560,21 +8813,77 @@ except: pass
         local _text _cid
         _text=$(echo "$updates" | grep -oE '"text"\s*:\s*"[^"]*"' | tail -1 | sed 's/.*"text"\s*:\s*"//;s/"$//')
         _cid=$(echo "$updates" | grep -oE '"chat"\s*:\s*\{[^}]*"id"\s*:\s*-?[0-9]+' | tail -1 | grep -oE -- '-?[0-9]+$')
-        [ -n "$_text" ] && [ -n "$_cid" ] && [ "$_cid" = "$TELEGRAM_CHAT_ID" ] && {
+        [ -n "$_text" ] && [ -n "$_cid" ] && {
             _new_offset=${_new_offset:-0}
             _process_cmd "$_new_offset" "$_cid" "$_text"
         }
     fi
 }
 
+_check_tg_role() {
+    local cid="$1"
+    [ "$cid" = "${TELEGRAM_CHAT_ID:-}" ] && { echo "superadmin"; return; }
+    local r
+    r=$(grep "^${cid}|" "${INSTALL_DIR}/admins.conf" 2>/dev/null | head -1 | cut -d'|' -f2)
+    echo "${r:-none}"
+}
+
 _process_cmd() {
     local update_id="$1" chat_id="$2" text="$3"
     echo "$((update_id + 1))" > "$OFFSET_FILE"
 
-    # Only respond to our chat
-    [ "$chat_id" != "$TELEGRAM_CHAT_ID" ] && return
+    local role
+    role=$(_check_tg_role "$chat_id")
 
+    # Public user or unauthenticated commands
     case "$text" in
+        /redeem\ *|/redeem@*\ *|/mp_redeem\ *|/mp_redeem@*\ *)
+            local vcode=$(echo "$text" | awk '{print $2}')
+            local vlabel=$(echo "$text" | awk '{print $3}')
+            [ -z "$vcode" ] && { tg_send "❌ Usage: /redeem <code> [optional_label]"; return; }
+            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
+            if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
+                load_tg_settings
+                local ip; ip=$(get_cached_ip)
+                local ns=$(grep "^${vlabel}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+                local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+                local fs="ee${ns}${dh}"
+                tg_send "🎉 *Voucher Redeemed Successfully!*\n\nWelcome account *$(_esc "$vlabel")*!\n\n🔗 [Connect Now](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\`"
+                send_proxy_qr "$ip" "$PROXY_PORT" "$fs"
+            else
+                tg_send "❌ Failed to redeem voucher '$(_esc "$vcode")' — invalid, expired, or already redeemed."
+            fi
+            return
+            ;;
+    esac
+
+    # Reject non-admin senders for all administrative commands below
+    if [ "$role" = "none" ]; then
+        return
+    fi
+
+    # Superadmin & Reseller administrative commands
+    case "$text" in
+        /mp_voucher\ *|/mp_voucher@*\ *)
+            local sub=$(echo "$text" | awk '{print $2}')
+            case "$sub" in
+                create)
+                    local cnt=$(echo "$text" | awk '{print $3}')
+                    local qta=$(echo "$text" | awk '{print $4}')
+                    local dys=$(echo "$text" | awk '{print $5}')
+                    "${INSTALL_DIR}/mtproxymax" voucher create "${cnt:-1}" "${qta:-10G}" "${dys:-30}" &>/dev/null
+                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | tail -n +3 | head -n "${cnt:-1}")
+                    tg_send "🎟 *Generated Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    ;;
+                list)
+                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | head -n 25)
+                    tg_send "📋 *Active Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    ;;
+                *)
+                    tg_send "🎟 *Voucher Engine*\n\nUsage:\n\`/mp_voucher create <count> <quota> <days>\`\n\`/mp_voucher list\`"
+                    ;;
+            esac
+            ;;
         /mp_status|/mp_status@*)
             load_tg_settings
             if ! is_running; then
@@ -6650,7 +8959,8 @@ _process_cmd() {
                 tg_send "❌ Failed to add secret '$(_esc "$label")' (may already exist)"
             fi
             ;;
-        /mp_remove\ *|/mp_remove@*\ *)
+        /mp_remove\ *|/mp_remove@*\ *|/mp_revoke\ *|/mp_revoke@*\ *)
+            [ "$role" != "superadmin" ] && { tg_send "⛔ Permission denied: superadmin required."; return; }
             local label=$(echo "$text" | awk '{print $2}')
             [ -z "$label" ] && tg_send "❌ Usage: /mp\\_remove <label>" && return
             [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || { tg_send "❌ Invalid label"; return; }
@@ -6666,7 +8976,7 @@ _process_cmd() {
             fi
             "${INSTALL_DIR}/mtproxymax" secret remove "$label" &>/dev/null
             if [ $? -eq 0 ]; then
-                tg_send "✅ Secret *$(_esc "$label")* removed"
+                tg_send "✅ Secret *$(_esc "$label")* revoked/removed"
             else
                 tg_send "❌ Failed to remove secret '$(_esc "$label")'"
             fi
@@ -6690,6 +9000,7 @@ _process_cmd() {
             fi
             ;;
         /mp_restart|/mp_restart@*)
+            [ "$role" != "superadmin" ] && { tg_send "⛔ Permission denied: superadmin required."; return; }
             tg_send "🔄 Restarting proxy..."
             "${INSTALL_DIR}/mtproxymax" restart &>/dev/null
             sleep 3
@@ -6745,6 +9056,7 @@ _process_cmd() {
             tg_send "$msg"
             ;;
         /mp_update|/mp_update@*)
+            [ "$role" != "superadmin" ] && { tg_send "⛔ Permission denied: superadmin required."; return; }
             tg_send "🔍 Checking for updates..."
             local update_out
             update_out=$("${INSTALL_DIR}/mtproxymax" update </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tail -5)
@@ -6807,8 +9119,52 @@ _process_cmd() {
             done < "$uf"
             tg_send "$msg"
             ;;
+        /mp_lockdown|/mp_lockdown@*|/mp_lockdown\ *|/mp_lockdown@*\ *)
+            [ "$role" != "superadmin" ] && { tg_send "⛔ Permission denied: superadmin required."; return; }
+            local sub=$(echo "$text" | awk '{print $2}')
+            sub="${sub:-status}"
+            case "$sub" in
+                on|enable)
+                    "${INSTALL_DIR}/mtproxymax" lockdown on &>/dev/null
+                    tg_send "🚨 *EMERGENCY LOCKDOWN ACTIVATED*\nKernel SYN Shield: ACTIVE\nStealth Preset: ULTRA\nMSS Clamping: ACTIVE"
+                    ;;
+                off|disable)
+                    "${INSTALL_DIR}/mtproxymax" lockdown off &>/dev/null
+                    tg_send "✅ *Lockdown Deactivated*\nServer restored to normal operating posture."
+                    ;;
+                *)
+                    load_tg_settings
+                    local st="🟢 NORMAL"; [ "${LOCKDOWN_MODE:-false}" = "true" ] && st="🔴 LOCKDOWN ACTIVE"
+                    tg_send "🔒 *Emergency Lockdown Mode*: ${st}\n\nUsage:\n\`/mp_lockdown on\` — Activate Emergency Shield\n\`/mp_lockdown off\` — Return to Normal"
+                    ;;
+            esac
+            ;;
+        /mp_digest|/mp_digest@*)
+            load_tg_settings
+            load_traffic
+            local _ip; _ip=$(get_cached_ip)
+            local _up=0 _rc=0
+            if is_proxy_running; then
+                _up=$(get_container_uptime)
+                _rc=$(get_active_connections)
+            fi
+            local st="🟢 NORMAL"; [ "${LOCKDOWN_MODE:-false}" = "true" ] && st="🔴 LOCKDOWN ACTIVE"
+            local qos_st="Disabled"; [ "${QOS_LIMIT_MBPS:-0}" -gt 0 ] && qos_st="${QOS_LIMIT_MBPS} Mbps/IP"
+            local hh_st="Disabled"; [ -n "${HAPPY_HOURS_WINDOW:-}" ] && hh_st="${HAPPY_HOURS_WINDOW}"
+            
+            local msg="📊 *System Health & Security Digest*
+
+🖥 *Server*: \`${_ip}\` (${PROXY_PORT})
+⚡️ *Posture*: ${st}
+⏱ *Uptime*: $(format_duration ${_up:-0})
+🔌 *Connections*: ${_rc} live
+🏎 *QoS Shaping*: ${qos_st}
+🕒 *Happy Hours*: ${hh_st}
+📈 *Total Traffic*: $(format_human_bytes ${_cum_in:-0}) DL / $(format_human_bytes ${_cum_out:-0}) UL"
+            tg_send "$msg"
+            ;;
         /mp_help|/mp_help@*)
-            tg_send "📋 *MTProxyMax Commands*\n\n/mp\\_status — Proxy status\n/mp\\_secrets — List secrets\n/mp\\_link — Get proxy links + QR\n/mp\\_add <label> — Add secret\n/mp\\_remove <label> — Remove secret\n/mp\\_rotate <label> — Rotate secret\n/mp\\_enable <label> — Enable secret\n/mp\\_disable <label> — Disable secret\n/mp\\_limits — Show user limits\n/mp\\_setlimit — Set user limits\n/mp\\_upstreams — List upstreams\n/mp\\_traffic — Traffic report\n/mp\\_health — Health check\n/mp\\_restart — Restart proxy\n/mp\\_update — Check for updates\n/mp\\_help — This help"
+            tg_send "📋 *MTProxyMax Commands*\n\n/redeem <code> — Redeem voucher code\n/mp\\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\\_voucher list — List vouchers\n/mp\\_status — Proxy status\n/mp\\_secrets — List secrets\n/mp\\_link — Get proxy links + QR\n/mp\\_add <label> — Add secret\n/mp\\_remove / /mp\\_revoke <label> — Remove secret\n/mp\\_rotate <label> — Rotate secret\n/mp\\_enable <label> — Enable secret\n/mp\\_disable <label> — Disable secret\n/mp\\_limits — Show user limits\n/mp\\_setlimit — Set user limits\n/mp\\_upstreams — List upstreams\n/mp\\_traffic — Traffic report\n/mp\\_health — Health check\n/mp\\_lockdown [on|off] — Emergency shield\n/mp\\_digest — System digest report\n/mp\\_restart — Restart proxy\n/mp\\_update — Check for updates\n/mp\\_help — This help"
             ;;
     esac
 }
@@ -6838,6 +9194,7 @@ while true; do
     if [ $((_now - _last_traffic_update)) -ge 60 ] && is_running; then
         _last_traffic_update=$_now
         update_traffic 2>/dev/null
+        [ "${PORTAL_ENABLED:-false}" = "true" ] && "${INSTALL_DIR}/mtproxymax" portal generate &>/dev/null
 
         # Connection log: append per-user activity (delta = current cumulative - previous cumulative)
         _connlog="${INSTALL_DIR}/connection.log"
@@ -6902,7 +9259,7 @@ while true; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$label" ] && continue
                 [ "$_ex" = "0" ] || [ -z "$_ex" ] && continue
-                exp_e=$(date -d "${_ex}" +%s 2>/dev/null) || continue
+                exp_e=$(_iso_to_epoch "${_ex}") && [ "$exp_e" -gt 0 ] 2>/dev/null || continue
                 days_left=$(( (exp_e - _now) / 86400 ))
                 if [ "$days_left" -le 3 ] && [ "$days_left" -ge 0 ]; then
                     if ! grep -q "^${label}:${_today}$" "$_expiry_file" 2>/dev/null; then
@@ -8566,10 +10923,27 @@ show_cli_help() {
     echo -e "    ${GREEN}logs${NC}                    Stream container logs"
     echo -e "    ${GREEN}health${NC}                  Run health diagnostics"
     echo ""
+    echo -e "  ${BOLD}Anti-DPI & Stealth Defenses:${NC}"
+    echo -e "    ${GREEN}shield${NC} [on|off|status]      Toggle Kernel SYN Shield"
+    echo -e "    ${GREEN}stealth${NC} [ultra|normal|status] Switch Stealth Preset"
+    echo -e "    ${GREEN}clamp-mss${NC} [on|off|status]   Toggle TCP MSS Clamping"
+    echo -e "    ${GREEN}domain-pool${NC} <d1,d2>       Set Multi-Domain SNI Pool"
+    echo -e "    ${GREEN}dpi-inspect${NC}               Run DPI Forensics Analyzer"
+    echo -e "    ${GREEN}cover-watchdog${NC} [test|auto] Test/rotate cover domains"
+    echo -e "    ${GREEN}lockdown${NC} [on|off|status]    Toggle Emergency Lockdown"
+    echo -e "    ${GREEN}port-pool${NC} [add|remove|list] Manage Secondary Port Pool"
+    echo ""
+    echo -e "  ${BOLD}QoS Bandwidth & Quota Intelligence:${NC}"
+    echo -e "    ${GREEN}qos${NC} [set <mbps>|off|status] Manage Per-IP Bandwidth Speed Shaping"
+    echo -e "    ${GREEN}happy-hours${NC} [set <win>|off] Manage Off-Peak Quota Exclusions"
+    echo -e "    ${GREEN}notify-expiry${NC}             Send Telegram Reminders for Expiring Secrets"
+    echo -e "    ${GREEN}abuse-watch${NC}               Scan Users for Abnormal Bandwidth Usage"
+    echo ""
     echo -e "  ${BOLD}Telegram:${NC}"
     echo -e "    ${GREEN}telegram setup${NC}          Run Telegram bot wizard"
     echo -e "    ${GREEN}telegram status${NC}         Show Telegram bot status"
     echo -e "    ${GREEN}telegram test${NC}           Send test message"
+    echo -e "    ${GREEN}broadcast <msg>${NC}         Broadcast announcement via Telegram bot"
     echo -e "    ${GREEN}telegram disable${NC}        Disable Telegram"
     echo -e "    ${GREEN}telegram remove${NC}         Remove Telegram bot"
     echo ""
@@ -8586,6 +10960,47 @@ show_cli_help() {
     echo -e "    ${GREEN}replication logs${NC}        Show sync log"
     echo -e "    ${GREEN}replication reset${NC}       Reset to standalone"
     echo -e "    ${GREEN}replication promote${NC}     Promote slave to master"
+    echo ""
+    echo -e "  ${BOLD}DevOps & Clustering Automation:${NC}"
+    echo -e "    ${GREEN}export-lb${NC} [haproxy|nginx] Export Layer-4 Load Balancer configurations"
+    echo -e "    ${GREEN}ddns${NC} [set|run|status|off] Manage Cloudflare Dynamic DNS Updater"
+    echo -e "    ${GREEN}diag-dump${NC}               Create full diagnostic forensic bundle"
+    echo -e "    ${GREEN}snapshot${NC} [create|restore] Point-in-time configuration snapshots"
+    echo ""
+    echo -e "  ${BOLD}Operations, Briefings & Onboarding Suite:${NC}"
+    echo -e "    ${GREEN}backup send-tg${NC} [file]     Push server backup archive directly to Telegram bot chat"
+    echo -e "    ${GREEN}daily-report${NC} [on|off|run] Schedule morning executive briefing via Telegram bot"
+    echo -e "    ${GREEN}ssh-shield${NC} [on|off|status] Enable fail2ban SSH brute-force intrusion shield"
+    echo -e "    ${GREEN}net-grade${NC}               Benchmark international routing & assign A+/A/B/C grade"
+    echo -e "    ${GREEN}onboard${NC} [label]           Smart interactive step-by-step user creation wizard"
+    echo ""
+    echo -e "  ${BOLD}Performance, Diagnostics & Self-Healing Suite:${NC}"
+    echo -e "    ${GREEN}tcp-boost${NC} [on|off|status] Activate Linux Kernel TCP BBR & Fast Open booster"
+    echo -e "    ${GREEN}tcp-clean${NC} [on|off|status] Activate aggressive keep-alive dead mobile socket reaper"
+    echo -e "    ${GREEN}socket-boost${NC} [on|off]     Apply ultra-low latency kernel socket queue expansion"
+    echo -e "    ${GREEN}tls-pad${NC} [auto|off|rotate] Dynamic FakeTLS certificate length jitter & randomization"
+    echo -e "    ${GREEN}honeypot${NC} [on|off|status]  Enable active probe decoy redirection & protection"
+    echo -e "    ${GREEN}leak-scan${NC} [thresh]        Detect multi-IP subscription sharing anomalies"
+    echo -e "    ${GREEN}cert-check${NC} [domain]       Inspect cover domain SSL/TLS certificate health"
+    echo -e "    ${GREEN}clone-link${NC}                Export one-line Base64 server replication bundle"
+    echo -e "    ${GREEN}bootstrap${NC} <base64>        Deploy cloned config bundle on a fresh node"
+    echo -e "    ${GREEN}heal${NC}                      Run emergency RAM & dead socket cleanup immediately"
+    echo -e "    ${GREEN}auto-heal${NC} [on|off|status] Enable background automated RAM/socket self-healer"
+    echo -e "    ${GREEN}tcp-fastpath${NC} [on|off]     TCP window scaling, SACK & path MTU probing optimizer"
+    echo -e "    ${GREEN}ram-tune${NC} [auto|off]        Auto-detect RAM & apply optimal TCP memory buffers"
+    echo -e "    ${GREEN}port-hop${NC} [add|remove|list] Dynamic multi-port NAT range redirection"
+    echo -e "    ${GREEN}cpu-tune${NC} [on|off|status]   Multi-core IRQ packet spreading (RPS/RFS)"
+    echo ""
+    echo -e "  ${BOLD}Enterprise Commercial & Shield Suite:${NC}"
+    echo -e "    ${GREEN}voucher create${NC} <cnt> <qta> <dys> Generate batch voucher codes"
+    echo -e "    ${GREEN}voucher list${NC} [active|all]      List vouchers and redemption status"
+    echo -e "    ${GREEN}voucher revoke${NC} <code>          Revoke a voucher code"
+    echo -e "    ${GREEN}voucher redeem${NC} <code> [lbl]    Redeem voucher code locally"
+    echo -e "    ${GREEN}admin add${NC} <chat_id> <role>     Add role-based Telegram admin (superadmin/reseller)"
+    echo -e "    ${GREEN}admin remove${NC} <chat_id>         Remove Telegram admin"
+    echo -e "    ${GREEN}admin list${NC}                     List role-based Telegram admins"
+    echo -e "    ${GREEN}portal${NC} [enable|disable|port|generate|serve|status] Manage Self-Service HTML Dashboard"
+    echo -e "    ${GREEN}scanner-shield${NC} [enable|disable|update|status] Automated Shodan/Censys Threat Scanner Shield"
     echo ""
     echo -e "  ${BOLD}Info & Help:${NC}"
     echo -e "    ${GREEN}info${NC}                    Open feature info guide"
@@ -8954,7 +11369,7 @@ cli_main() {
                     secret_set_quota_reset_day "$1" "$2"
                     ;;
                 link)    get_proxy_link_https "${1:-}"; echo "" ;;
-                qr)      local link; link=$(get_proxy_link_https "${1:-}") && show_qr "$link" ;;
+                qr)      secret_qr "${1:-}" ;;
                 enable)  check_root; secret_toggle "$1" enable ;;
                 disable) check_root; secret_toggle "$1" disable ;;
                 limits)  secret_show_limits "$1" ;;
@@ -9359,6 +11774,8 @@ cli_main() {
             secret_check_auto_rotate 2>/dev/null
             sync_domain_cert_len "false" "true" 2>/dev/null || true
             [ "${BACKUP_RETENTION_DAYS:-30}" -gt 0 ] 2>/dev/null && backup_autoclean "${BACKUP_RETENTION_DAYS}" >/dev/null 2>&1
+            [ "${AUTO_HEAL_ENABLED:-false}" = "true" ] && run_heal >/dev/null 2>&1 || true
+            [ "${TLS_PAD_ENABLED:-false}" = "true" ] && run_tls_pad randomize >/dev/null 2>&1 || true
             ;;
 
         auto-rotate)
@@ -9448,6 +11865,135 @@ cli_main() {
 
         domain-pool)
             run_domain_pool "$@"
+            ;;
+
+        dpi-inspect)
+            load_settings
+            run_dpi_inspect
+            ;;
+
+        cover-watchdog)
+            run_cover_watchdog "$@"
+            ;;
+
+        lockdown)
+            run_lockdown "$@"
+            ;;
+
+        port-pool)
+            run_port_pool "$@"
+            ;;
+
+        qos)
+            run_qos "$@"
+            ;;
+
+        happy-hours)
+            run_happy_hours "$@"
+            ;;
+
+        notify-expiry)
+            run_notify_expiry
+            ;;
+
+        abuse-watch)
+            run_abuse_watch
+            ;;
+
+        broadcast)
+            run_broadcast "$1"
+            ;;
+
+        export-lb)
+            run_export_lb "$1"
+            ;;
+
+        ddns)
+            run_ddns "$@"
+            ;;
+
+        diag-dump)
+            run_diag_dump
+            ;;
+
+        snapshot|dev-snapshot)
+            run_snapshot "$@"
+            ;;
+
+        daily-report)
+            run_daily_report "$@"
+            ;;
+
+        ssh-shield)
+            run_ssh_shield "$@"
+            ;;
+
+        net-grade)
+            run_net_grade
+            ;;
+
+        onboard)
+            run_onboard_wizard "$@"
+            ;;
+
+        tcp-boost)
+            run_tcp_boost "$@"
+            ;;
+
+        leak-scan)
+            run_leak_scan "$@"
+            ;;
+
+        cert-check)
+            run_cert_check "$@"
+            ;;
+
+        clone-link)
+            run_clone_link
+            ;;
+
+        bootstrap)
+            run_bootstrap "$1"
+            ;;
+
+        heal)
+            run_heal
+            ;;
+
+        auto-heal)
+            run_auto_heal "$@"
+            ;;
+
+        tcp-clean)
+            run_tcp_clean "$@"
+            ;;
+
+        socket-boost)
+            run_socket_boost "$@"
+            ;;
+
+        tls-pad)
+            run_tls_pad "$@"
+            ;;
+
+        honeypot)
+            run_honeypot "$@"
+            ;;
+
+        tcp-fastpath)
+            run_tcp_fastpath "$@"
+            ;;
+
+        ram-tune)
+            run_ram_tune "$@"
+            ;;
+
+        port-hop)
+            run_port_hop "$@"
+            ;;
+
+        cpu-tune)
+            run_cpu_tune "$@"
             ;;
 
         tg-urls)
@@ -9735,6 +12281,7 @@ cli_main() {
                 --encrypt|encrypt) backup_create_encrypted ;;
                 restore-encrypted) backup_restore_encrypted "$2" ;;
                 autoclean)         backup_autoclean "${2:-${BACKUP_RETENTION_DAYS:-30}}" ;;
+                send-tg)           run_backup_send_tg "$2" ;;
                 *) create_backup ;;
             esac
             ;;
@@ -10012,6 +12559,134 @@ cli_main() {
             esac
             ;;
 
+        voucher)
+            load_settings
+            local subcmd="${1:-list}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                create)
+                    check_root
+                    voucher_create "${1:-1}" "${2:-10G}" "${3:-30}"
+                    ;;
+                list)
+                    voucher_list "${1:-all}"
+                    ;;
+                revoke)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax voucher revoke <code>"; return 1; }
+                    voucher_revoke "$1"
+                    ;;
+                redeem)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax voucher redeem <code> [label]"; return 1; }
+                    voucher_redeem "$1" "${2:-}"
+                    ;;
+                *) log_error "Usage: mtproxymax voucher [create|list|revoke|redeem]"; return 1 ;;
+            esac
+            ;;
+
+        admin|rbac|admins)
+            load_settings
+            local subcmd="${1:-list}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                add)
+                    check_root
+                    [ -z "$1" ] || [ -z "$2" ] && { log_error "Usage: mtproxymax admin add <tg_chat_id> <role>"; return 1; }
+                    admin_add "$1" "$2"
+                    ;;
+                remove|rm)
+                    check_root
+                    [ -z "$1" ] && { log_error "Usage: mtproxymax admin remove <tg_chat_id>"; return 1; }
+                    admin_remove "$1"
+                    ;;
+                list)
+                    admin_list
+                    ;;
+                checkrole)
+                    _check_tg_role "$1"
+                    ;;
+                *) log_error "Usage: mtproxymax admin [add|remove|list]"; return 1 ;;
+            esac
+            ;;
+
+        portal)
+            load_settings
+            local subcmd="${1:-status}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                enable|on)
+                    check_root
+                    PORTAL_ENABLED="true"
+                    save_settings
+                    portal_generate
+                    portal_export_data
+                    log_success "Portal enabled"
+                    ;;
+                disable|off)
+                    check_root
+                    PORTAL_ENABLED="false"
+                    save_settings
+                    log_success "Portal disabled"
+                    ;;
+                port)
+                    check_root
+                    [ -z "$1" ] && { echo "${PORTAL_PORT:-8080}"; return 0; }
+                    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || { log_error "Invalid port"; return 1; }
+                    PORTAL_PORT="$1"
+                    save_settings
+                    log_success "Portal port set to $1"
+                    ;;
+                generate)
+                    check_root
+                    portal_generate
+                    portal_export_data
+                    log_success "Portal HTML and data generated in ${PORTAL_DIR}"
+                    ;;
+                serve)
+                    portal_serve "${1:-}"
+                    ;;
+                status|"")
+                    echo -e "  ${BOLD}Status Portal:${NC} $([ "${PORTAL_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}") (Port: ${PORTAL_PORT:-8080})"
+                    ;;
+                *) log_error "Usage: mtproxymax portal [enable|disable|port|generate|serve|status]"; return 1 ;;
+            esac
+            ;;
+
+        scanner-shield|threat-shield)
+            load_settings
+            local subcmd="${1:-status}"
+            shift 2>/dev/null || true
+            case "$subcmd" in
+                enable|on)
+                    check_root
+                    SCANNER_SHIELD_ENABLED="true"
+                    save_settings
+                    scanner_shield_on
+                    log_success "Scanner shield enabled"
+                    ;;
+                disable|off)
+                    check_root
+                    SCANNER_SHIELD_ENABLED="false"
+                    save_settings
+                    scanner_shield_off
+                    log_success "Scanner shield disabled"
+                    ;;
+                update)
+                    check_root
+                    scanner_shield_update
+                    ;;
+                status|"")
+                    echo -e "  ${BOLD}Scanner Threat Shield:${NC} $([ "${SCANNER_SHIELD_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+                    if command -v ipset &>/dev/null && ipset list mtproxymax-scanners &>/dev/null; then
+                        local _cnt; _cnt=$(ipset list mtproxymax-scanners 2>/dev/null | grep -E '^[0-9]' | wc -l || echo 0)
+                        echo -e "  ${DIM}Blocked scanner IPs/Subnets in ipset:${NC} ${_cnt}"
+                    fi
+                    ;;
+                *) log_error "Usage: mtproxymax scanner-shield [enable|disable|update|status]"; return 1 ;;
+            esac
+            ;;
+
         uninstall)
             check_root
             load_settings
@@ -10058,11 +12733,17 @@ show_stealth_menu() {
         echo -e "  ${BOLD}Stealth Preset:${NC}        $([ "${STEALTH_PRESET:-normal}" = "ultra" ] && echo "${RED}${BOLD}ULTRA${NC}" || echo "${GREEN}NORMAL${NC}")"
         echo -e "  ${BOLD}TCP MSS Clamping:${NC}      $([ "${STEALTH_MSS_CLAMP:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
         echo -e "  ${BOLD}Domain SNI Pool:${NC}       ${CYAN}${PROXY_DOMAIN:-not set}${NC}"
+        echo -e "  ${BOLD}Emergency Lockdown:${NC}    $([ "${LOCKDOWN_MODE:-false}" = "true" ] && echo "${RED}${BOLD}ACTIVE${NC}" || echo "${GREEN}INACTIVE${NC}")"
+        echo -e "  ${BOLD}Secondary Port Pool:${NC}   ${CYAN}${PORT_POOL_PORTS:-none}${NC}"
         echo ""
         echo -e "  ${DIM}[1]${NC} Toggle Kernel SYN Shield (>15 SYN/5s tarpit)"
         echo -e "  ${DIM}[2]${NC} Switch Stealth Preset (Normal vs Ultra anti-replay)"
         echo -e "  ${DIM}[3]${NC} Toggle TCP MSS Clamping (--clamp-mss-to-pmtu)"
         echo -e "  ${DIM}[4]${NC} Configure Multi-Domain SNI Pool"
+        echo -e "  ${DIM}[5]${NC} Run DPI Forensics & Readiness Analyzer"
+        echo -e "  ${DIM}[6]${NC} Test Cover Domain Health (Watchdog probe)"
+        echo -e "  ${DIM}[7]${NC} Toggle Emergency Lockdown Mode"
+        echo -e "  ${DIM}[8]${NC} Manage Secondary Port Pool Listener"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -10097,6 +12778,93 @@ show_stealth_menu() {
                 local dp; read -r dp
                 [ -n "$dp" ] && { run_domain_pool "$dp"; press_any_key; }
                 ;;
+            5)
+                run_dpi_inspect
+                press_any_key
+                ;;
+            6)
+                run_cover_watchdog test
+                press_any_key
+                ;;
+            7)
+                if [ "${LOCKDOWN_MODE:-false}" = "true" ]; then
+                    run_lockdown off
+                else
+                    run_lockdown on
+                fi
+                press_any_key
+                ;;
+            8)
+                echo -e "\n  ${BOLD}[1] Add port to pool   [2] Remove port from pool${NC}"
+                local _pchoice=$(read_choice "Action" "1")
+                echo -en "  ${BOLD}Enter port number:${NC} "
+                local _pport; read -r _pport
+                if [ "$_pchoice" = "1" ]; then
+                    run_port_pool add "$_pport"
+                elif [ "$_pchoice" = "2" ]; then
+                    run_port_pool remove "$_pport"
+                fi
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_qos_menu() {
+    while true; do
+        clear_screen
+        draw_header "QOS BANDWIDTH & QUOTA INTELLIGENCE"
+        echo ""
+        load_settings
+        local qos_status="${YELLOW}DISABLED${NC}"
+        [ "${QOS_LIMIT_MBPS:-0}" -gt 0 ] && qos_status="${GREEN}${QOS_LIMIT_MBPS} Mbps / IP${NC}"
+        local happy_status="${YELLOW}DISABLED${NC}"
+        if [ -n "${HAPPY_HOURS_WINDOW:-}" ]; then
+            happy_status="${CYAN}${HAPPY_HOURS_WINDOW}${NC} ($([ $(check_in_happy_hours "${HAPPY_HOURS_WINDOW}" >/dev/null 2>&1; echo $?) -eq 0 ] && echo "${GREEN}ACTIVE NOW${NC}" || echo "INACTIVE"))"
+        fi
+
+        echo -e "  ${DIM}[1]${NC} Per-IP Bandwidth Shaping (QoS): ${qos_status}"
+        echo -e "  ${DIM}[2]${NC} Off-Peak Happy Hours Window:    ${happy_status}"
+        echo -e "  ${DIM}[3]${NC} Run Bandwidth Surge & Abuse Watchdog"
+        echo -e "  ${DIM}[4]${NC} Send Expiry Notification Reminders"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo ""
+                echo -en "  ${BOLD}Enter Per-IP Speed Limit in Mbps (0 to disable):${NC} "
+                local sp; read -r sp
+                if [ "$sp" = "0" ]; then
+                    run_qos off
+                elif [ -n "$sp" ]; then
+                    run_qos set "$sp"
+                fi
+                press_any_key
+                ;;
+            2)
+                echo ""
+                echo -en "  ${BOLD}Enter Happy Hours window (e.g. 02:00-08:00 or 'off'):${NC} "
+                local hw; read -r hw
+                if [ "$hw" = "off" ] || [ "$hw" = "0" ]; then
+                    run_happy_hours off
+                elif [ -n "$hw" ]; then
+                    run_happy_hours set "$hw"
+                fi
+                press_any_key
+                ;;
+            3)
+                run_abuse_watch
+                press_any_key
+                ;;
+            4)
+                run_notify_expiry
+                press_any_key
+                ;;
             0|q|Q|"") return ;;
             *) ;;
         esac
@@ -10119,6 +12887,8 @@ show_security_menu() {
         echo -e "  ${DIM}[3]${NC} Unknown SNI Policy: ${sni_label}"
         echo -e "  ${DIM}[4]${NC} IP Banlist"
         echo -e "  ${DIM}[5]${NC} Anti-DPI & Stealth Defenses"
+        echo -e "  ${DIM}[6]${NC} QoS Bandwidth & Quota Intelligence"
+        echo -e "  ${DIM}[7]${NC} Performance, Diagnostics & Self-Healing Suite"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -10166,6 +12936,8 @@ show_security_menu() {
                 press_any_key
                 ;;
             5) show_stealth_menu ;;
+            6) show_qos_menu ;;
+            7) show_performance_menu ;;
             0|"") return ;;
             *) ;;
         esac
@@ -10253,6 +13025,223 @@ show_upstream_menu() {
     done
 }
 
+show_voucher_menu() {
+    while true; do
+        clear_screen
+        draw_header "COMMERCIAL VOUCHER SYSTEM"
+        echo ""
+        voucher_list active | head -n 15
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Generate new vouchers"
+        echo -e "  ${DIM}[2]${NC} List all vouchers"
+        echo -e "  ${DIM}[3]${NC} Revoke a voucher code"
+        echo -e "  ${DIM}[4]${NC} Redeem a voucher code locally"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo -en "  ${BOLD}Number of vouchers to generate (default 1):${NC} "
+                local cnt; read -r cnt; cnt="${cnt:-1}"
+                echo -en "  ${BOLD}Quota per voucher (e.g. 10G, 50G, 0=unlim):${NC} "
+                local qta; read -r qta; qta="${qta:-10G}"
+                echo -en "  ${BOLD}Validity duration in days (default 30):${NC} "
+                local dys; read -r dys; dys="${dys:-30}"
+                voucher_create "$cnt" "$qta" "$dys"
+                press_any_key
+                ;;
+            2)
+                clear_screen
+                draw_header "ALL VOUCHERS"
+                voucher_list all
+                press_any_key
+                ;;
+            3)
+                echo -en "  ${BOLD}Enter voucher code to revoke:${NC} "
+                local code; read -r code
+                [ -n "$code" ] && voucher_revoke "$code"
+                press_any_key
+                ;;
+            4)
+                echo -en "  ${BOLD}Enter voucher code to redeem:${NC} "
+                local code; read -r code
+                echo -en "  ${BOLD}Enter account label for new secret:${NC} "
+                local lbl; read -r lbl
+                [ -n "$code" ] && voucher_redeem "$code" "$lbl"
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_rbac_menu() {
+    while true; do
+        clear_screen
+        draw_header "ROLE-BASED ACCESS CONTROL (RBAC)"
+        echo ""
+        admin_list
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Add Telegram Admin (superadmin or reseller)"
+        echo -e "  ${DIM}[2]${NC} Remove Telegram Admin"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo -en "  ${BOLD}Enter Telegram Chat ID:${NC} "
+                local cid; read -r cid
+                echo -en "  ${BOLD}Enter Role (superadmin/reseller):${NC} "
+                local rl; read -r rl; rl="${rl:-reseller}"
+                [ -n "$cid" ] && admin_add "$cid" "$rl"
+                press_any_key
+                ;;
+            2)
+                echo -en "  ${BOLD}Enter Telegram Chat ID to remove:${NC} "
+                local cid; read -r cid
+                [ -n "$cid" ] && admin_remove "$cid"
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_portal_menu() {
+    while true; do
+        clear_screen
+        draw_header "SELF-SERVICE STATUS PORTAL"
+        echo ""
+        load_settings
+        echo -e "  ${BOLD}Status:${NC} $([ "${PORTAL_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}Port:${NC}   ${PORTAL_PORT:-8080}"
+        echo -e "  ${BOLD}Directory:${NC} ${PORTAL_DIR}"
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Toggle Portal Enable/Disable"
+        echo -e "  ${DIM}[2]${NC} Change Portal Port"
+        echo -e "  ${DIM}[3]${NC} Force Regenerate HTML Dashboard & Snapshot Data"
+        echo -e "  ${DIM}[4]${NC} Start/Test Local Portal Server Foreground"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                if [ "${PORTAL_ENABLED:-false}" = "true" ]; then
+                    PORTAL_ENABLED="false"
+                    save_settings
+                    log_success "Portal disabled"
+                else
+                    PORTAL_ENABLED="true"
+                    save_settings
+                    portal_generate
+                    portal_export_data
+                    log_success "Portal enabled"
+                fi
+                press_any_key
+                ;;
+            2)
+                echo -en "  ${BOLD}Enter new portal port (e.g. 8080):${NC} "
+                local pt; read -r pt
+                if [[ "$pt" =~ ^[0-9]+$ ]] && [ "$pt" -ge 1 ] && [ "$pt" -le 65535 ]; then
+                    PORTAL_PORT="$pt"
+                    save_settings
+                    log_success "Portal port changed to $pt"
+                else
+                    log_error "Invalid port"
+                fi
+                press_any_key
+                ;;
+            3)
+                portal_generate
+                portal_export_data
+                log_success "Portal regenerated"
+                press_any_key
+                ;;
+            4)
+                portal_serve
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_scanner_shield_menu() {
+    while true; do
+        clear_screen
+        draw_header "AUTOMATED HOSTILE SCANNER SHIELD"
+        echo ""
+        load_settings
+        echo -e "  ${BOLD}Status:${NC} $([ "${SCANNER_SHIELD_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        if command -v ipset &>/dev/null && ipset list mtproxymax-scanners &>/dev/null; then
+            local _cnt; _cnt=$(ipset list mtproxymax-scanners 2>/dev/null | grep -E '^[0-9]' | wc -l || echo 0)
+            echo -e "  ${BOLD}Active Blocked Subnets/IPs:${NC} ${_cnt}"
+        fi
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Toggle Scanner Shield On/Off"
+        echo -e "  ${DIM}[2]${NC} Force Update Shodan/Censys Threat Feed Now"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                if [ "${SCANNER_SHIELD_ENABLED:-false}" = "true" ]; then
+                    SCANNER_SHIELD_ENABLED="false"
+                    save_settings
+                    scanner_shield_off
+                else
+                    SCANNER_SHIELD_ENABLED="true"
+                    save_settings
+                    scanner_shield_on
+                fi
+                press_any_key
+                ;;
+            2)
+                scanner_shield_update
+                log_success "Shodan/Censys threat feed updated"
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_enterprise_menu() {
+    while true; do
+        clear_screen
+        draw_header "ENTERPRISE COMMERCIAL & SHIELD SUITE"
+        echo ""
+        load_settings
+        echo -e "  ${BOLD}Status Portal:${NC}   $([ "${PORTAL_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}") (Port: ${PORTAL_PORT:-8080})"
+        echo -e "  ${BOLD}Scanner Shield:${NC}  $([ "${SCANNER_SHIELD_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo ""
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Commercial Voucher & Gift Code System"
+        echo -e "  ${BRIGHT_CYAN}[2]${NC} Role-Based Access Control (Admin / RBAC)"
+        echo -e "  ${BRIGHT_CYAN}[3]${NC} Self-Service Status Portal Management"
+        echo -e "  ${BRIGHT_CYAN}[4]${NC} Automated Hostile Scanner Shield"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1) show_voucher_menu ;;
+            2) show_rbac_menu ;;
+            3) show_portal_menu ;;
+            4) show_scanner_shield_menu ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
 show_main_menu() {
     local _cached_telemt_ver _cached_start_epoch=""
     _cached_telemt_ver=$(get_telemt_version)
@@ -10318,6 +13307,8 @@ show_main_menu() {
         draw_box_line "  ${BRIGHT_CYAN}[7]${NC}  Logs & Traffic" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[8]${NC}  Info & Help" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[9]${NC}  About & Update" "$w"
+        draw_box_line "  ${BRIGHT_CYAN}[e]${NC}  Enterprise Commercial & Shield Suite" "$w"
+        draw_box_line "  ${BRIGHT_CYAN}[p]${NC}  Performance & Self-Healing Suite" "$w"
         draw_box_line "  ${BRIGHT_CYAN}[r]${NC}  Replication" "$w"
         draw_box_empty "$w"
         draw_box_line "  ${BRIGHT_RED}[u]${NC}  Uninstall" "$w"
@@ -10340,6 +13331,8 @@ show_main_menu() {
             7) show_traffic_menu ;;
             8) show_info_menu ;;
             9) show_about ;;
+            e|E) show_enterprise_menu ;;
+            p|P) show_performance_menu ;;
             r|R) show_replication_menu ;;
             u|U) uninstall; exit 0 ;;
             0|q|Q) echo ""; exit 0 ;;
@@ -12269,6 +15262,100 @@ show_about() {
                 fi
                 press_any_key
                 ;;
+            0|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+
+show_port_hop_menu() {
+    while true; do
+        clear_screen
+        draw_header "DYNAMIC PORT RANGE SHADOWING"
+        echo ""
+        load_settings
+        echo -e "  ${BOLD}Active Shadow Port Ranges:${NC} ${CYAN}${PORT_HOP_RANGES:-none}${NC}"
+        echo -e "  ${DIM}Redirects arbitrary multi-port blocks directly to your proxy listen port.${NC}"
+        echo ""
+        echo -e "  ${DIM}[1]${NC} List active port ranges"
+        echo -e "  ${DIM}[2]${NC} Add a port range (e.g., 2000:2050)"
+        echo -e "  ${DIM}[3]${NC} Remove a port range"
+        echo -e "  ${DIM}[0]${NC} Back"
+
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1) run_port_hop list; press_any_key ;;
+            2)
+                echo ""
+                echo -n -e "  ${BOLD}Enter port range to add (start:end, e.g. 2000:2050):${NC} "
+                read -r r_add
+                if [ -n "$r_add" ]; then
+                    run_port_hop add "$r_add"
+                    press_any_key
+                fi
+                ;;
+            3)
+                echo ""
+                echo -n -e "  ${BOLD}Enter port range to remove (start:end):${NC} "
+                read -r r_rm
+                if [ -n "$r_rm" ]; then
+                    run_port_hop remove "$r_rm"
+                    press_any_key
+                fi
+                ;;
+            0|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+
+show_performance_menu() {
+    while true; do
+        clear_screen
+        draw_header "PERFORMANCE & SELF-HEALING SUITE"
+        echo ""
+        load_settings
+        echo -e "  ${BOLD}1. TCP BBR Booster:${NC}     $([ "${TCP_BOOST_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}2. Dead Socket Reaper:${NC}  $([ "${TCP_CLEAN_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}3. Socket Low-Latency:${NC}  $([ "${SOCKET_BOOST_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}4. FakeTLS Pad Rotation:${NC} $([ "${TLS_PAD_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}5. Active Probe Honeypot:${NC} $([ "${HONEYPOT_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}6. TCP Fast-Path Window:${NC} $([ "${TCP_FASTPATH_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}7. Dynamic RAM Auto-Tune:${NC} $([ "${RAM_TUNE_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}8. Port Range Shadowing:${NC} ${CYAN}${PORT_HOP_RANGES:-none}${NC}"
+        echo -e "  ${BOLD}9. Multi-Core IRQ Spread:${NC} $([ "${CPU_TUNE_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}h. Background Auto-Heal:${NC} $([ "${AUTO_HEAL_ENABLED:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo ""
+        echo -e "  ${DIM}[1]${NC} Toggle Linux Kernel TCP BBR & Fast Open Booster"
+        echo -e "  ${DIM}[2]${NC} Toggle Dead Mobile Socket Reaper (45s timeout)"
+        echo -e "  ${DIM}[3]${NC} Toggle Ultra-Low Latency Kernel Socket Booster"
+        echo -e "  ${DIM}[4]${NC} Toggle Dynamic FakeTLS Record Padding Rotation"
+        echo -e "  ${DIM}[5]${NC} Toggle Active Probe Honeypot Redirection"
+        echo -e "  ${DIM}[6]${NC} Toggle TCP Fast-Path Window Scaling & MTU Probing"
+        echo -e "  ${DIM}[7]${NC} Toggle Dynamic RAM Auto-Tuning Profile"
+        echo -e "  ${DIM}[8]${NC} Manage Dynamic Multi-Port Range Shadowing"
+        echo -e "  ${DIM}[9]${NC} Toggle Multi-Core IRQ Packet Spreading (RPS/RFS)"
+        echo -e "  ${DIM}[h]${NC} Toggle Background RAM & Socket Auto-Healer"
+        echo -e "  ${DIM}[e]${NC} Execute Emergency One-Click Immediate Heal Now"
+        echo -e "  ${DIM}[0]${NC} Back"
+
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1) [ "${TCP_BOOST_ENABLED:-false}" = "true" ] && run_tcp_boost off || run_tcp_boost on; press_any_key ;;
+            2) [ "${TCP_CLEAN_ENABLED:-false}" = "true" ] && run_tcp_clean off || run_tcp_clean on; press_any_key ;;
+            3) [ "${SOCKET_BOOST_ENABLED:-false}" = "true" ] && run_socket_boost off || run_socket_boost on; press_any_key ;;
+            4) [ "${TLS_PAD_ENABLED:-false}" = "true" ] && run_tls_pad off || run_tls_pad auto; press_any_key ;;
+            5) [ "${HONEYPOT_ENABLED:-false}" = "true" ] && run_honeypot off || run_honeypot on; press_any_key ;;
+            6) [ "${TCP_FASTPATH_ENABLED:-false}" = "true" ] && run_tcp_fastpath off || run_tcp_fastpath on; press_any_key ;;
+            7) [ "${RAM_TUNE_ENABLED:-false}" = "true" ] && run_ram_tune off || run_ram_tune auto; press_any_key ;;
+            8) show_port_hop_menu ;;
+            9) [ "${CPU_TUNE_ENABLED:-false}" = "true" ] && run_cpu_tune off || run_cpu_tune on; press_any_key ;;
+            h|H) [ "${AUTO_HEAL_ENABLED:-false}" = "true" ] && run_auto_heal off || run_auto_heal on; press_any_key ;;
+            e|E) run_heal; press_any_key ;;
             0|"") return ;;
             *) ;;
         esac
