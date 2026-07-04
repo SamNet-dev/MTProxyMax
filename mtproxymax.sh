@@ -6418,6 +6418,60 @@ SYSCTL
 }
 
 # ── Dynamic RAM Auto-Tuning ──
+detect_system_ram_mb() {
+    local host_mb=0
+    host_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    if [ -z "$host_mb" ] || [ "$host_mb" -le 0 ] 2>/dev/null; then
+        if [ -f /proc/meminfo ]; then
+            local total_kb
+            total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+            host_mb=$(( total_kb / 1024 ))
+        fi
+    fi
+    [ -z "$host_mb" ] || [ "$host_mb" -le 0 ] 2>/dev/null && host_mb=0
+
+    local cg_mb=0
+    if [ -f /sys/fs/cgroup/memory.max ]; then
+        local cg_max
+        cg_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "max")
+        if [[ "$cg_max" =~ ^[0-9]+$ ]] && [ "$cg_max" -gt 0 ] 2>/dev/null; then
+            cg_mb=$(( cg_max / 1048576 ))
+        fi
+    elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+        local cg_lim
+        cg_lim=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
+        if [[ "$cg_lim" =~ ^[0-9]+$ ]] && [ "$cg_lim" -gt 0 ] && [ "$cg_lim" -lt 100000000000000 ] 2>/dev/null; then
+            cg_mb=$(( cg_lim / 1048576 ))
+        fi
+    elif [ -f /sys/fs/cgroup/memory.limit_in_bytes ]; then
+        local cg_lim
+        cg_lim=$(cat /sys/fs/cgroup/memory.limit_in_bytes 2>/dev/null || echo 0)
+        if [[ "$cg_lim" =~ ^[0-9]+$ ]] && [ "$cg_lim" -gt 0 ] && [ "$cg_lim" -lt 100000000000000 ] 2>/dev/null; then
+            cg_mb=$(( cg_lim / 1048576 ))
+        fi
+    elif [ -f /proc/user_beancounters ]; then
+        local bc_pages
+        bc_pages=$(awk '/physpages/ {print $4}' /proc/user_beancounters 2>/dev/null || echo 0)
+        if [[ "$bc_pages" =~ ^[0-9]+$ ]] && [ "$bc_pages" -gt 0 ] && [ "$bc_pages" -lt 2147483647 ] 2>/dev/null; then
+            cg_mb=$(( bc_pages / 256 ))
+        fi
+    fi
+
+    if [ "$cg_mb" -gt 0 ] && [ "$host_mb" -gt 0 ]; then
+        if [ "$cg_mb" -lt "$host_mb" ]; then
+            echo "$cg_mb"
+        else
+            echo "$host_mb"
+        fi
+    elif [ "$cg_mb" -gt 0 ]; then
+        echo "$cg_mb"
+    elif [ "$host_mb" -gt 0 ]; then
+        echo "$host_mb"
+    else
+        echo 0
+    fi
+}
+
 run_ram_tune() {
     load_settings
     local action="${1:-status}"
@@ -6425,14 +6479,7 @@ run_ram_tune() {
         on|auto|enable)
             check_root
             local total_mb
-            total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-            if [ -z "$total_mb" ] || [ "$total_mb" -le 0 ] 2>/dev/null; then
-                if [ -f /proc/meminfo ]; then
-                    local total_kb
-                    total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-                    total_mb=$(( total_kb / 1024 ))
-                fi
-            fi
+            total_mb=$(detect_system_ram_mb)
             if [ -z "$total_mb" ] || [ "$total_mb" -le 0 ] 2>/dev/null; then
                 log_error "Could not detect system RAM. Aborting."
                 return 1
@@ -6494,7 +6541,7 @@ SYSCTL
         status|"")
             echo -e "\n  🧠 ${BOLD}Dynamic RAM Auto-Tuning:${NC}"
             local total_mb rmem wmem minfree
-            total_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo "unknown")
+            total_mb=$(detect_system_ram_mb || echo "unknown")
             rmem=$(sysctl -n net.core.rmem_max 2>/dev/null || echo "unknown")
             wmem=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "unknown")
             minfree=$(sysctl -n vm.min_free_kbytes 2>/dev/null || echo "unknown")
