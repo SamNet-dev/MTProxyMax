@@ -102,7 +102,7 @@ mtproxymax status    # Check proxy health
 Your proxy traffic looks identical to normal HTTPS traffic. The **Fake TLS V2** engine mirrors real TLS 1.3 sessions — per-domain profiles, real cipher suites, dynamic certificate lengths, and realistic record fragmentation.
 
 - **Multi-Domain SNI Pool (`tls_domains`):** Rotate between multiple high-reputation cover domains (e.g., `cloudflare.com,www.microsoft.com,www.google.com`) within the same proxy engine instance to evade single-domain DPI throttling and SNI blacklisting (`mtproxymax domain-pool <domains>`).
-- **Kernel SYN Shield:** Built-in iptables/nftables rate limiter (`conntrack` + `recent` module) that tarpits aggressive DPI active scanners (>15 SYN packets in 5 seconds per IP) before they reach the application layer (`mtproxymax shield on`).
+- **Kernel SYN Shield:** Built-in iptables/nftables rate limiter (`conntrack` + `recent` module) that tarpits aggressive DPI active scanners (>15 SYN packets in 5 seconds per IP) before they reach the application layer (`mtproxymax syn-shield on`).
 - **Anti-DPI Packet Padding Shield (`mtproxymax shield on`):** Randomizes TCP MSS clamping (`1360`) and scrubs FakeTLS packet size distributions to defeat GFW, TSPU, and TIC heuristic analysis.
 - **Reverse-Proxy Cover Shield (`mtproxymax cover-shield on`):** Active scanner trapdoor that seamlessly forwards non-MTProto HTTP GETs and invalid TLS handshakes directly to a fallback website (e.g., `https://cloudflare.com`) instead of closing or resetting the TCP socket.
 - **Stealth Presets (`normal` vs `ultra`):** Hot-swappable anti-replay hardening (`mtproxymax stealth ultra`). `ultra` tightens the replay window to 180 seconds, expands the nonce cache to 131,072 entries, and drops unknown SNI probes immediately.
@@ -1155,7 +1155,8 @@ mtproxymax sni-policy [mask|drop]       # Unknown SNI action (mask=permissive, d
 
 **Anti-DPI & Posture Hardening:**
 ```bash
-mtproxymax shield [on|off|status]       # Toggle Anti-DPI Packet Padding & SYN Shield
+mtproxymax syn-shield [on|off|status]   # Toggle Kernel SYN Shield (>15 SYN/5s tarpit)
+mtproxymax shield [on|off|status]       # Toggle Anti-DPI Packet Padding Shield
 mtproxymax cover-shield [on|off|target] # Toggle Reverse-Proxy Cover Shield (Active Probe Defense)
 mtproxymax bbr [on|off|status]          # Toggle TCP BBRv3 Congestion Control & ECN tuning
 mtproxymax stealth [ultra|normal|status] # Hot-swap engine replay window and cache size

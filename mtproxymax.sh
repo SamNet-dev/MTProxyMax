@@ -12200,7 +12200,7 @@ show_cli_help() {
     echo -e "    ${GREEN}ip${NC} [get|auto|<address>]   Show, reset, or set custom IP/domain for links"
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}domain-pool${NC} [get|<pool>] Configure multi-domain SNI pool (comma-separated)"
-    echo -e "    ${GREEN}shield${NC} [on|off|status]    Kernel SYN Shield rate limiter (>15 SYN/5s tarpit)"
+    echo -e "    ${GREEN}syn-shield${NC} [on|off|status] Kernel SYN Shield rate limiter (>15 SYN/5s tarpit)"
     echo -e "    ${GREEN}stealth${NC} [ultra|normal|status]  Switch stealth defense preset (anti-replay tuning)"
     echo -e "    ${GREEN}clamp-mss${NC} [on|off|status] Toggle TCP MSS Clamping (--clamp-mss-to-pmtu)"
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
@@ -12243,7 +12243,7 @@ show_cli_help() {
     echo -e "    ${GREEN}health${NC}                  Run health diagnostics"
     echo ""
     echo -e "  ${BOLD}Anti-DPI & Stealth Defenses:${NC}"
-    echo -e "    ${GREEN}shield${NC} [on|off|status]      Toggle Kernel SYN Shield"
+    echo -e "    ${GREEN}syn-shield${NC} [on|off|status]  Toggle Kernel SYN Shield (>15 SYN/5s tarpit)"
     echo -e "    ${GREEN}stealth${NC} [ultra|normal|status] Switch Stealth Preset"
     echo -e "    ${GREEN}clamp-mss${NC} [on|off|status]   Toggle TCP MSS Clamping"
     echo -e "    ${GREEN}domain-pool${NC} <d1,d2>       Set Multi-Domain SNI Pool"
@@ -13274,7 +13274,7 @@ cli_main() {
             run_ping_dc
             ;;
 
-        shield)
+        syn-shield|kernel-shield)
             run_shield "$@"
             ;;
 
@@ -13495,7 +13495,7 @@ cli_main() {
             run_bbr "$@"
             ;;
 
-        shield|anti-dpi)
+        shield|anti-dpi|dpi-shield)
             run_anti_dpi_shield "$@"
             ;;
 
