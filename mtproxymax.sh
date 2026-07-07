@@ -511,6 +511,13 @@ get_public_ip() {
     fi
 }
 
+get_export_dir() {
+    local edir="${INSTALL_DIR:-/opt/mtproxymax}/exports"
+    mkdir -p "$edir" 2>/dev/null || true
+    chmod 700 "$edir" 2>/dev/null || true
+    echo "$edir"
+}
+
 # Validate port number
 validate_port() {
     local port="$1"
@@ -3232,7 +3239,7 @@ secret_generate_links() {
     [ -z "$server_ip" ] && { log_error "Cannot detect server IP"; return 1; }
 
     if [ "$fmt" = "html" ]; then
-        [ -z "$outfile" ] && outfile="/tmp/mtproxymax-links-$(date +%Y%m%d).html"
+        [ -z "$outfile" ] && outfile="$(get_export_dir)/mtproxymax-links-$(date +%Y%m%d).html"
         {
             echo "<html><head><meta charset='utf-8'><title>MTProxyMax Links</title>"
             echo "<style>body{font-family:monospace;background:#1a1a2e;color:#e0e0e0;padding:20px}a{color:#4fc3f7}.user{margin:20px 0;padding:15px;border:1px solid #333;border-radius:8px}img{margin:10px 0}</style></head><body>"
@@ -3249,7 +3256,7 @@ secret_generate_links() {
             echo "</body></html>"
         } > "$outfile"
     else
-        [ -z "$outfile" ] && outfile="/tmp/mtproxymax-links-$(date +%Y%m%d).txt"
+        [ -z "$outfile" ] && outfile="$(get_export_dir)/mtproxymax-links-$(date +%Y%m%d).txt"
         {
             echo "# MTProxyMax Proxy Links — $(date -u '+%Y-%m-%d %H:%M UTC')"
             echo ""
@@ -3264,6 +3271,7 @@ secret_generate_links() {
             done
         } > "$outfile"
     fi
+    chmod 600 "$outfile" 2>/dev/null || true
     log_success "Links exported to ${outfile}"
 }
 
@@ -3883,7 +3891,7 @@ secret_logs() {
 MIGRATION_FILES=("$SETTINGS_FILE" "$SECRETS_FILE" "$UPSTREAMS_FILE" "$INSTANCES_FILE" "$_TAGS_FILE" "${INSTALL_DIR}/secrets_archive.conf" "$BANLIST_FILE")
 
 migrate_export() {
-    local out="${1:-/tmp/mtproxymax-migrate-$(date +%Y%m%d-%H%M%S).tar.gz}"
+    local out="${1:-$(get_export_dir)/mtproxymax-migrate-$(date +%Y%m%d-%H%M%S).tar.gz}"
     local tmp; tmp=$(mktemp -d) || { log_error "Cannot create temp dir"; return 1; }
     _TEMP_FILES+=("$tmp")
     local count=0
@@ -5643,6 +5651,7 @@ run_diag_dump() {
     load_settings
     echo -e "\n  ── 🏥 ${BOLD}System Diagnostic Forensics Dump${NC} ──\n"
     local dump_dir; dump_dir=$(mktemp -d "/tmp/mtproxymax_diag_XXXXXX") || return 1
+    chmod 700 "$dump_dir" 2>/dev/null || true
     _TEMP_FILES+=("$dump_dir")
     
     log_info "Collecting system metrics and container state..."
@@ -5663,8 +5672,9 @@ run_diag_dump() {
         sed 's/TELEGRAM_BOT_TOKEN=.*/TELEGRAM_BOT_TOKEN="[REDACTED]"/' "$SETTINGS_FILE" > "${dump_dir}/settings.conf" 2>/dev/null || true
     fi
     
-    local tar_path="/tmp/mtproxymax_diag_$(date +%Y%m%d_%H%M%S).tar.gz"
+    local tar_path="$(get_export_dir)/mtproxymax_diag_$(date +%Y%m%d_%H%M%S).tar.gz"
     tar -czf "$tar_path" -C /tmp "$(basename "$dump_dir")" 2>/dev/null && rm -rf "$dump_dir"
+    chmod 600 "$tar_path" 2>/dev/null || true
     log_success "Diagnostic archive created at: ${CYAN}${tar_path}${NC}"
 }
 
@@ -5874,7 +5884,7 @@ run_export_report() {
     load_secrets
     
     local date_str; date_str=$(date +%Y%m%d_%H%M%S)
-    [ -z "$outfile" ] && outfile="/tmp/mtproxymax_report_${date_str}.${format}"
+    [ -z "$outfile" ] && outfile="$(get_export_dir)/mtproxymax_report_${date_str}.${format}"
     mkdir -p "$(dirname "$outfile")" 2>/dev/null || true
     
     local count=${#SECRETS_LABELS[@]}
@@ -5891,6 +5901,7 @@ run_export_report() {
                 fi
                 echo "${label},${SECRETS_KEYS[$i]},${st},${SECRETS_CREATED[$i]},${SECRETS_MAX_CONNS[$i]:-0},${SECRETS_QUOTA[$i]:-0},${bytes_used},\"${SECRETS_NOTES[$i]:-}\"" >> "$outfile"
             done
+            chmod 600 "$outfile" 2>/dev/null || true
             log_success "CSV Executive Report exported to: ${CYAN}${outfile}${NC}"
             ;;
         html|*)
@@ -5930,13 +5941,14 @@ EOF
                 echo "<tr><td><strong>${label}</strong></td><td>${st}</td><td>${quota}</td><td>${used_fmt}</td><td>${SECRETS_NOTES[$i]:-}</td></tr>" >> "$outfile"
             done
             echo "</table></body></html>" >> "$outfile"
+            chmod 600 "$outfile" 2>/dev/null || true
             log_success "HTML Executive Dashboard exported to: ${CYAN}${outfile}${NC}"
             ;;
     esac
 }
 
 run_qr_sheet() {
-    local outfile="${1:-/tmp/mtproxymax_vouchers.html}"
+    local outfile="${1:-$(get_export_dir)/mtproxymax_vouchers.html}"
     mkdir -p "$(dirname "$outfile")" 2>/dev/null || true
     load_settings
     load_secrets
@@ -5986,6 +5998,7 @@ EOF
     done
 
     echo "</div></body></html>" >> "$outfile"
+    chmod 600 "$outfile" 2>/dev/null || true
     log_success "Printable QR Voucher Sheet created at: ${CYAN}${outfile}${NC}"
     log_info "Open this file in any web browser and press Ctrl+P to print voucher cards!"
 }
@@ -12879,6 +12892,9 @@ cli_main() {
             secret_check_auto_rotate 2>/dev/null
             sync_domain_cert_len "false" "true" 2>/dev/null || true
             [ "${BACKUP_RETENTION_DAYS:-30}" -gt 0 ] 2>/dev/null && backup_autoclean "${BACKUP_RETENTION_DAYS}" >/dev/null 2>&1
+            if [ -f "$CONNECTION_LOG" ] && [ "$(wc -c < "$CONNECTION_LOG" 2>/dev/null || echo 0)" -gt 52428800 ]; then
+                tail -n 50000 "$CONNECTION_LOG" > "${CONNECTION_LOG}.tmp" 2>/dev/null && mv "${CONNECTION_LOG}.tmp" "$CONNECTION_LOG" 2>/dev/null || true
+            fi
             [ "${AUTO_HEAL_ENABLED:-false}" = "true" ] && run_heal >/dev/null 2>&1 || true
             [ "${TLS_PAD_ENABLED:-false}" = "true" ] && run_tls_pad randomize >/dev/null 2>&1 || true
             if [ -f "${INSTALL_DIR}/failover.conf" ]; then
@@ -14848,8 +14864,9 @@ show_secrets_menu() {
                 local io_choice; io_choice=$(read_choice "Choice" "0")
                 case "$io_choice" in
                     1)
-                        local exp_file="/tmp/mtproxymax-secrets-$(date +%Y%m%d).csv"
+                        local exp_file="$(get_export_dir)/mtproxymax-secrets-$(date +%Y%m%d).csv"
                         secret_export > "$exp_file"
+                        chmod 600 "$exp_file" 2>/dev/null || true
                         log_success "Exported CSV to ${exp_file}"
                         ;;
                     2)
@@ -14858,8 +14875,9 @@ show_secrets_menu() {
                         [ -n "$imp_file" ] && { secret_import "$imp_file" || true; }
                         ;;
                     3)
-                        local exp_file="/tmp/mtproxymax-secrets-$(date +%Y%m%d).json"
+                        local exp_file="$(get_export_dir)/mtproxymax-secrets-$(date +%Y%m%d).json"
                         secret_export_json > "$exp_file"
+                        chmod 600 "$exp_file" 2>/dev/null || true
                         log_success "Exported JSON to ${exp_file}"
                         ;;
                 esac
