@@ -49,6 +49,7 @@ _cleanup() {
     for f in "${_TEMP_FILES[@]}"; do
         rm -f "$f" 2>/dev/null
     done
+    rm -f /tmp/.mtproxymax-tg.* 2>/dev/null || true
 }
 trap _cleanup EXIT
 
@@ -426,6 +427,10 @@ format_bytes() {
     else
         echo "$(awk -v b="$bytes" 'BEGIN {printf "%.2f", b/1099511627776}') TB"
     fi
+}
+
+format_human_bytes() {
+    format_bytes "$@"
 }
 
 # Format seconds to human-readable duration
@@ -8427,6 +8432,15 @@ get_proxy_uptime() {
     [ "$start_epoch" -gt 0 ] 2>/dev/null && echo $((now_epoch - start_epoch)) || echo "0"
 }
 
+get_container_uptime() {
+    get_proxy_uptime "$@"
+}
+
+get_active_connections() {
+    local _i _o _c; read -r _i _o _c <<< "$(get_proxy_stats 2>/dev/null)"
+    echo "${_c:-0}"
+}
+
 # ── Section 10: QR Code Generation ──────────────────────────
 
 show_qr() {
@@ -10262,7 +10276,7 @@ _process_cmd() {
 }
 
 # Cleanup trap for temp files
-trap 'rm -f /tmp/.mtproxymax-tg.* 2>/dev/null' EXIT
+trap _cleanup EXIT
 
 # Main loop
 echo "$$" > "$PID_FILE"
