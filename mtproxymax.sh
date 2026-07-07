@@ -591,11 +591,11 @@ parse_human_bytes() {
         return 1
     fi
     case "$unit" in
-        B)        awk -v n="$num" 'BEGIN {printf "%d", n}' ;;
-        K|KB)     awk -v n="$num" 'BEGIN {printf "%d", n * 1024}' ;;
-        M|MB)     awk -v n="$num" 'BEGIN {printf "%d", n * 1048576}' ;;
-        G|GB)     awk -v n="$num" 'BEGIN {printf "%d", n * 1073741824}' ;;
-        T|TB)     awk -v n="$num" 'BEGIN {printf "%d", n * 1099511627776}' ;;
+        B)        awk -v n="$num" 'BEGIN {printf "%.0f", n}' ;;
+        K|KB)     awk -v n="$num" 'BEGIN {printf "%.0f", n * 1024}' ;;
+        M|MB)     awk -v n="$num" 'BEGIN {printf "%.0f", n * 1048576}' ;;
+        G|GB)     awk -v n="$num" 'BEGIN {printf "%.0f", n * 1073741824}' ;;
+        T|TB)     awk -v n="$num" 'BEGIN {printf "%.0f", n * 1099511627776}' ;;
         *)        echo "0"; return 1 ;;
     esac
 }
