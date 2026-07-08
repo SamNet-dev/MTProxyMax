@@ -10117,10 +10117,12 @@ update_traffic() {
     _prev_total_in=$cur_in
     _prev_total_out=$cur_out
 
-    # Per-user delta tracking — single awk pass for all users
-    local _user_parsed=""
+    # Per-user delta tracking — single awk pass for all users into associative array
+    declare -A _parsed_ui=() _parsed_uo=()
     if [ -n "$_metrics" ]; then
-        _user_parsed=$(echo "$_metrics" | awk '
+        while IFS='|' read -r _pu _pi _po; do
+            [ -n "$_pu" ] && { _parsed_ui["$_pu"]=${_pi:-0}; _parsed_uo["$_pu"]=${_po:-0}; }
+        done < <(echo "$_metrics" | awk '
             function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
             /^telemt_user_octets_from_client\{/ { u=lbl($0,"user"); if(u) rx[u]+=$NF }
             /^telemt_user_octets_to_client\{/   { u=lbl($0,"user"); if(u) tx[u]+=$NF }
@@ -10130,11 +10132,7 @@ update_traffic() {
     while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
         [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
         [ "$enabled" != "true" ] && continue
-        local ui=0 uo=0
-        if [ -n "$_user_parsed" ]; then
-            local _uline; _uline=$(echo "$_user_parsed" | awk -F'|' -v u="$label" '$1==u{print $2"|"$3}')
-            [ -n "$_uline" ] && IFS='|' read -r ui uo <<< "$_uline"
-        fi
+        local ui=${_parsed_ui["$label"]:-0} uo=${_parsed_uo["$label"]:-0}
         local prev_ui=${_prev_user_in["$label"]:-0}
         local prev_uo=${_prev_user_out["$label"]:-0}
         local du=$((ui - prev_ui))
@@ -10284,11 +10282,14 @@ _process_cmd() {
             load_tg_settings
             [ ! -f "$SECRETS_FILE" ] && tg_send "📋 No secrets configured." && return
             local msg="📋 *Secrets*\n\n"
-            # Single awk pass for all user metrics
-            local _sec_metrics _parsed_users=""
+            # Single awk pass for all user metrics into associative array
+            local _sec_metrics
+            declare -A _parsed_uc=()
             _sec_metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
             if [ -n "$_sec_metrics" ]; then
-                _parsed_users=$(echo "$_sec_metrics" | awk '
+                while IFS='|' read -r _pu _pc; do
+                    [ -n "$_pu" ] && _parsed_uc["$_pu"]=${_pc:-0}
+                done < <(echo "$_sec_metrics" | awk '
                     function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
                     /^telemt_user_connections_current\{/ { u=lbl($0,"user"); if(u) uc[u]+=$NF }
                     END { for(u in uc) printf "%s|%d\n",u,uc[u]+0 }
@@ -10298,12 +10299,8 @@ _process_cmd() {
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 local icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
-                local uc=0
-                [ -n "$_parsed_users" ] && uc=$(echo "$_parsed_users" | awk -F'|' -v u="$label" '$1==u{print $2}')
-                uc=${uc:-0}
-                local cum_u=$(get_cum_user_traffic "$label")
-                local cui=$(echo "$cum_u"|awk '{print $1}')
-                local cuo=$(echo "$cum_u"|awk '{print $2}')
+                local uc=${_parsed_uc["$label"]:-0}
+                local cui=${_cum_user_in["$label"]:-0} cuo=${_cum_user_out["$label"]:-0}
                 msg+="${icon} *$(_esc "$label")* — ${uc} conn | ↓$(format_bytes $cui) ↑$(format_bytes $cuo)\n"
             done < "$SECRETS_FILE"
             tg_send "$msg"
@@ -10632,7 +10629,7 @@ while true; do
             [ "$enabled" != "true" ] && continue
             total_bytes=$(( ${_cum_user_in[$label]:-0} + ${_cum_user_out[$label]:-0} ))
             [ "$total_bytes" -le 0 ] && continue
-            pct=$(awk -v b="$total_bytes" -v q="$_q" 'BEGIN {printf "%.0f", (q>0 ? b/q*100 : 0)}')
+            pct=$(( (total_bytes * 100) / _q ))
             if [ "$pct" -ge 100 ] 2>/dev/null; then
                 if ! grep -q "^${label}|100$" "$_quota_file" 2>/dev/null; then
                     if "${INSTALL_DIR}/mtproxymax" secret disable "$label" &>/dev/null; then
