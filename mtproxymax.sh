@@ -11984,7 +11984,7 @@ uninstall() {
     docker builder prune -f 2>/dev/null || true
 
     log_info "Removing files..."
-    rm -rf "$INSTALL_DIR"
+    [ -n "$INSTALL_DIR" ] && [ "$INSTALL_DIR" != "/" ] && rm -rf "$INSTALL_DIR"
     rm -f /usr/local/bin/mtproxymax
 
     echo ""
