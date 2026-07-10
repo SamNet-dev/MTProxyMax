@@ -1429,6 +1429,13 @@ TOML_EOF
         done
     fi
 
+    local rate_toml; rate_toml=$(_emit_tunings_for_section "rate_limit" 2>/dev/null || true)
+    if [ -n "$rate_toml" ]; then
+        echo "" >> "$tmp"
+        echo "[rate_limit]" >> "$tmp"
+        echo "$rate_toml" >> "$tmp"
+    fi
+
     # Append enabled upstream entries
     for i in "${!UPSTREAM_NAMES[@]}"; do
         [ "${UPSTREAM_ENABLED[$i]}" = "true" ] || continue
@@ -4466,6 +4473,11 @@ _TUNE_WHITELIST=(
     "log_level:general:^(debug|verbose|normal|silent)$"
     "mask_relay_timeout_ms:censorship:^[0-9]+$"
     "mask_relay_idle_timeout_ms:censorship:^[0-9]+$"
+    "syn_per_sec:rate_limit:^[0-9]+$"
+    "syn_burst:rate_limit:^[0-9]+$"
+    "syn_tarpit_secs:rate_limit:^[0-9]+$"
+    "cidr_mask_ipv4:rate_limit:^[0-9]+$"
+    "cidr_mask_ipv6:rate_limit:^[0-9]+$"
 )
 _TUNE_FILE="${INSTALL_DIR}/tunings.conf"
 
