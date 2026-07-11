@@ -93,6 +93,28 @@ mtproxymax           # Open interactive TUI
 mtproxymax status    # Check proxy health
 ```
 
+### ⚡ Post-Install Performance & Anti-DPI Setup Guide
+
+**Why aren't advanced kernel & Anti-DPI settings asked during the initial setup wizard (`mtproxymax install`)?**  
+Our installation philosophy prioritizes **zero-friction speed**. The initial wizard gets a secure, fully functional proxy running in under 30 seconds without overwhelming new users with Linux kernel tuning, TCP window scaling, or netfilter conntrack concepts.
+
+**How easy is it to configure advanced enhancements after setup?**  
+It is **ultra-easy (1-Click or 1-Line)**! All 13 advanced network, kernel, and anti-censorship features can be toggled instantly without restarting your server or breaking active user connections.
+
+1. **Interactive Menu:** Run `mtproxymax` -> Select **`[p] Performance & Self-Healing Suite`** -> Press `[1]`, `[2]`, `[a]`, `[b]`, or `[c]` to toggle any shield or booster instantly.
+2. **Direct CLI Commands:** Run `mtproxymax bbr on`, `mtproxymax shield on`, or `mtproxymax syn-shield on` directly from your terminal.
+
+#### 📊 Enhancement Tradeoff & Recommendation Matrix
+
+| Enhancement Command / Option | What It Does to the Proxy | Recommended Use Case | System Impact |
+| :--- | :--- | :--- | :--- |
+| **`mtproxymax bbr on`**<br>*(BBRv3 & ECN Auto-Tuning)* | Activates Google's TCP BBRv3 congestion control, Fair Queueing (`fq`), Explicit Congestion Notification (`tcp_ecn=1`), and expands TCP buffer memory to 16MB. Prevents packet drop bottlenecks on high-latency international links. | **Recommended for ALL servers.** Dramatically improves user download speeds and voice/video call quality across long-distance routes. | **Negligible CPU**, uses up to ~16MB extra RAM during peak concurrent traffic bursts. |
+| **`mtproxymax shield on`**<br>*(Anti-DPI Packet Padding)* | Randomizes TCP MSS clamping (`1360`) and injects dynamic FakeTLS record padding variations to scrub packet size distributions, defeating heuristic Deep Packet Inspection (DPI) classifiers. | **Recommended for strict censorship regions** (GFW, TSPU, TIC). Essential when ISPs throttle or block standard FakeTLS connections based on statistical packet sizes. | **Zero CPU overhead** (enforced natively by kernel netfilter hooks). Slight (~1–2%) increase in header bandwidth. |
+| **`mtproxymax syn-shield on`**<br>*(Kernel SYN Shield)* | Engages OS-level `conntrack` and `recent` netfilter rules to tarpit and drop aggressive active probes (>15 SYN handshakes / 5s per IP) before they reach user space or the application layer. | **Recommended for public proxies or servers under scan attack.** Protects your proxy engine from handshake exhaustion and hostile censorship discovery bots. | **Reduces CPU load** during SYN flood attacks by dropping packets in kernel space. |
+| **`mtproxymax cover-shield on`**<br>*(Reverse-Proxy Cover Shield)* | Acts as an active trapdoor: when non-MTProto HTTP GET requests or invalid TLS handshakes arrive, they are silently forwarded to your primary website (`cloudlfare.com`) without closing the TCP socket. | **Recommended when facing active forensic probes.** Ensures ISP censorship bots see a real, working HTTPS website when inspecting your proxy port. | **Low CPU**, requires a few kilobytes of bandwidth when forwarding probe traffic to the fallback domain. |
+| **`mtproxymax tcp-fastpath on`**<br>*(TCP Fast-Path & SACK)* | Enables RFC-compliant TCP Window Scaling, Selective Acknowledgments (SACK), and automatic Path MTU Discovery (`tcp_mtu_probing=1`). | **Recommended for mobile users (4G/LTE/5G)** whose networks frequently change cell towers or suffer from variable MTU fragmentation. | **Zero overhead**, improves connection recovery after packet drops. |
+| **`mtproxymax cpu-tune on`**<br>*(Multi-Core IRQ Spreading)* | Distributes incoming encrypted network packets evenly across all available CPU cores using Linux Receive Packet Steering (RPS/RFS). | **Recommended for multi-core servers (2+ cores)** serving >500 concurrent users. Eliminates single-core bottlenecks under heavy traffic loads. | **Optimizes CPU utilization** across cores. Automatically skipped safely on single-core or LXC containers. |
+
 ---
 
 ## ✨ Features
