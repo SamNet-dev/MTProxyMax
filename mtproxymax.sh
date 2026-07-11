@@ -805,7 +805,7 @@ load_settings() {
     [ -f "$SETTINGS_FILE" ] || return 0
 
     # Safe whitelist-based parsing (no source/eval)
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
         # Skip comments and empty lines
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue
@@ -920,7 +920,7 @@ load_secrets() {
     SECRETS_NOTES=()
 
     if [ -f "$SECRETS_FILE" ]; then
-        while IFS='|' read -r label secret created enabled max_conns max_ips quota expires notes; do
+        while IFS='|' read -r label secret created enabled max_conns max_ips quota expires notes || [ -n "$label" ]; do
             [[ "$label" =~ ^[[:space:]]*# ]] && continue
             [[ "$label" =~ ^[[:space:]]*$ ]] && continue
             [ -z "$secret" ] && continue
@@ -1013,7 +1013,7 @@ load_upstreams() {
         return 0
     fi
 
-    while IFS='|' read -r name type addr user pass weight iface enabled; do
+    while IFS='|' read -r name type addr user pass weight iface enabled || [ -n "$name" ]; do
         [[ "$name" =~ ^[[:space:]]*# ]] && continue
         [[ "$name" =~ ^[[:space:]]*$ ]] && continue
         # Validate name format on load
@@ -1712,7 +1712,7 @@ _load_all_cumulative_user_stats() {
     # Load cumulative from disk (one read)
     declare -A _saved_in _saved_out _snap_in _snap_out
     if [ -f "$_ut_file" ]; then
-        while IFS='|' read -r _l _i _o; do
+        while IFS='|' read -r _l _i _o || [ -n "$_l" ]; do
             [[ "$_l" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
             _i=${_i:-0}; _o=${_o:-0}
             [[ "$_i" =~ ^[0-9]+$ ]] || _i=0
@@ -1721,7 +1721,7 @@ _load_all_cumulative_user_stats() {
         done < "$_ut_file"
     fi
     if [ -f "$_snap_file" ]; then
-        while IFS='|' read -r _l _i _o; do
+        while IFS='|' read -r _l _i _o || [ -n "$_l" ]; do
             [[ "$_l" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
             _i=${_i:-0}; _o=${_o:-0}
             [[ "$_i" =~ ^[0-9]+$ ]] || _i=0
@@ -4589,7 +4589,7 @@ tune_get() {
 _emit_tunings_for_section() {
     [ -f "$_TUNE_FILE" ] || return 0
     local target_section="$1" entry p s v tune_p tune_v
-    while IFS='|' read -r tune_p tune_v; do
+    while IFS='|' read -r tune_p tune_v || [ -n "$tune_p" ]; do
         [ -z "$tune_p" ] && continue
         entry=$(_tune_lookup "$tune_p") || continue
         IFS=':' read -r p s <<< "$entry"
@@ -14129,7 +14129,7 @@ cli_main() {
                     check_root
                     TELEGRAM_ENABLED="false"
                     save_settings
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null
+                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
                     log_success "Telegram disabled"
                     ;;
                 remove)
@@ -14138,8 +14138,8 @@ cli_main() {
                     TELEGRAM_BOT_TOKEN=""
                     TELEGRAM_CHAT_ID=""
                     save_settings
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null
-                    systemctl disable mtproxymax-telegram.service 2>/dev/null
+                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
+                    systemctl disable mtproxymax-telegram.service 2>/dev/null || true
                     log_success "Telegram bot removed"
                     ;;
                 *) log_error "Usage: mtproxymax telegram [setup|test|status|interval|label|alerts|disable|remove]"; return 1 ;;
@@ -15588,7 +15588,7 @@ show_telegram_menu() {
             4)
                 if [ "$TELEGRAM_ENABLED" = "true" ]; then
                     TELEGRAM_ENABLED="false"
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null
+                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
                     log_success "Telegram disabled"
                 else
                     if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
