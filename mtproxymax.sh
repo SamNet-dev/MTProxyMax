@@ -4898,17 +4898,40 @@ apply_firewall_rules() {
             while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
         done
     fi
-
-    if [ "${STEALTH_SHIELD:-false}" = "true" ] && command -v iptables >/dev/null 2>&1; then
-        iptables -I INPUT 1 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null || true
-        iptables -I INPUT 2 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null || true
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet mtproxymax_shield 2>/dev/null || true
+        nft delete table inet mtproxymax_mss 2>/dev/null || true
     fi
 
-    if [ "${STEALTH_MSS_CLAMP:-false}" = "true" ] && command -v iptables >/dev/null 2>&1; then
-        for _chain in FORWARD OUTPUT POSTROUTING; do
-            iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-            iptables -t mangle -I "$_chain" 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-        done
+    if [ "${STEALTH_SHIELD:-false}" = "true" ]; then
+        local _shield_ok=false
+        if command -v iptables >/dev/null 2>&1; then
+            iptables -I INPUT 1 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null && \
+            iptables -I INPUT 2 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null && _shield_ok=true || true
+        fi
+        if [ "$_shield_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
+            nft add table inet mtproxymax_shield 2>/dev/null || true
+            nft add chain inet mtproxymax_shield input '{ type filter hook input priority filter; policy accept; }' 2>/dev/null || true
+            nft add set inet mtproxymax_shield syn_meter '{ type ipv4_addr; flags dynamic,timeout; timeout 5s; }' 2>/dev/null || true
+            nft add rule inet mtproxymax_shield input tcp dport "$PROXY_PORT" ct state new add @syn_meter '{ ip saddr limit rate over 15/second }' counter drop 2>/dev/null && _shield_ok=true || true
+        fi
+    fi
+
+    if [ "${STEALTH_MSS_CLAMP:-false}" = "true" ]; then
+        local _mss_ok=false
+        if command -v iptables >/dev/null 2>&1; then
+            for _chain in FORWARD OUTPUT POSTROUTING; do
+                iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null && _mss_ok=true || true
+                iptables -t mangle -I "$_chain" 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            done
+        fi
+        if [ "$_mss_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
+            nft add table inet mtproxymax_mss 2>/dev/null || true
+            nft add chain inet mtproxymax_mss forward '{ type filter hook forward priority mangle; policy accept; }' 2>/dev/null || true
+            nft add chain inet mtproxymax_mss postrouting '{ type filter hook postrouting priority mangle; policy accept; }' 2>/dev/null || true
+            nft add rule inet mtproxymax_mss forward tcp flags '& (syn|rst) == syn' tcp dport "$PROXY_PORT" tcp option maxseg size set rt mtu 2>/dev/null && _mss_ok=true || true
+            nft add rule inet mtproxymax_mss postrouting tcp flags '& (syn|rst) == syn' tcp sport "$PROXY_PORT" tcp option maxseg size set rt mtu 2>/dev/null || true
+        fi
     fi
     apply_qos_rules
     apply_port_pool_rules
@@ -4918,16 +4941,29 @@ apply_firewall_rules() {
 
 apply_port_pool_rules() {
     [ -z "${PROXY_PORT:-}" ] && return 0
-    if ! command -v iptables >/dev/null 2>&1; then return 0; fi
-    if [ -n "${PORT_POOL_PORTS:-}" ]; then
-        IFS=',' read -ra _plist <<< "${PORT_POOL_PORTS}"
-        for _p in "${_plist[@]}"; do
-            _p="${_p// /}"
-            [ -z "$_p" ] && continue
-            while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
-            while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
-            iptables -t nat -I PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null || true
-        done
+    if command -v iptables >/dev/null 2>&1; then
+        if [ -n "${PORT_POOL_PORTS:-}" ]; then
+            IFS=',' read -ra _plist <<< "${PORT_POOL_PORTS}"
+            for _p in "${_plist[@]}"; do
+                _p="${_p// /}"
+                [ -z "$_p" ] && continue
+                while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+                while iptables -t nat -D PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null; do :; done
+                iptables -t nat -I PREROUTING -p tcp --dport "$_p" -m comment --comment "mtproxymax_portpool" -j REDIRECT --to-ports "${PROXY_PORT}" 2>/dev/null || true
+            done
+        fi
+    elif command -v nft >/dev/null 2>&1; then
+        nft delete table inet mtproxymax_pool 2>/dev/null || true
+        if [ -n "${PORT_POOL_PORTS:-}" ]; then
+            nft add table inet mtproxymax_pool 2>/dev/null || true
+            nft add chain inet mtproxymax_pool prerouting '{ type nat hook prerouting priority -100; }' 2>/dev/null || true
+            IFS=',' read -ra _plist <<< "${PORT_POOL_PORTS}"
+            for _p in "${_plist[@]}"; do
+                _p="${_p// /}"
+                [ -z "$_p" ] && continue
+                nft add rule inet mtproxymax_pool prerouting tcp dport "$_p" redirect to :"$PROXY_PORT" 2>/dev/null || true
+            done
+        fi
     fi
 }
 
@@ -8060,18 +8096,30 @@ run_anti_dpi_shield() {
             check_root
             [ -z "${PROXY_PORT:-}" ] && { log_error "PROXY_PORT not configured"; return 1; }
             log_info "Activating Anti-DPI Packet Padding & TLS Fingerprint Scrubbing Shield..."
+            local _ok=false
             if command -v iptables >/dev/null 2>&1; then
                 local _chain
                 for _chain in FORWARD OUTPUT POSTROUTING; do
                     while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null; do :; done
                     while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null; do :; done
-                    iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null || true
+                    iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null && _ok=true || true
                     iptables -t mangle -I "$_chain" 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null || true
                 done
             fi
+            if [ "$_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
+                nft add table inet mtproxymax_antidpi 2>/dev/null || true
+                nft add chain inet mtproxymax_antidpi forward '{ type filter hook forward priority mangle; policy accept; }' 2>/dev/null || true
+                nft add chain inet mtproxymax_antidpi postrouting '{ type filter hook postrouting priority mangle; policy accept; }' 2>/dev/null || true
+                nft add rule inet mtproxymax_antidpi forward tcp flags '& (syn|rst) == syn' tcp dport "$PROXY_PORT" tcp option maxseg size set 1360 2>/dev/null && _ok=true || true
+                nft add rule inet mtproxymax_antidpi postrouting tcp flags '& (syn|rst) == syn' tcp sport "$PROXY_PORT" tcp option maxseg size set 1360 2>/dev/null || true
+            fi
             ANTI_DPI_SHIELD_ENABLED="true"
             save_settings
-            log_success "Anti-DPI Packet Padding Shield activated! (MSS randomized/clamped to scrub MTProto heuristics)"
+            if [ "$_ok" = "true" ]; then
+                log_success "Anti-DPI Packet Padding Shield activated! (Kernel MSS clamped to 1360 & FakeTLS size randomized)"
+            else
+                log_success "Anti-DPI Packet Padding Shield activated! (Note: Local kernel Netfilter rules skipped due to container/firewall restriction; application-layer padding active)"
+            fi
             ;;
         off|disable)
             check_root
@@ -8082,6 +8130,9 @@ run_anti_dpi_shield() {
                     while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null; do :; done
                     while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_antidpi" -j TCPMSS --set-mss 1360 2>/dev/null; do :; done
                 done
+            fi
+            if command -v nft >/dev/null 2>&1; then
+                nft delete table inet mtproxymax_antidpi 2>/dev/null || true
             fi
             ANTI_DPI_SHIELD_ENABLED="false"
             save_settings
@@ -9633,21 +9684,41 @@ portal_serve() {
 # ── Section 13f: Automated Hostile Scanner Shield ───────────
 scanner_shield_on() {
     check_root
-    _ensure_ipset || { log_error "Cannot activate Scanner Shield without 'ipset'."; return 1; }
-    ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null || true
-    if ! iptables -C INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null; then
-        iptables -I INPUT 1 -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null || true
+    local _ok=false
+    if _ensure_ipset && ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null; then
+        if ! iptables -C INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null; then
+            iptables -I INPUT 1 -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null && _ok=true || true
+        else
+            _ok=true
+        fi
+    fi
+    if [ "$_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
+        nft add table inet mtproxymax_scanners 2>/dev/null || true
+        nft add set inet mtproxymax_scanners blacklist '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
+        nft add chain inet mtproxymax_scanners input '{ type filter hook input priority filter; policy accept; }' 2>/dev/null || true
+        nft add rule inet mtproxymax_scanners input tcp dport "$PROXY_PORT" ip saddr @blacklist counter drop 2>/dev/null && _ok=true || true
     fi
     SCANNER_SHIELD_ENABLED="true"
     save_settings
     scanner_shield_update
-    log_success "Automated Hostile Scanner Shield activated on port ${PROXY_PORT}"
+    if [ "$_ok" = "true" ]; then
+        log_success "Automated Hostile Scanner Shield activated on port ${PROXY_PORT}"
+    else
+        log_success "Automated Hostile Scanner Shield enabled (Note: Local Netfilter set skipped due to container/firewall restriction)"
+    fi
 }
 
 scanner_shield_off() {
     check_root
-    iptables -D INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null || true
-    ipset destroy "$SCANNER_SHIELD_SET" 2>/dev/null || true
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -D INPUT -p tcp --dport "$PROXY_PORT" -m set --match-set "$SCANNER_SHIELD_SET" src -j DROP 2>/dev/null || true
+    fi
+    if command -v ipset >/dev/null 2>&1; then
+        ipset destroy "$SCANNER_SHIELD_SET" 2>/dev/null || true
+    fi
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet mtproxymax_scanners 2>/dev/null || true
+    fi
     SCANNER_SHIELD_ENABLED="false"
     save_settings
     log_success "Scanner Shield deactivated"
@@ -9655,13 +9726,18 @@ scanner_shield_off() {
 
 scanner_shield_update() {
     [ "${SCANNER_SHIELD_ENABLED:-false}" != "true" ] && return 0
-    if ! command -v ipset &>/dev/null; then return 0; fi
-    ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null || true
-    # Add well-known mass scanner CIDRs (Censys, Shodan, Shadowserver common probe ranges)
     local subnets=("162.142.125.0/24" "167.94.138.0/24" "167.94.145.0/24" "167.94.146.0/24" "71.6.135.0/24" "80.82.77.0/24" "185.181.102.0/24")
-    for sub in "${subnets[@]}"; do
-        ipset add "$SCANNER_SHIELD_SET" "$sub" 2>/dev/null || true
-    done
+    if command -v ipset &>/dev/null && ipset create "$SCANNER_SHIELD_SET" hash:net maxelem 65536 2>/dev/null; then
+        for sub in "${subnets[@]}"; do
+            ipset add "$SCANNER_SHIELD_SET" "$sub" 2>/dev/null || true
+        done
+    elif command -v nft &>/dev/null; then
+        nft add table inet mtproxymax_scanners 2>/dev/null || true
+        nft add set inet mtproxymax_scanners blacklist '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
+        for sub in "${subnets[@]}"; do
+            nft add element inet mtproxymax_scanners blacklist "{ $sub }" 2>/dev/null || true
+        done
+    fi
 }
 
 # ── Section 14: Telegram Integration ────────────────────────
