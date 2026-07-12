@@ -882,13 +882,13 @@ save_secrets() {
     tmp=$(_mktemp) || { log_error "Cannot create temp file"; return 1; }
 
     echo "# MTProxyMax Secrets Database — v${VERSION}" > "$tmp"
-    echo "# Format: LABEL|SECRET|CREATED_TS|ENABLED|MAX_CONNS|MAX_IPS|QUOTA_BYTES|EXPIRES|NOTES" >> "$tmp"
+    echo "# Format: LABEL|SECRET|CREATED_TS|ENABLED|MAX_CONNS|MAX_IPS|QUOTA_BYTES|EXPIRES|NOTES|AD_TAG" >> "$tmp"
     echo "# DO NOT EDIT MANUALLY — use 'mtproxymax secret' commands" >> "$tmp"
 
     if [ ${#SECRETS_LABELS[@]} -gt 0 ]; then
         local i
         for i in "${!SECRETS_LABELS[@]}"; do
-            echo "${SECRETS_LABELS[$i]}|${SECRETS_KEYS[$i]}|${SECRETS_CREATED[$i]}|${SECRETS_ENABLED[$i]}|${SECRETS_MAX_CONNS[$i]:-0}|${SECRETS_MAX_IPS[$i]:-0}|${SECRETS_QUOTA[$i]:-0}|${SECRETS_EXPIRES[$i]:-0}|${SECRETS_NOTES[$i]:-}" >> "$tmp"
+            echo "${SECRETS_LABELS[$i]}|${SECRETS_KEYS[$i]}|${SECRETS_CREATED[$i]}|${SECRETS_ENABLED[$i]}|${SECRETS_MAX_CONNS[$i]:-0}|${SECRETS_MAX_IPS[$i]:-0}|${SECRETS_QUOTA[$i]:-0}|${SECRETS_EXPIRES[$i]:-0}|${SECRETS_NOTES[$i]:-}|${SECRETS_AD_TAGS[$i]:-}" >> "$tmp"
         done
     fi
 
@@ -906,6 +906,7 @@ declare -a SECRETS_MAX_IPS=()
 declare -a SECRETS_QUOTA=()
 declare -a SECRETS_EXPIRES=()
 declare -a SECRETS_NOTES=()
+declare -a SECRETS_AD_TAGS=()
 
 # Load secrets database
 load_secrets() {
@@ -918,9 +919,10 @@ load_secrets() {
     SECRETS_QUOTA=()
     SECRETS_EXPIRES=()
     SECRETS_NOTES=()
+    SECRETS_AD_TAGS=()
 
     if [ -f "$SECRETS_FILE" ]; then
-        while IFS='|' read -r label secret created enabled max_conns max_ips quota expires notes || [ -n "$label" ]; do
+        while IFS='|' read -r label secret created enabled max_conns max_ips quota expires notes ad_tag || [ -n "$label" ]; do
             [[ "$label" =~ ^[[:space:]]*# ]] && continue
             [[ "$label" =~ ^[[:space:]]*$ ]] && continue
             [ -z "$secret" ] && continue
@@ -950,6 +952,9 @@ load_secrets() {
             fi
             SECRETS_EXPIRES+=("$_ex")
             SECRETS_NOTES+=("${notes:-}")
+            local _at="${ad_tag:-}"
+            [[ "$_at" =~ ^[0-9a-fA-F]{32}$ ]] || _at=""
+            SECRETS_AD_TAGS+=("$_at")
         done < "$SECRETS_FILE"
     fi
 
@@ -1380,13 +1385,14 @@ TOML_EOF
     done
 
     # Append per-user limits (only sections with non-zero values)
-    local has_conns=false has_ips=false has_quota=false has_expires=false
+    local has_conns=false has_ips=false has_quota=false has_expires=false has_adtags=false
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
         [ "${SECRETS_MAX_CONNS[$i]:-0}" != "0" ] && has_conns=true
         [ "${SECRETS_MAX_IPS[$i]:-0}" != "0" ] && has_ips=true
         [ "${SECRETS_QUOTA[$i]:-0}" != "0" ] && has_quota=true
         [ "${SECRETS_EXPIRES[$i]:-0}" != "0" ] && has_expires=true
+        [ -n "${SECRETS_AD_TAGS[$i]:-}" ] && has_adtags=true
     done
 
     if $has_conns; then
@@ -1426,6 +1432,16 @@ TOML_EOF
             [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
             [ "${SECRETS_EXPIRES[$i]:-0}" != "0" ] || continue
             echo "${SECRETS_LABELS[$i]} = \"${SECRETS_EXPIRES[$i]}\"" >> "$tmp"
+        done
+    fi
+
+    if $has_adtags; then
+        echo "" >> "$tmp"
+        echo "[access.user_ad_tags]" >> "$tmp"
+        for i in "${!SECRETS_LABELS[@]}"; do
+            [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+            [ -n "${SECRETS_AD_TAGS[$i]:-}" ] || continue
+            echo "${SECRETS_LABELS[$i]} = \"${SECRETS_AD_TAGS[$i]}\"" >> "$tmp"
         done
     fi
 
@@ -1980,6 +1996,7 @@ secret_add() {
     SECRETS_QUOTA+=("0")
     SECRETS_EXPIRES+=("0")
     SECRETS_NOTES+=("")
+    SECRETS_AD_TAGS+=("")
 
     # Save
     save_secrets
@@ -2051,7 +2068,7 @@ secret_remove() {
 
     # Remove from arrays (rebuild without the index)
     local -a new_labels=() new_keys=() new_created=() new_enabled=()
-    local -a new_max_conns=() new_max_ips=() new_quota=() new_expires=() new_notes=()
+    local -a new_max_conns=() new_max_ips=() new_quota=() new_expires=() new_notes=() new_adtags=()
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "$i" -eq "$idx" ] && continue
         new_labels+=("${SECRETS_LABELS[$i]}")
@@ -2063,6 +2080,7 @@ secret_remove() {
         new_quota+=("${SECRETS_QUOTA[$i]:-0}")
         new_expires+=("${SECRETS_EXPIRES[$i]:-0}")
         new_notes+=("${SECRETS_NOTES[$i]:-}")
+        new_adtags+=("${SECRETS_AD_TAGS[$i]:-}")
     done
     SECRETS_LABELS=("${new_labels[@]}")
     SECRETS_KEYS=("${new_keys[@]}")
@@ -2073,6 +2091,7 @@ secret_remove() {
     SECRETS_QUOTA=("${new_quota[@]}")
     SECRETS_EXPIRES=("${new_expires[@]}")
     SECRETS_NOTES=("${new_notes[@]}")
+    SECRETS_AD_TAGS=("${new_adtags[@]}")
 
     save_secrets
 
@@ -2495,6 +2514,58 @@ secret_edit_note() {
     fi
 }
 
+# Set per-secret AdTag (32 hex chars)
+secret_set_adtag() {
+    check_root
+    local label="$1" ad_tag="$2" no_restart="${3:-false}"
+    [ -z "$label" ] && { log_error "Usage: mtproxymax secret adtag <label> [32-hex-tag|clear]"; return 1; }
+
+    if [ "$ad_tag" = "clear" ] || [ -z "$ad_tag" ]; then
+        secret_clear_adtag "$label" "$no_restart"
+        return $?
+    fi
+
+    # Validate exactly 32 hex chars
+    if ! [[ "$ad_tag" =~ ^[0-9a-fA-F]{32}$ ]]; then
+        log_error "Ad-tag must be exactly 32 hexadecimal characters (obtained from @MTProxybot)"
+        return 1
+    fi
+    ad_tag=$(echo "$ad_tag" | tr '[:upper:]' '[:lower:]')
+
+    local idx=-1 i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        if [ "${SECRETS_LABELS[$i]}" = "$label" ]; then idx=$i; break; fi
+    done
+    [ "$idx" = "-1" ] && { log_error "Secret '${label}' not found"; return 1; }
+
+    SECRETS_AD_TAGS[$idx]="$ad_tag"
+    save_secrets
+    if [ "$no_restart" != "true" ]; then
+        reload_proxy_config
+    fi
+    log_success "Set per-secret ad-tag '${ad_tag}' for secret '${label}'"
+    audit_log "secret adtag set ${label} ${ad_tag}"
+}
+
+# Clear per-secret AdTag (revert to global default)
+secret_clear_adtag() {
+    check_root
+    local label="$1" no_restart="${2:-false}"
+    local idx=-1 i
+    for i in "${!SECRETS_LABELS[@]}"; do
+        if [ "${SECRETS_LABELS[$i]}" = "$label" ]; then idx=$i; break; fi
+    done
+    [ "$idx" = "-1" ] && { log_error "Secret '${label}' not found"; return 1; }
+
+    SECRETS_AD_TAGS[$idx]=""
+    save_secrets
+    if [ "$no_restart" != "true" ]; then
+        reload_proxy_config
+    fi
+    log_success "Cleared per-secret ad-tag for secret '${label}' (reverted to global default)"
+    audit_log "secret adtag clear ${label}"
+}
+
 # Re-enable a quota-exceeded secret with optional traffic reset
 secret_reenable() {
     local label="$1"
@@ -2721,6 +2792,7 @@ secret_clone() {
     SECRETS_QUOTA+=("${SECRETS_QUOTA[$idx]:-0}")
     SECRETS_EXPIRES+=("${SECRETS_EXPIRES[$idx]:-0}")
     SECRETS_NOTES+=("${SECRETS_NOTES[$idx]:-}")
+    SECRETS_AD_TAGS+=("${SECRETS_AD_TAGS[$idx]:-}")
 
     save_secrets
     reload_proxy_config
@@ -3059,7 +3131,7 @@ secret_sort() {
     fi
 
     # Rebuild arrays in sorted order
-    local -a new_labels=() new_keys=() new_created=() new_enabled=() new_conns=() new_ips=() new_quota=() new_expires=() new_notes=()
+    local -a new_labels=() new_keys=() new_created=() new_enabled=() new_conns=() new_ips=() new_quota=() new_expires=() new_notes=() new_adtags=()
     while IFS='|' read -r idx _ _; do
         new_labels+=("${SECRETS_LABELS[$idx]}")
         new_keys+=("${SECRETS_KEYS[$idx]}")
@@ -3070,6 +3142,7 @@ secret_sort() {
         new_quota+=("${SECRETS_QUOTA[$idx]}")
         new_expires+=("${SECRETS_EXPIRES[$idx]}")
         new_notes+=("${SECRETS_NOTES[$idx]}")
+        new_adtags+=("${SECRETS_AD_TAGS[$idx]:-}")
     done <<< "$sorted"
 
     SECRETS_LABELS=("${new_labels[@]}")
@@ -3081,6 +3154,7 @@ secret_sort() {
     SECRETS_QUOTA=("${new_quota[@]}")
     SECRETS_EXPIRES=("${new_expires[@]}")
     SECRETS_NOTES=("${new_notes[@]}")
+    SECRETS_AD_TAGS=("${new_adtags[@]}")
 
     save_secrets
     log_success "Secrets sorted by ${field}"
@@ -3261,6 +3335,12 @@ secret_info() {
     echo -e "  ${BOLD}Status:${NC}      $([ "$enabled" = "true" ] && echo "${GREEN}active${NC}" || echo "${RED}disabled${NC}")"
     echo -e "  ${BOLD}Created:${NC}     $(date -d "@${created}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$created" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$created")"
     [ -n "$notes" ] && echo -e "  ${BOLD}Notes:${NC}       ${notes}"
+    local adtag="${SECRETS_AD_TAGS[$idx]:-}"
+    if [ -n "$adtag" ]; then
+        echo -e "  ${BOLD}Ad-tag:${NC}      ${adtag}"
+    else
+        echo -e "  ${BOLD}Ad-tag:${NC}      ${DIM}global default (${AD_TAG:-not set})${NC}"
+    fi
     echo ""
     echo -e "  ${BOLD}Limits:${NC}"
     echo -e "    Connections: $([ "$conns" = "0" ] && echo "unlimited" || echo "$conns")"
@@ -3392,21 +3472,23 @@ secret_archive() {
     [ ${#SECRETS_LABELS[@]} -le 1 ] && { log_error "Cannot archive the last secret"; return 1; }
 
     local archive_file="${INSTALL_DIR}/secrets_archive.conf"
-    echo "${SECRETS_LABELS[$idx]}|${SECRETS_KEYS[$idx]}|${SECRETS_CREATED[$idx]}|${SECRETS_ENABLED[$idx]}|${SECRETS_MAX_CONNS[$idx]:-0}|${SECRETS_MAX_IPS[$idx]:-0}|${SECRETS_QUOTA[$idx]:-0}|${SECRETS_EXPIRES[$idx]:-0}|${SECRETS_NOTES[$idx]:-}" >> "$archive_file"
+    echo "${SECRETS_LABELS[$idx]}|${SECRETS_KEYS[$idx]}|${SECRETS_CREATED[$idx]}|${SECRETS_ENABLED[$idx]}|${SECRETS_MAX_CONNS[$idx]:-0}|${SECRETS_MAX_IPS[$idx]:-0}|${SECRETS_QUOTA[$idx]:-0}|${SECRETS_EXPIRES[$idx]:-0}|${SECRETS_NOTES[$idx]:-}|${SECRETS_AD_TAGS[$idx]:-}" >> "$archive_file"
     chmod 600 "$archive_file"
 
     # Remove from active arrays (inline, no log output)
-    local -a _new=() _nk=() _nc=() _ne=() _nmc=() _nmi=() _nq=() _nex=() _nn=()
+    local -a _new=() _nk=() _nc=() _ne=() _nmc=() _nmi=() _nq=() _nex=() _nn=() _nat=()
     local j
     for j in "${!SECRETS_LABELS[@]}"; do
         [ "$j" -eq "$idx" ] && continue
         _new+=("${SECRETS_LABELS[$j]}"); _nk+=("${SECRETS_KEYS[$j]}"); _nc+=("${SECRETS_CREATED[$j]}")
         _ne+=("${SECRETS_ENABLED[$j]}"); _nmc+=("${SECRETS_MAX_CONNS[$j]:-0}"); _nmi+=("${SECRETS_MAX_IPS[$j]:-0}")
         _nq+=("${SECRETS_QUOTA[$j]:-0}"); _nex+=("${SECRETS_EXPIRES[$j]:-0}"); _nn+=("${SECRETS_NOTES[$j]:-}")
+        _nat+=("${SECRETS_AD_TAGS[$j]:-}")
     done
     SECRETS_LABELS=("${_new[@]}"); SECRETS_KEYS=("${_nk[@]}"); SECRETS_CREATED=("${_nc[@]}")
     SECRETS_ENABLED=("${_ne[@]}"); SECRETS_MAX_CONNS=("${_nmc[@]}"); SECRETS_MAX_IPS=("${_nmi[@]}")
     SECRETS_QUOTA=("${_nq[@]}"); SECRETS_EXPIRES=("${_nex[@]}"); SECRETS_NOTES=("${_nn[@]}")
+    SECRETS_AD_TAGS=("${_nat[@]}")
     save_secrets
     reload_proxy_config
     log_success "Secret '${label}' archived (restore with: mtproxymax secret unarchive ${label})"
@@ -3429,7 +3511,7 @@ secret_unarchive() {
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { log_error "Secret '${label}' already exists"; return 1; }
     done
 
-    IFS='|' read -r _l key created enabled mc mi q ex notes <<< "$line"
+    IFS='|' read -r _l key created enabled mc mi q ex notes ad_tag <<< "$line"
     SECRETS_LABELS+=("$label")
     SECRETS_KEYS+=("$key")
     SECRETS_CREATED+=("$created")
@@ -3439,6 +3521,9 @@ secret_unarchive() {
     SECRETS_QUOTA+=("${q:-0}")
     SECRETS_EXPIRES+=("${ex:-0}")
     SECRETS_NOTES+=("${notes:-}")
+    local _at="${ad_tag:-}"
+    [[ "$_at" =~ ^[0-9a-fA-F]{32}$ ]] || _at=""
+    SECRETS_AD_TAGS+=("$_at")
 
     # Remove from archive
     local tmp; tmp=$(_mktemp) || return 1
@@ -11885,6 +11970,7 @@ run_installer() {
     SECRETS_QUOTA=("0")
     SECRETS_EXPIRES=("0")
     SECRETS_NOTES=("")
+    SECRETS_AD_TAGS=("")
 
     # Save everything
     mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$STATS_DIR" "$BACKUP_DIR"
@@ -12986,6 +13072,19 @@ cli_main() {
                     local note_text="$*"
                     [ -z "$label" ] && { log_error "Usage: mtproxymax secret note <label> [text]"; return 1; }
                     secret_edit_note "$label" "$note_text"
+                    ;;
+                adtag)
+                    check_root
+                    local _no_restart="false" _args=()
+                    for _a in "$@"; do [[ "$_a" == "--no-restart" ]] && _no_restart="true" || _args+=("$_a"); done
+                    set -- "${_args[@]}"
+                    local label="$1"; shift 2>/dev/null || true
+                    local at="$1"
+                    if [ -z "$label" ]; then
+                        log_error "Usage: mtproxymax secret adtag <label> [32-hex-tag|clear] [--no-restart]"
+                        return 1
+                    fi
+                    secret_set_adtag "$label" "$at" "$_no_restart"
                     ;;
                 rename)
                     check_root
@@ -15133,6 +15232,7 @@ show_secrets_menu() {
         echo -e "  ${DIM}[p]${NC} Top users"
         echo -e "  ${DIM}[g]${NC} Generate links file"
         echo -e "  ${DIM}[a]${NC} Archive / Unarchive"
+        echo -e "  ${DIM}[b]${NC} Set/clear per-secret AdTag"
         echo -e "  ${DIM}[y]${NC} Tag / Untag / Filter by tag"
         echo -e "  ${DIM}[l]${NC} View user activity log"
         echo -e "  ${DIM}[q]${NC} Monthly quota reset"
@@ -15503,6 +15603,19 @@ show_secrets_menu() {
                         [ -n "$tn" ] && { template_delete "$tn" || true; }
                         ;;
                 esac
+                press_any_key
+                ;;
+            b|B)
+                echo -en "  ${BOLD}Label or #:${NC} "
+                local bl; read -r bl
+                if [[ "$bl" =~ ^[0-9]+$ ]] && [ "$bl" -ge 1 ] && [ "$bl" -le "${#SECRETS_LABELS[@]}" ]; then
+                    bl="${SECRETS_LABELS[$((bl - 1))]}"
+                fi
+                if [ -n "$bl" ]; then
+                    echo -en "  ${BOLD}AdTag (32 hex chars, or 'clear'):${NC} "
+                    local bat; read -r bat
+                    [ -n "$bat" ] && { secret_set_adtag "$bl" "$bat" || true; }
+                fi
                 press_any_key
                 ;;
             0|"") return ;;
