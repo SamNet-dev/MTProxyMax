@@ -4749,8 +4749,10 @@ audit_log() {
     echo "${ts} UTC | ${user} | ${action}" >> "$_AUDIT_LOG"
     # Rotate if over 10000 lines
     local lines; lines=$(wc -l < "$_AUDIT_LOG" 2>/dev/null | tr -d ' ')
-    [[ "$lines" =~ ^[0-9]+$ ]] && [ "$lines" -gt 10000 ] 2>/dev/null && \
+    if [[ "$lines" =~ ^[0-9]+$ ]] && [ "$lines" -gt 10000 ] 2>/dev/null; then
         tail -n 8000 "$_AUDIT_LOG" > "${_AUDIT_LOG}.tmp" && mv "${_AUDIT_LOG}.tmp" "$_AUDIT_LOG"
+    fi
+    return 0
 }
 
 show_history() {
@@ -13008,7 +13010,10 @@ cli_main() {
                     done
                     secret_add "$_add_label" "$_add_secret" "$_no_restart" || return 1
                     # Apply template after creating
-                    [ -n "$_add_template" ] && template_apply "$_add_template" "$_add_label"
+                    if [ -n "$_add_template" ]; then
+                        template_apply "$_add_template" "$_add_label" || return 1
+                    fi
+                    return 0
                     ;;
                 add-batch)
                     check_root
@@ -13029,8 +13034,9 @@ cli_main() {
                     if [ "$_dry" = "true" ]; then
                         log_info "DRY RUN — would remove secret '${_rm_label}' (no changes made)"
                     else
-                        secret_remove "$_rm_label" "false" "$_no_restart"
+                        secret_remove "$_rm_label" "false" "$_no_restart" || return 1
                     fi
+                    return 0
                     ;;
                 remove-batch)
                     check_root
