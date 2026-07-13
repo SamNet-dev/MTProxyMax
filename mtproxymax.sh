@@ -9454,14 +9454,23 @@ self_update() {
         return 1
     fi
 
-    # Always regenerate Telegram bot service script to pick up any changes
+    # Always regenerate and restart Telegram bot service to apply latest daemon code
     if [ "${TELEGRAM_ENABLED:-}" = "true" ]; then
         telegram_generate_service_script
-        if [ "$_script_updated" = true ] && command -v systemctl &>/dev/null; then
+        if command -v systemctl &>/dev/null && [ -f /etc/systemd/system/mtproxymax-telegram.service ]; then
             log_info "Restarting Telegram bot service..."
             systemctl restart mtproxymax-telegram.service 2>/dev/null \
                 && log_success "Telegram bot service restarted" \
                 || log_warn "Telegram restart failed — run: systemctl restart mtproxymax-telegram.service"
+        fi
+    fi
+
+    # Always regenerate and restart Replication sync service if active
+    if [ "${REPLICATION_ENABLED:-}" = "true" ]; then
+        replication_generate_sync_script
+        if command -v systemctl &>/dev/null && [ -f /etc/systemd/system/mtproxymax-sync.service ]; then
+            log_info "Restarting replication sync service..."
+            systemctl restart mtproxymax-sync.service 2>/dev/null || true
         fi
     fi
 
