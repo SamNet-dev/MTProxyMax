@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.3.1-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.4.0--LTS-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -37,14 +37,19 @@ sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/SamNet-dev/MTProxyM
 
 ## Why MTProxyMax?
 
-Most MTProxy tools give you a proxy and a link. That's it. MTProxyMax gives you a **full management platform**:
+Most MTProxy tools give you a proxy and a link. That's it. MTProxyMax gives you the **absolute maximum of features possible** from a proxy manager with a Rust engine (`telemt`) — providing **everything you need** in one single script:
 
-- 🏆 **Comprehensive Enterprise Platform** — Over 30 enterprise features across Networking, Quota Governance, DevOps Automation, and Live Telemetry
-- 👥 **Shared Quota Pools & Calendar Schedules** — Group users under shared bandwidth ceilings (`pool`) and offer unmetered weekend/holiday data passes (`calendar`)
-- ⚡ **Autonomous Failover & SNI Hunter** — Self-healing upstream watchdog (`failover`), automated cover domain hunting (`auto-sni`), and TLS fingerprint randomization (`cert-shield`)
-- 🚑 **1-Click Emergency Evacuation & Webhooks** — Instant SSH/rsync server migration (`evacuate`) and multi-channel JSON notifications for Discord, Slack, and DingTalk (`webhook`)
-- 📊 **Live Telemetry & Audit Reports** — Real-time ASCII traffic dashboard (`live-diag`), printable QR onboarding sheets (`qr-sheet`), and monthly billing export reports (`export-report`)
-- 🏢 **Enterprise Commercial Suite** — Batch gift code vouchers (`voucher create/redeem`), Role-Based Access Control (`admin add`), and static glassmorphism Status Portal (`portal`)
+- 🏎️ **Real-Time QoS Bandwidth Shaping (`speed-limit`)** — Linux kernel `tc` and `htb` hierarchical rate limits dynamically mapped to active per-user IP sessions without container restarts.
+- 🌐 **Multi-Server Fleet Federation (`fleet`)** — Centralized Master-Slave telemetry aggregation, global concurrent connection health, and pooled Gbps/TB bandwidth tracking across your entire server mesh.
+- 🔐 **Automated Let's Encrypt / SSL Shield (`ssl-shield`)** — Automated `openssl` certificate issuance and domain TLS SNI validation.
+- ☁️ **Automated Off-Site Cloud Backups (`backup-cloud`)** — 1-click & cron tarball offloading directly to a Telegram admin chat (`sendDocument`) or multi-cloud storage (`rclone`/S3/R2).
+- 🤖 **Dual-Tier Self-Service Telegram Bot (`telegram`)** — Public unauthenticated tier for end-users (`/start`, `/my_status <label>`, `/voucher`) and a protected Admin Control Plane (`/mp_fleet`, `/mp_secrets`, `/mp_lockdown`).
+- 🏆 **Comprehensive Enterprise Platform** — Over 35 enterprise features across Networking, Quota Governance, DevOps Automation, and Live Telemetry.
+- 👥 **Shared Quota Pools & Calendar Schedules** — Group users under shared bandwidth ceilings (`pool`) and offer unmetered weekend/holiday data passes (`calendar`).
+- ⚡ **Autonomous Failover & SNI Hunter** — Self-healing upstream watchdog (`failover`), automated cover domain hunting (`auto-sni`), and TLS fingerprint randomization (`cert-shield`).
+- 🚑 **1-Click Emergency Evacuation & Webhooks** — Instant SSH/rsync server migration (`evacuate`) and multi-channel JSON notifications for Discord, Slack, and DingTalk (`webhook`).
+- 📊 **Live Telemetry & Audit Reports** — Real-time ASCII traffic dashboard (`live-diag`), printable QR onboarding sheets (`qr-sheet`), and monthly billing export reports (`export-report`).
+- 🏢 **Enterprise Commercial Suite** — Batch gift code vouchers (`voucher create/redeem`), Role-Based Access Control (`admin add`), and static glassmorphism Status Portal (`portal`).
 - 🛡️ **Automated Hostile Threat Shield** — Live Shodan/Censys scanner blacklisting via `ipset` (`scanner-shield`)
 - 🛡️ **Next-Gen Anti-DPI & Stealth Suite** — BBRv3 congestion control (`bbr`), Anti-DPI packet padding (`shield`), Reverse-proxy probe trapdoor (`cover-shield`), and active forensic inspection (`dpi-inspect`)
 - 🏎️ **Bandwidth Shaping & Quotas** — Linux `tc` per-IP QoS limits, off-peak Happy Hours quota exclusions, and automated Telegram abuse/expiry alerts
@@ -1457,79 +1462,32 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
-### v1.3.1 — The Performance & Anti-DPI Upgrade Suite (Forensically Audited)
+### v1.4.0-LTS — Enterprise Federation & Self-Service Suite (Absolute Maximum Features)
 
-- **Performance & Network Acceleration:** Added **TCP BBRv3 & ECN Auto-Tuning (`bbr` / `tune-net`)** with container-resilient sysctl persistence, Fair Queueing (`fq`), Explicit Congestion Notification (`tcp_ecn=1`), and 16MB TCP buffer expansion.
-- **Anti-DPI & Fingerprint Scrubbing:** Added **Anti-DPI Packet Padding Shield (`shield` / `anti-dpi`)** with kernel MSS clamping variations (`1360`) and FakeTLS packet size randomization to defeat TSPU/GFW heuristic analysis.
-- **Active Probe Defense:** Added **Reverse-Proxy Cover Shield (`cover-shield` / `fallback`)** that forwards unauthorized HTTP GET requests and invalid TLS handshakes directly to a fallback website (e.g., `https://cloudflare.com`) without resetting the TCP socket.
-- **Hardening & Verification:** Line-by-line forensic audit guaranteeing input sanitization, dynamic telemt engine masking integration, and zero bash syntax errors across 16,979 lines.
+- **QoS Bandwidth Shaping (`speed-limit`):** Hierarchical Token Bucket (`htb`) and Linux `tc` shaping dynamically assigned per account.
+- **Multi-Server Fleet Federation (`fleet`):** Centralized Master-Slave telemetry aggregation and multi-node health monitoring.
+- **Automated SSL Shield (`ssl-shield`):** Zero-touch Let's Encrypt / `openssl` certificate issuance and ACME domain management.
+- **Automated Cloud Backups (`backup-cloud`):** Automatic tarball offloading to Telegram admin chat (`sendDocument`) or multi-cloud storage (`rclone`/S3/R2).
+- **Dual-Tier Telegram Bot (`telegram`):** Public self-service tier (`/start`, `/my_status <label>`, `/voucher`) combined with an authenticated Admin Control Plane (`/mp_fleet`, `/mp_secrets`, `/mp_lockdown`).
+- **Comprehensive Hardening & Audit:** Fixed race conditions (`flock`), prevented configuration code injection (`grep | cut`), added comma/pipe CSV import normalization (`secret_import`), and ensured strict-mode container fallbacks across 18,369 lines (`100% clean`).
+
+### v1.3.1 — Performance & Anti-DPI Upgrade Suite
+- Added **TCP BBRv3 & ECN Auto-Tuning (`bbr` / `tune-net`)**, **Anti-DPI Packet Padding Shield (`shield`)**, and **Reverse-Proxy Cover Shield (`cover-shield`)**.
 
 ### v1.3.0 — The Mega-Release (20 Enterprise Features Across 4 Suites)
+- Added **Eco-Mode (`eco-mode`)**, **Decoy Routing (`decoy`)**, **Shared Quota Pools (`pool`)**, **Calendar Scheduling (`calendar`)**, **1-Click Evacuation (`evacuate`)**, **Multi-Channel Webhooks (`webhook`)**, and **Autonomous SNI Hunter (`auto-sni`)**.
 
-- **Networking & Security:** Added **Eco-Mode (`eco-mode`)** for micro-servers, **Decoy Routing (`decoy`)**, **Country Geo-Fencing (`geofence`)**, **Chaos Testing (`chaos-test`)**, and **IP Score Inspector (`ip-score`)**.
-- **User Governance:** Added **Shared Quota Pools (`pool`)**, **Calendar Scheduling (`calendar`)**, **Expiry Action Policies (`expire-action`)**, **Interactive Leaderboard (`top-users`)**, and **Traffic Burst Alerts (`traffic-alert`)**.
-- **DevOps & Automation:** Added **1-Click Emergency Evacuation (`evacuate`)**, **Multi-Channel Webhooks (`webhook`)**, **Printable QR Sheets (`qr-sheet`)**, **Monthly Audit Reports (`export-report`)**, and **DC Route Optimizer (`dc-optimize`)**.
-- **Diagnostics & TUI:** Added **Live Telemetry Dashboard (`live-diag`)**, **Autonomous SNI Hunter (`auto-sni`)**, **Upstream Failover Watchdog (`failover`)**, **TLS Cert Randomizer (`cert-shield`)**, and **TUI Themes (`tui-theme`)**.
-- **Hardening:** Deep 4-round POSIX architectural audit guaranteeing atomic file renaming, O(1) CPU efficiency, and zero race conditions.
-
-### v1.2.0 — Enterprise Commercial & Shield Suite, Next-Gen Anti-DPI, QoS Bandwidth Shaping & DevOps Clustering Suite
-
-- **Commercial Suite:** Added **Voucher & Gift Code System (`voucher`)**, **Role-Based Access Control (`admin`)** for Telegram bot tiers, and **Static Status Portal (`portal`)**.
-- **Threat & Anti-DPI Defenses:** Added **Kernel Scanner Shield (`scanner-shield`)**, **Active DPI Forensics (`dpi-inspect`)**, **Cover Watchdog (`cover-watchdog`)**, **Emergency Lockdown (`lockdown`)**, and **Multi-Port Listeners (`port-pool`)**.
-- **QoS & Operations:** Added **Linux Kernel QoS Shaping (`qos`)**, **Happy Hours Quota Exclusions (`happy-hours`)**, **21 Telegram Bot Commands**, and **Telegram Cloud Backups (`backup send-tg`)**.
-- **DevOps & Self-Healing:** Added **HAProxy/Nginx Exporter (`export-lb`)**, **Cloudflare DDNS (`ddns`)**, **Config Snapshots (`snapshot`)**, **TCP BBR Booster (`tcp-boost`)**, **Socket Reaper (`tcp-clean`)**, **Socket Booster (`socket-boost`)**, **TLS Padding (`tls-pad`)**, **RAM Auto-Tuning (`ram-tune`)**, and **1-Line Server Cloner (`clone-link`)**.
+### v1.2.0 — Commercial & Shield Suite, Next-Gen Anti-DPI & DevOps Clustering
+- Added **Vouchers (`voucher`)**, **Role-Based Access Control (`admin`)**, **Status Portal (`portal`)**, **Scanner Shield (`scanner-shield`)**, and **HAProxy/Nginx Exporter (`export-lb`)**.
 
 ### v1.1.0 — Anti-DPI & Stealth Defenses Expansion
+- Added **Kernel SYN Shield (`shield`)**, **Stealth Presets (`stealth`)**, **TCP MSS Clamping (`clamp-mss`)**, and **Multi-Domain SNI Pool (`domain-pool`)**.
 
-- **Kernel SYN Shield (`shield`):** Built-in rate limiter tarpitting aggressive probes (>15 SYN/5s per IP).
-- **Stealth Presets (`stealth`):** Hot-swappable anti-replay hardening (`normal` vs `ultra`).
-- **TCP MSS Clamping (`clamp-mss`):** Prevents MTU black hole drops and packet fragmentation.
-- **Multi-Domain SNI Pool (`domain-pool`):** Rotate between multiple cover domains within the same instance.
-- **Auto Cert Synchronization (`sync_domain_cert_len`):** Dynamically synchronizes `fake_cert_len` every 24h.
+### v1.0.10 — Executive Digest & DC Benchmarking
+- Added **Executive Digest (`digest`)**, **Datacenter Benchmark (`ping-dc`)**, **Base64 Subscriptions (`secret sub`)**, and **JSON Database Export (`secret export-json`)**.
 
-### v1.0.10 — Executive Digest, DC Benchmarking & Base64 Subscriptions
-
-- Added **Executive Digest (`digest`)** dashboard, **Datacenter Benchmark (`ping-dc`)** against Telegram DC1-DC5, **Base64 Subscriptions (`secret sub`)**, **JSON Database Export (`secret export-json`)**, and bulk cleanup tools (`purge-disabled`, `rename-prefix`).
-
-### v1.0.9 — Engine v3.4.18, TLS Stealth & ME/MR Hardening
-
-- Upgraded telemt engine to v3.4.18 (TLS profile spoofing, async ME/MR queue backpressure), added user quota rate limit API, and improved Docker tmpfs caching.
-
-### v1.0.8 — Security Hardening & Persistent Quotas
-
-- Upgraded engine to v3.4.11, added persistent per-user quota tracking (`quota_state_path`), runtime quota reset API, and customizable Telegram bot alert toggles.
-
-### v1.0.7 — Tags, Templates, Migration, Maintenance & IP Banlist
-
-- Added secret tagging (`secret tag/untag`), reusable limit templates (`template`), tarball migration (`migrate`), graceful maintenance mode (`maintenance`), persistent iptables IP banlist (`ban/unban`), AES-256 backups, and engine tuning (`tune`).
-
-### v1.0.6 — Profiles, Archive, Search & Info
-
-- Added user detail inspection (`info`), search (`search`), top rankings, soft-delete archiving, named config profiles (`profile`), port reachability tester (`port-check`), and custom mask routing (`mask-backend`).
-
-### v1.0.5 — Engine v3.4.8, Clone, Bulk-Extend & Doctor
-
-- Upgraded engine to v3.4.8, added user duplication (`clone`), expiry extension (`extend`), active connections view, comprehensive diagnostics (`doctor`), and long-polling bot response.
-
-### v1.0.4 — Master-Slave Replication & Metrics Dashboard
-
-- Added master/slave configuration replication (`replication setup`) via rsync+SSH, upgraded engine to v3.3.39, introduced live Prometheus metrics console (`metrics live`), and SNI handling policies (`sni-policy`).
-
-### v1.0.3 — Quota Enforcement, Multi-Port & Hot-Reload
-
-- Added multi-port listener support, secret hot-reloading, quota auto-disable at 100% consumption, JSON monitoring outputs, connection logs, and country geo-blocking whitelist.
-
-### v1.0.2 — Persistent Traffic Accounting
-
-- Added atomic traffic counter persistence surviving restarts and server reboots with batched stats loading.
-
-### v1.0.1 — Batch User Operations
-
-- Added multi-user batch creation and removal (`secret add-batch`, `secret remove-batch`).
-
-### v1.0.0 — Initial Release
-
-- Initial launch of MTProxyMax with telemt 3.x Rust engine, interactive TUI, CLI, FakeTLS, Telegram bot, and geo-blocking.
+### v1.0.0 to v1.0.9 — Core Platform Foundation & Telemt Engine Evolutions
+- Initial launch of MTProxyMax with `telemt` Rust engine, interactive TUI, CLI, FakeTLS, master-slave replication (`rsync+SSH`), user tagging, templates, soft-delete archiving, and persistent traffic accounting.
 
 ---
 

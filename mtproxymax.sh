@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.3.1"
+VERSION="1.4.0-LTS"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="${INSTALL_DIR:-/opt/mtproxymax}"
 CONFIG_DIR="${CONFIG_DIR:-${INSTALL_DIR}/mtproxy}"
@@ -29,6 +29,12 @@ ADMINS_FILE="${ADMINS_FILE:-${INSTALL_DIR}/admins.conf}"
 PORTAL_DIR="${PORTAL_DIR:-${INSTALL_DIR}/portal}"
 PORTAL_WWW="${PORTAL_WWW:-${PORTAL_DIR}/www}"
 PORTAL_DATA="${PORTAL_DATA:-${PORTAL_WWW}/data.json}"
+SPEED_LIMITS_FILE="${SPEED_LIMITS_FILE:-${INSTALL_DIR}/speed_limits.conf}"
+FLEET_FILE="${FLEET_FILE:-${INSTALL_DIR}/fleet.conf}"
+FLEET_DATA_DIR="${FLEET_DATA_DIR:-${INSTALL_DIR}/fleet_data}"
+SSL_CONF_FILE="${SSL_CONF_FILE:-${INSTALL_DIR}/ssl.conf}"
+SSL_DIR="${SSL_DIR:-${INSTALL_DIR}/ssl}"
+CLOUD_BACKUP_FILE="${CLOUD_BACKUP_FILE:-${INSTALL_DIR}/cloud_backup.conf}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
@@ -212,6 +218,7 @@ _strlen() {
 # Repeat a character n times (pure bash, no subprocesses)
 _repeat() {
     local char="$1" count="$2" str
+    [ "${count:-0}" -le 0 ] 2>/dev/null && return 0
     printf -v str '%*s' "$count" ''
     printf '%s' "${str// /$char}"
 }
@@ -219,6 +226,7 @@ _repeat() {
 # Draw a horizontal line
 draw_line() {
     local width="${1:-$TERM_WIDTH}" char="${2:-$BOX_H}" color="${3:-$DIM}"
+    [ "${width:-0}" -le 0 ] 2>/dev/null && width=0
     echo -e "${color}$(_repeat "$char" "$width")${NC}"
 }
 
@@ -226,6 +234,7 @@ draw_line() {
 draw_box_top() {
     local width="${1:-$TERM_WIDTH}"
     local inner=$((width - 2))
+    [ "$inner" -lt 0 ] && inner=0
     echo -e "${CYAN}${BOX_TL}$(_repeat "$BOX_H" "$inner")${BOX_TR}${NC}"
 }
 
@@ -233,6 +242,7 @@ draw_box_top() {
 draw_box_bottom() {
     local width="${1:-$TERM_WIDTH}"
     local inner=$((width - 2))
+    [ "$inner" -lt 0 ] && inner=0
     echo -e "${CYAN}${BOX_BL}$(_repeat "$BOX_H" "$inner")${BOX_BR}${NC}"
 }
 
@@ -240,6 +250,7 @@ draw_box_bottom() {
 draw_box_sep() {
     local width="${1:-$TERM_WIDTH}"
     local inner=$((width - 2))
+    [ "$inner" -lt 0 ] && inner=0
     echo -e "${CYAN}${BOX_LT}$(_repeat "$BOX_H" "$inner")${BOX_RT}${NC}"
 }
 
@@ -1453,8 +1464,10 @@ TOML_EOF
     fi
 
     # Append enabled upstream entries
+    local _has_enabled_up=false
     for i in "${!UPSTREAM_NAMES[@]}"; do
         [ "${UPSTREAM_ENABLED[$i]}" = "true" ] || continue
+        _has_enabled_up=true
         echo "" >> "$tmp"
         echo "[[upstreams]]" >> "$tmp"
         echo "type = \"${UPSTREAM_TYPES[$i]}\"" >> "$tmp"
@@ -1474,6 +1487,12 @@ TOML_EOF
             echo "interface = \"${UPSTREAM_IFACES[$i]}\"" >> "$tmp"
         fi
     done
+    if ! $_has_enabled_up; then
+        echo "" >> "$tmp"
+        echo "[[upstreams]]" >> "$tmp"
+        echo "type = \"direct\"" >> "$tmp"
+        echo "weight = 10" >> "$tmp"
+    fi
 
     # Apply engine tunings (replace matching keys in-place before the final copy)
     if [ -f "${_TUNE_FILE:-/dev/null}" ] && [ -s "${_TUNE_FILE}" ]; then
@@ -1543,7 +1562,16 @@ _fetch_metrics() {
         echo "$_METRICS_CACHE"
         return 0
     fi
-    _METRICS_CACHE=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
+    local mport="${PROXY_METRICS_PORT:-9090}"
+    _METRICS_CACHE=$(curl -s --noproxy '*' --max-time 2 "http://127.0.0.1:${mport}/metrics" 2>/dev/null) || true
+    if [ -z "$_METRICS_CACHE" ]; then
+        _METRICS_CACHE=$(curl -s --noproxy '*' --max-time 2 "http://localhost:${mport}/metrics" 2>/dev/null) || true
+    fi
+    if [ -z "$_METRICS_CACHE" ] && [ "${ENGINE_MODE:-docker}" = "docker" ] && command -v docker &>/dev/null; then
+        local _cip
+        _cip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' mtproxymax 2>/dev/null | head -1)
+        [ -n "$_cip" ] && _METRICS_CACHE=$(curl -s --noproxy '*' --max-time 2 "http://${_cip}:${mport}/metrics" 2>/dev/null) || true
+    fi
     _METRICS_CACHE_AGE=$now
     [ -n "$_METRICS_CACHE" ] && echo "$_METRICS_CACHE" && return 0
     return 1
@@ -1885,7 +1913,7 @@ flush_traffic_to_disk() {
                 esac
             fi
         fi
-        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
             [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
             [ "$enabled" != "true" ] && continue
             local ui uo
@@ -2847,10 +2875,10 @@ secret_bulk_extend() {
 
 # Export secrets to CSV (stdout)
 secret_export() {
-    echo "# label|key|enabled|max_conns|max_ips|quota|expires|notes"
+    echo "# label|key|enabled|max_conns|max_ips|quota|expires|notes|ad_tag"
     local i
     for i in "${!SECRETS_LABELS[@]}"; do
-        echo "${SECRETS_LABELS[$i]}|${SECRETS_KEYS[$i]}|${SECRETS_ENABLED[$i]}|${SECRETS_MAX_CONNS[$i]:-0}|${SECRETS_MAX_IPS[$i]:-0}|${SECRETS_QUOTA[$i]:-0}|${SECRETS_EXPIRES[$i]:-0}|${SECRETS_NOTES[$i]:-}"
+        echo "${SECRETS_LABELS[$i]}|${SECRETS_KEYS[$i]}|${SECRETS_ENABLED[$i]}|${SECRETS_MAX_CONNS[$i]:-0}|${SECRETS_MAX_IPS[$i]:-0}|${SECRETS_QUOTA[$i]:-0}|${SECRETS_EXPIRES[$i]:-0}|${SECRETS_NOTES[$i]:-}|${SECRETS_AD_TAGS[$i]:-}"
     done
 }
 
@@ -2861,7 +2889,7 @@ secret_import() {
     [ -f "$file" ] || { log_error "File not found: ${file}"; return 1; }
 
     local added=0 skipped=0
-    while IFS='|' read -r label key enabled max_conns max_ips quota expires notes; do
+    while IFS='|' read -r label key col3 col4 col5 col6 col7 col8 col9 col10 col_rest || [ -n "$label" ]; do
         [[ "$label" =~ ^# ]] || [ -z "$label" ] && continue
         # Skip if label already exists
         local exists=false i
@@ -2876,17 +2904,40 @@ secret_import() {
         [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_warn "Skipping invalid label: ${label}"; continue; }
         [[ "$key" =~ ^[a-fA-F0-9]{32}$ ]] || { log_warn "Skipping invalid key for ${label}"; continue; }
 
+        local created enabled max_conns max_ips quota expires notes ad_tag
+        if [ "$col3" = "true" ] || [ "$col3" = "false" ]; then
+            created="$(date +%s)"
+            enabled="$col3"
+            max_conns="$col4"
+            max_ips="$col5"
+            quota="$col6"
+            expires="$col7"
+            notes="$col8"
+            ad_tag="$col9"
+        else
+            created="${col3:-$(date +%s)}"
+            [[ "$created" =~ ^[0-9]+$ ]] || created="$(date +%s)"
+            enabled="${col4:-true}"
+            max_conns="$col5"
+            max_ips="$col6"
+            quota="$col7"
+            expires="$col8"
+            notes="$col9"
+            ad_tag="$col10"
+        fi
+
         SECRETS_LABELS+=("$label")
         SECRETS_KEYS+=("$key")
-        SECRETS_CREATED+=("$(date +%s)")
+        SECRETS_CREATED+=("$created")
         SECRETS_ENABLED+=("${enabled:-true}")
         SECRETS_MAX_CONNS+=("${max_conns:-0}")
         SECRETS_MAX_IPS+=("${max_ips:-0}")
         SECRETS_QUOTA+=("${quota:-0}")
         SECRETS_EXPIRES+=("${expires:-0}")
         SECRETS_NOTES+=("${notes:-}")
+        SECRETS_AD_TAGS+=("${ad_tag:-}")
         added=$((added + 1))
-    done < "$file"
+    done < <(sed 's/,/|/g' "$file" 2>/dev/null || cat "$file")
 
     if [ $added -gt 0 ]; then
         save_secrets
@@ -2903,6 +2954,8 @@ show_connections() {
         return 1
     fi
 
+    _load_all_cumulative_user_stats 2>/dev/null
+
     local parsed
     parsed=$(echo "$m" | awk '
         function lbl(s, k,    p, q) {
@@ -2917,8 +2970,13 @@ show_connections() {
         /^telemt_user_octets_to_client\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
         /^telemt_connections_current /         { total=$NF }
         END {
+            for (u in uc) users[u]=1
+            for (u in ut) users[u]=1
+            for (u in ui) users[u]=1
+            for (u in rx) users[u]=1
+            for (u in tx) users[u]=1
             printf "T|%.0f\n", total+0
-            for (u in uc)
+            for (u in users)
                 printf "U|%s|%.0f|%.0f|%.0f|%.0f|%.0f\n", u, uc[u]+0, ut[u]+0, ui[u]+0, rx[u]+0, tx[u]+0
         }
     ')
@@ -2937,7 +2995,10 @@ show_connections() {
         printf "  ${BOLD}%-16s %8s %8s %6s %12s %12s${NC}\n" "USER" "ACTIVE" "TOTAL" "IPs" "DOWN" "UP"
         echo -e "  ${DIM}$(_repeat '─' 68)${NC}"
         while IFS='|' read -r _ uname ucur utot uips urx utx; do
-            printf "  %-16s %8s %8s %6s %12s %12s\n" "$uname" "$ucur" "$utot" "$uips" "$(format_bytes "$urx")" "$(format_bytes "$utx")"
+            [ -z "$uname" ] && continue
+            local down="${_batch_cum_in["$uname"]:-$urx}"
+            local up="${_batch_cum_out["$uname"]:-$utx}"
+            printf "  %-16s %8s %8s %6s %12s %12s\n" "$uname" "$ucur" "$utot" "$uips" "$(format_bytes "$down")" "$(format_bytes "$up")"
         done <<< "$user_lines"
     else
         echo -e "  ${DIM}No users connected${NC}"
@@ -2947,7 +3008,7 @@ show_connections() {
 
 # Disable all expired secrets
 secret_disable_expired() {
-    local now_epoch disabled=0
+    local now_epoch disabled=0 _disabled_list=""
     now_epoch=$(date +%s)
 
     local i
@@ -2963,6 +3024,7 @@ secret_disable_expired() {
         if [ "$exp_epoch" -le "$now_epoch" ]; then
             SECRETS_ENABLED[$i]="false"
             disabled=$((disabled + 1))
+            _disabled_list+="${_disabled_list:+\n}  • *$(_esc "${SECRETS_LABELS[$i]}")* (exp: ${exp%%T*})"
             log_info "Disabled expired secret: ${SECRETS_LABELS[$i]} (expired ${exp%%T*})"
         fi
     done
@@ -2970,6 +3032,9 @@ secret_disable_expired() {
     if [ $disabled -gt 0 ]; then
         save_secrets
         reload_proxy_config
+        if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+            tg_send "⏳ *Expired Secrets Deactivated*\n\nAutomatically disabled ${disabled} user secret(s) whose expiration date passed:\n${_disabled_list}"
+        fi
         log_success "Disabled ${disabled} expired secret(s)"
     else
         log_info "No expired secrets found"
@@ -3092,8 +3157,7 @@ secret_stats() {
 # Sort secrets by field
 secret_sort() {
     local field="${1:-traffic}"
-    local m
-    m=$(_fetch_metrics 2>/dev/null) || true
+    _load_all_cumulative_user_stats 2>/dev/null
 
     # Build sortable data: idx|sort_value
     local -a sort_data=()
@@ -3103,18 +3167,10 @@ secret_sort() {
         local val=0
         case "$field" in
             traffic|t)
-                if [ -n "$m" ]; then
-                    local rx tx
-                    rx=$(echo "$m" | awk -v u="$label" '$0 ~ "telemt_user_octets_from_client.*user=\""u"\"" {print $NF}')
-                    tx=$(echo "$m" | awk -v u="$label" '$0 ~ "telemt_user_octets_to_client.*user=\""u"\"" {print $NF}')
-                    val=$(( ${rx:-0} + ${tx:-0} ))
-                fi
+                val=$(( ${_batch_cum_in["$label"]:-0} + ${_batch_cum_out["$label"]:-0} ))
                 ;;
             conns|c)
-                if [ -n "$m" ]; then
-                    val=$(echo "$m" | awk -v u="$label" '$0 ~ "telemt_user_connections_current.*user=\""u"\"" {print $NF}')
-                    val=${val:-0}
-                fi
+                val=${_batch_cum_conns["$label"]:-0}
                 ;;
             date|d) val="${SECRETS_CREATED[$i]}" ;;
             name|n) ;; # handled separately
@@ -3275,6 +3331,25 @@ run_doctor() {
             fi
             rm -f "$_cfg"
         fi
+    fi
+
+    # v1.4.0-LTS Health Checks
+    load_ssl_config 2>/dev/null || true
+    if [ "${SSL_ENABLED:-false}" = "true" ] && [ -n "${SSL_DOMAIN:-}" ]; then
+        if [ -f "${SSL_DIR}/${SSL_DOMAIN}.crt" ]; then
+            echo -e "  ${GREEN}${SYM_CHECK}${NC} SSL Shield active for ${SSL_DOMAIN}"
+        else
+            echo -e "  ${RED}${SYM_CROSS}${NC} SSL Shield enabled for ${SSL_DOMAIN} but cert file missing"
+            issues=$((issues + 1))
+        fi
+    fi
+    load_speed_limits 2>/dev/null || true
+    if [ "${#SPEED_LIMIT_TARGETS[@]}" -gt 0 ]; then
+        echo -e "  ${GREEN}${SYM_CHECK}${NC} QoS Bandwidth shaping active (${#SPEED_LIMIT_TARGETS[@]} target(s))"
+    fi
+    load_cloud_backup_config 2>/dev/null || true
+    if [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ]; then
+        echo -e "  ${GREEN}${SYM_CHECK}${NC} Cloud Backups enabled (${CLOUD_BACKUP_MODE:-telegram} -> ${CLOUD_BACKUP_TARGET:-admin})"
     fi
 
     echo ""
@@ -3653,7 +3728,14 @@ secret_export_json() {
         if [ "$first" = "true" ]; then first=false; else json="${json},\n"; fi
         local enabled_bool=true
         [ "${SECRETS_ENABLED[$i]}" = "false" ] && enabled_bool=false
-        json="${json}  {\"label\": \"${SECRETS_LABELS[$i]}\", \"key\": \"${SECRETS_KEYS[$i]}\", \"enabled\": ${enabled_bool}, \"max_conns\": ${SECRETS_MAX_CONNS[$i]:-0}, \"max_ips\": ${SECRETS_MAX_IPS[$i]:-0}, \"quota_bytes\": ${SECRETS_QUOTA[$i]:-0}, \"expires_epoch\": ${SECRETS_EXPIRES[$i]:-0}}"
+        local exp_raw="${SECRETS_EXPIRES[$i]:-0}"
+        local exp_epoch=0
+        [ "$exp_raw" != "0" ] && exp_epoch=$(_iso_to_epoch "$exp_raw")
+        local notes_clean="${SECRETS_NOTES[$i]:-}"
+        notes_clean="${notes_clean//\"/\\\"}"
+        local adtag_clean="${SECRETS_AD_TAGS[$i]:-}"
+        adtag_clean="${adtag_clean//\"/\\\"}"
+        json="${json}  {\"label\": \"${SECRETS_LABELS[$i]}\", \"key\": \"${SECRETS_KEYS[$i]}\", \"enabled\": ${enabled_bool}, \"max_conns\": ${SECRETS_MAX_CONNS[$i]:-0}, \"max_ips\": ${SECRETS_MAX_IPS[$i]:-0}, \"quota_bytes\": ${SECRETS_QUOTA[$i]:-0}, \"expires_iso\": \"${exp_raw}\", \"expires_epoch\": ${exp_epoch}, \"notes\": \"${notes_clean}\", \"ad_tag\": \"${adtag_clean}\"}"
     done
     json="${json}\n]\n"
     printf "%b" "$json"
@@ -3762,9 +3844,9 @@ profile_save() {
 
     local dir="${PROFILES_DIR}/${name}"
     mkdir -p "$dir"
-    cp "$SETTINGS_FILE" "${dir}/settings.conf" 2>/dev/null || true
-    cp "$SECRETS_FILE" "${dir}/secrets.conf" 2>/dev/null || true
-    cp "$UPSTREAMS_FILE" "${dir}/upstreams.conf" 2>/dev/null || true
+    for f in "${MIGRATION_FILES[@]}"; do
+        [ -f "$f" ] && cp "$f" "${dir}/$(basename "$f")" 2>/dev/null || true
+    done
     echo "$(date +%s)" > "${dir}/.timestamp"
     log_success "Profile '${name}' saved"
 }
@@ -3776,9 +3858,10 @@ profile_load() {
     local dir="${PROFILES_DIR}/${name}"
     [ -d "$dir" ] || { log_error "Profile '${name}' not found"; return 1; }
 
-    [ -f "${dir}/settings.conf" ] && cp "${dir}/settings.conf" "$SETTINGS_FILE"
-    [ -f "${dir}/secrets.conf" ] && cp "${dir}/secrets.conf" "$SECRETS_FILE"
-    [ -f "${dir}/upstreams.conf" ] && cp "${dir}/upstreams.conf" "$UPSTREAMS_FILE"
+    for f in "${MIGRATION_FILES[@]}"; do
+        local b; b=$(basename "$f")
+        [ -f "${dir}/${b}" ] && cp "${dir}/${b}" "$f" 2>/dev/null || true
+    done
 
     load_settings
     load_secrets
@@ -4053,7 +4136,7 @@ secret_logs() {
 }
 
 # ── Server migration: export/import ──
-MIGRATION_FILES=("$SETTINGS_FILE" "$SECRETS_FILE" "$UPSTREAMS_FILE" "$INSTANCES_FILE" "$_TAGS_FILE" "${INSTALL_DIR}/secrets_archive.conf" "$BANLIST_FILE")
+MIGRATION_FILES=("$SETTINGS_FILE" "$SECRETS_FILE" "$UPSTREAMS_FILE" "$INSTANCES_FILE" "$_TAGS_FILE" "${INSTALL_DIR}/secrets_archive.conf" "$BANLIST_FILE" "$SPEED_LIMITS_FILE" "$FLEET_FILE" "$SSL_CONF_FILE" "$CLOUD_BACKUP_FILE" "${INSTALL_DIR}/pools.conf" "${INSTALL_DIR}/calendar.conf" "${INSTALL_DIR}/webhooks.conf" "${INSTALL_DIR}/geofence.conf" "${INSTALL_DIR}/decoy.conf" "${INSTALL_DIR}/failover.conf" "${INSTALL_DIR}/eco_mode.conf" "$VOUCHERS_FILE" "$ADMINS_FILE")
 
 migrate_export() {
     local out="${1:-$(get_export_dir)/mtproxymax-migrate-$(date +%Y%m%d-%H%M%S).tar.gz}"
@@ -4063,8 +4146,12 @@ migrate_export() {
     for f in "${MIGRATION_FILES[@]}"; do
         [ -f "$f" ] && { cp "$f" "$tmp/$(basename "$f")" 2>/dev/null && count=$((count + 1)); }
     done
-    # Also include profiles/ if present
+    # Also include profiles/ and v1.4 directories if present
     [ -d "${INSTALL_DIR}/profiles" ] && cp -r "${INSTALL_DIR}/profiles" "$tmp/" 2>/dev/null
+    [ -d "$SSL_DIR" ] && cp -r "$SSL_DIR" "$tmp/" 2>/dev/null
+    [ -d "$FLEET_DATA_DIR" ] && cp -r "$FLEET_DATA_DIR" "$tmp/" 2>/dev/null
+    [ -d "$STATS_DIR" ] && cp -r "$STATS_DIR" "$tmp/" 2>/dev/null
+    [ -f "${INSTALL_DIR}/connection.log" ] && cp "${INSTALL_DIR}/connection.log" "$tmp/" 2>/dev/null
     echo "v${VERSION}" > "$tmp/MIGRATE_VERSION"
     tar -czf "$out" -C "$tmp" . 2>/dev/null && log_success "Exported ${count} file(s) to ${out}" || { log_error "Export failed"; rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
@@ -4093,8 +4180,12 @@ migrate_import() {
         base=$(basename "$f")
         [ -f "${tmp}/${base}" ] && { cp "${tmp}/${base}" "$f" && chmod 600 "$f" && restored=$((restored + 1)); }
     done
-    # Restore profiles if present
+    # Restore profiles and v1.4 directories if present
     [ -d "${tmp}/profiles" ] && { rm -rf "${INSTALL_DIR}/profiles"; cp -r "${tmp}/profiles" "${INSTALL_DIR}/"; }
+    [ -d "${tmp}/ssl" ] && { rm -rf "$SSL_DIR"; cp -r "${tmp}/ssl" "$SSL_DIR" 2>/dev/null; }
+    [ -d "${tmp}/fleet_data" ] && { rm -rf "$FLEET_DATA_DIR"; cp -r "${tmp}/fleet_data" "$FLEET_DATA_DIR" 2>/dev/null; }
+    [ -d "${tmp}/relay_stats" ] && { rm -rf "$STATS_DIR"; cp -r "${tmp}/relay_stats" "$STATS_DIR" 2>/dev/null; }
+    [ -f "${tmp}/connection.log" ] && cp "${tmp}/connection.log" "${INSTALL_DIR}/connection.log" 2>/dev/null
 
     rm -rf "$tmp"
     load_settings
@@ -4145,6 +4236,7 @@ backup_create_encrypted() {
         chmod 600 "$enc"
         rm -f "$plain"
         log_success "Encrypted backup saved: ${enc}"
+        backup_cloud_push "$enc" 2>/dev/null || true
         log_info "Keep your password safe — backup cannot be decrypted without it."
     else
         log_error "Encryption failed"
@@ -4237,11 +4329,23 @@ show_server_info() {
     local bot_status="disabled"
     [ "${TELEGRAM_ENABLED:-false}" = "true" ] && bot_status="enabled"
     local repl_role="${REPLICATION_ROLE:-standalone}"
+    local ssl_st="disabled"
+    load_ssl_config 2>/dev/null || true
+    [ "${SSL_ENABLED:-false}" = "true" ] && ssl_st="active (${SSL_DOMAIN})"
+    local qos_st="disabled"
+    load_speed_limits 2>/dev/null || true
+    [ "${#SPEED_LIMIT_TARGETS[@]}" -gt 0 ] && qos_st="active (${#SPEED_LIMIT_TARGETS[@]} rule(s))"
+    local cb_st="disabled"
+    load_cloud_backup_config 2>/dev/null || true
+    [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ] && cb_st="active (${CLOUD_BACKUP_MODE:-telegram})"
 
     echo -e "  ${BOLD}Services${NC}"
     echo -e "    Proxy:        ${proxy_status}"
     echo -e "    Telegram bot: ${bot_status}"
     echo -e "    Replication:  ${repl_role}"
+    echo -e "    SSL Shield:   ${ssl_st}"
+    echo -e "    QoS shaping:  ${qos_st}"
+    echo -e "    Cloud Backup: ${cb_st}"
     if [ -f "$MAINTENANCE_FILE" ]; then
         echo -e "    Maintenance:  ${YELLOW}ON${NC}"
     fi
@@ -4784,7 +4888,7 @@ _mtproxymax_completion() {
 
     # Top-level commands
     if [ "$COMP_CWORD" -eq 1 ]; then
-        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate"
+        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate speed-limit fleet ssl backup-cloud"
         COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
         return 0
     fi
@@ -4861,6 +4965,33 @@ _mtproxymax_completion() {
             ;;
         domain-pool)
             [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "get" -- "${cur}") )
+            ;;
+        speed-limit)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "set remove apply clear list status" -- "${cur}") )
+            ;;
+        fleet)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "status collect" -- "${cur}") )
+            ;;
+        ssl)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "issue status clear" -- "${cur}") )
+            ;;
+        backup-cloud)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "toggle push status off" -- "${cur}") )
+            ;;
+        instance)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "add remove list status sync" -- "${cur}") )
+            ;;
+        voucher)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "generate list redeem revoke purge" -- "${cur}") )
+            ;;
+        portal)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "on off status generate" -- "${cur}") )
+            ;;
+        quota-mode)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "manager engine status" -- "${cur}") )
+            ;;
+        ddns)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "setup update status disable" -- "${cur}") )
             ;;
     esac
     return 0
@@ -4979,16 +5110,25 @@ run_ping_dc() {
 # Apply or clean up kernel firewall anti-DPI rules
 apply_firewall_rules() {
     [ -z "${PROXY_PORT:-}" ] && return 0
+    local -a _all_ports=("${PROXY_PORT}")
+    load_instances 2>/dev/null || true
+    local _ip _p
+    for _ip in "${INSTANCE_PORTS[@]}"; do
+        [ -n "$_ip" ] && _all_ports+=("$_ip")
+    done
+
     if command -v iptables >/dev/null 2>&1; then
-        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn 2>/dev/null; do :; done
-        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null; do :; done
-        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -j DROP 2>/dev/null; do :; done
-        while iptables -D INPUT -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
-        for _chain in FORWARD OUTPUT POSTROUTING; do
-            while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-            while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-            while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
-            while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+        for _p in "${_all_ports[@]}"; do
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn 2>/dev/null; do :; done
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null; do :; done
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -j DROP 2>/dev/null; do :; done
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
+            for _chain in FORWARD OUTPUT POSTROUTING; do
+                while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${_p}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+                while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${_p}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+                while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${_p}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+                while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --sport "${_p}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+            done
         done
     fi
     if command -v nft >/dev/null 2>&1; then
@@ -4999,31 +5139,39 @@ apply_firewall_rules() {
     if [ "${STEALTH_SHIELD:-false}" = "true" ]; then
         local _shield_ok=false
         if command -v iptables >/dev/null 2>&1; then
-            iptables -I INPUT 1 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null && \
-            iptables -I INPUT 2 -p tcp --dport "${PROXY_PORT}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null && _shield_ok=true || true
+            for _p in "${_all_ports[@]}"; do
+                iptables -I INPUT 1 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null && \
+                iptables -I INPUT 2 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null && _shield_ok=true || true
+            done
         fi
         if [ "$_shield_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
             nft add table inet mtproxymax_shield 2>/dev/null || true
             nft add chain inet mtproxymax_shield input '{ type filter hook input priority filter; policy accept; }' 2>/dev/null || true
             nft add set inet mtproxymax_shield syn_meter '{ type ipv4_addr; flags dynamic,timeout; timeout 5s; }' 2>/dev/null || true
-            nft add rule inet mtproxymax_shield input tcp dport "$PROXY_PORT" ct state new add @syn_meter '{ ip saddr limit rate over 15/second }' counter drop 2>/dev/null && _shield_ok=true || true
+            for _p in "${_all_ports[@]}"; do
+                nft add rule inet mtproxymax_shield input tcp dport "${_p}" ct state new add @syn_meter '{ ip saddr limit rate over 15/second }' counter drop 2>/dev/null && _shield_ok=true || true
+            done
         fi
     fi
 
     if [ "${STEALTH_MSS_CLAMP:-false}" = "true" ]; then
         local _mss_ok=false
         if command -v iptables >/dev/null 2>&1; then
-            for _chain in FORWARD OUTPUT POSTROUTING; do
-                iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null && _mss_ok=true || true
-                iptables -t mangle -I "$_chain" 2 -p tcp --tcp-flags SYN,RST SYN --sport "${PROXY_PORT}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+            for _p in "${_all_ports[@]}"; do
+                for _chain in FORWARD OUTPUT POSTROUTING; do
+                    iptables -t mangle -I "$_chain" 1 -p tcp --tcp-flags SYN,RST SYN --dport "${_p}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null && _mss_ok=true || true
+                    iptables -t mangle -I "$_chain" 2 -p tcp --tcp-flags SYN,RST SYN --sport "${_p}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+                done
             done
         fi
         if [ "$_mss_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
             nft add table inet mtproxymax_mss 2>/dev/null || true
             nft add chain inet mtproxymax_mss forward '{ type filter hook forward priority mangle; policy accept; }' 2>/dev/null || true
             nft add chain inet mtproxymax_mss postrouting '{ type filter hook postrouting priority mangle; policy accept; }' 2>/dev/null || true
-            nft add rule inet mtproxymax_mss forward tcp flags '& (syn|rst) == syn' tcp dport "$PROXY_PORT" tcp option maxseg size set rt mtu 2>/dev/null && _mss_ok=true || true
-            nft add rule inet mtproxymax_mss postrouting tcp flags '& (syn|rst) == syn' tcp sport "$PROXY_PORT" tcp option maxseg size set rt mtu 2>/dev/null || true
+            for _p in "${_all_ports[@]}"; do
+                nft add rule inet mtproxymax_mss forward tcp flags '& (syn|rst) == syn' tcp dport "${_p}" tcp option maxseg size set rt mtu 2>/dev/null && _mss_ok=true || true
+                nft add rule inet mtproxymax_mss postrouting tcp flags '& (syn|rst) == syn' tcp sport "${_p}" tcp option maxseg size set rt mtu 2>/dev/null || true
+            done
         fi
     fi
     apply_qos_rules
@@ -5764,6 +5912,7 @@ run_broadcast() {
 run_export_lb() {
     local target="${1:-all}"
     load_settings
+    load_ssl_config 2>/dev/null || true
     local port="${PROXY_PORT:-443}"
     local proto_flag=""
     [ "${PROXY_PROTOCOL:-false}" = "true" ] && proto_flag=" send-proxy-v2"
@@ -5772,13 +5921,25 @@ run_export_lb() {
     if [ "$target" = "haproxy" ] || [ "$target" = "all" ]; then
         echo -e "  ${CYAN}${BOLD}HAProxy Configuration Snippet (/etc/haproxy/haproxy.cfg):${NC}"
         cat <<EOF
-# Frontend accepting incoming client connections
+# Frontend accepting incoming client connections (TCP Passthrough)
 frontend ft_mtproxy
     bind *:${port}
     mode tcp
     option tcplog
     timeout client 1h
     default_backend bk_mtproxymax
+EOF
+        if [ "${SSL_ENABLED:-false}" = "true" ] && [ -n "${SSL_DOMAIN:-}" ]; then
+            cat <<EOF
+
+# Optional: TLS Termination using MTProxyMax SSL Shield certificate
+# frontend ft_mtproxy_ssl
+#     bind *:8443 ssl crt ${SSL_DIR}/${SSL_DOMAIN}.crt
+#     mode tcp
+#     default_backend bk_mtproxymax
+EOF
+        fi
+        cat <<EOF
 
 # Backend routing to local MTProxyMax instance
 backend bk_mtproxymax
@@ -5806,6 +5967,20 @@ stream {
         proxy_connect_timeout 5s;
 ${proxy_protocol_line}
     }
+EOF
+        if [ "${SSL_ENABLED:-false}" = "true" ] && [ -n "${SSL_DOMAIN:-}" ]; then
+            cat <<EOF
+
+    # Optional: TLS Termination using MTProxyMax SSL Shield
+    # server {
+    #     listen 8443 ssl;
+    #     ssl_certificate ${SSL_DIR}/${SSL_DOMAIN}.crt;
+    #     ssl_certificate_key ${SSL_DIR}/${SSL_DOMAIN}.key;
+    #     proxy_pass mtproxymax_backend;
+    # }
+EOF
+        fi
+        cat <<EOF
 }
 EOF
         echo ""
@@ -5909,8 +6084,15 @@ run_diag_dump() {
     
     log_info "Collecting firewall and networking rules..."
     iptables -S > "${dump_dir}/iptables_rules.txt" 2>&1 || true
+    iptables -t mangle -S > "${dump_dir}/iptables_mangle.txt" 2>&1 || true
     ip route > "${dump_dir}/routes.txt" 2>&1 || true
     sysctl -a 2>/dev/null | grep -E "net.ipv4.tcp|net.core" > "${dump_dir}/kernel_sysctl.txt" || true
+    # HTB QoS forensics
+    local _diag_iface; _diag_iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1 || true)
+    [ -z "$_diag_iface" ] && _diag_iface="eth0"
+    tc qdisc show dev "$_diag_iface" > "${dump_dir}/tc_qdisc.txt" 2>&1 || true
+    tc class show dev "$_diag_iface" > "${dump_dir}/tc_class.txt" 2>&1 || true
+    tc filter show dev "$_diag_iface" > "${dump_dir}/tc_filter.txt" 2>&1 || true
     
     log_info "Collecting container inspect and logs..."
     docker inspect "$CONTAINER_NAME" > "${dump_dir}/docker_inspect.txt" 2>&1 || true
@@ -5938,10 +6120,11 @@ run_snapshot() {
             [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || { log_error "Invalid snapshot name (use a-z, 0-9, _, -)"; return 1; }
             local target="${snap_dir}/${name}.tar.gz"
             local -a _snap_files=()
-            for _f in settings.conf secrets.conf upstreams.conf tunings.conf banlist.conf; do
+            for _f in settings.conf secrets.conf upstreams.conf tunings.conf banlist.conf speed_limits.conf ssl.conf cloud_backup.conf; do
                 [ -f "${INSTALL_DIR}/${_f}" ] && _snap_files+=("$_f")
             done
             [ -d "${INSTALL_DIR}/profiles" ] && _snap_files+=("profiles")
+            [ -d "${INSTALL_DIR}/ssl" ] && _snap_files+=("ssl")
             tar -czf "$target" -C "$INSTALL_DIR" "${_snap_files[@]}" 2>/dev/null || true
             log_success "Config snapshot created: ${CYAN}${target}${NC}"
             ;;
@@ -6440,7 +6623,10 @@ run_geo_fence() {
         status|"")
             echo -e "\n  ── 🌍 ${BOLD}Geo-Fence IP Country Blocking & Allow-Only Whitelist${NC} ──\n"
             local mode="off" countries=""
-            [ -f "$geo_file" ] && { source "$geo_file" 2>/dev/null || true; }
+            if [ -f "$geo_file" ]; then
+                mode=$(grep -E '^mode=' "$geo_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "off")
+                countries=$(grep -E '^countries=' "$geo_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "")
+            fi
             
             local st="${YELLOW}DISABLED${NC}"
             if [ "$mode" = "allow" ]; then
@@ -6496,7 +6682,11 @@ run_decoy_web() {
         status|"")
             echo -e "\n  ── 🛡️ ${BOLD}Decoy Camouflage Web Server (Anti-Active Probing)${NC} ──\n"
             local d_status="disabled" d_port="8080" d_tmpl="cloud"
-            [ -f "$decoy_file" ] && { source "$decoy_file" 2>/dev/null || true; }
+            if [ -f "$decoy_file" ]; then
+                d_status=$(grep -E '^d_status=' "$decoy_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "disabled")
+                d_port=$(grep -E '^d_port=' "$decoy_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "8080")
+                d_tmpl=$(grep -E '^d_tmpl=' "$decoy_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "cloud")
+            fi
             
             local st="${YELLOW}DISABLED${NC}"
             [ "$d_status" = "enabled" ] && st="${GREEN}ACTIVE (Serving '${d_tmpl}' camouflage theme on port ${d_port})${NC}"
@@ -6795,7 +6985,10 @@ run_auto_failover() {
         status|"")
             echo -e "\n  ── 🔄 ${BOLD}Autonomous Upstream Failover & DNS Health Watchdog${NC} ──\n"
             local fo_status="disabled" fo_mode="backend"
-            [ -f "$fo_file" ] && { source "$fo_file" 2>/dev/null || true; }
+            if [ -f "$fo_file" ]; then
+                fo_status=$(grep -E '^fo_status=' "$fo_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "disabled")
+                fo_mode=$(grep -E '^fo_mode=' "$fo_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "backend")
+            fi
             
             local st="${YELLOW}DISABLED${NC}"
             [ "$fo_status" = "enabled" ] && st="${GREEN}ACTIVE (Mode: ${fo_mode^^})${NC}"
@@ -6834,7 +7027,9 @@ run_eco_mode() {
         status|"")
             echo -e "\n  ── 🍃 ${BOLD}Eco-Mode RAM & CPU Throttling (Micro-Server Conservation)${NC} ──\n"
             local eco_status="disabled"
-            [ -f "$eco_file" ] && { source "$eco_file" 2>/dev/null || true; }
+            if [ -f "$eco_file" ]; then
+                eco_status=$(grep -E '^eco_status=' "$eco_file" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "disabled")
+            fi
             
             local st="${YELLOW}DISABLED (Standard performance)${NC}"
             [ "$eco_status" = "enabled" ] && st="${GREEN}ACTIVE (Ultra-low memory footprint & buffer throttling)${NC}"
@@ -6963,7 +7158,7 @@ run_backup_send_tg() {
     if [ -z "$target_file" ]; then
         log_info "Creating fresh backup before sending to Telegram..."
         create_backup >/dev/null 2>&1
-        target_file=$(ls -t "${BACKUP_DIR:-${INSTALL_DIR}/backups}"/mtproxymax-*.tar.gz 2>/dev/null | head -1)
+        target_file=$(ls -t "${BACKUP_DIR:-${INSTALL_DIR}/backups}"/mtproxymax-*.tar.gz* 2>/dev/null | head -1)
     fi
     if [ -z "$target_file" ] || [ ! -f "$target_file" ]; then
         log_error "Backup file not found: ${target_file}"
@@ -7021,7 +7216,17 @@ run_daily_report() {
             msg+="👥 *Users:* ${active_users} active (${total_users} total)\n"
             msg+="🛡️ *Anti-DPI Score:* ${score}/100\n"
             msg+="🏎️ *QoS Limit:* ${QOS_LIMIT_MBPS:-Disabled} Mbps\n"
-            msg+="🌐 *Multi-Domain Pool:* ${PROXY_DOMAIN:-Default}"
+            msg+="🌐 *Multi-Domain Pool:* ${PROXY_DOMAIN:-Default}\n"
+            # v1.4 LTS details
+            load_ssl_config 2>/dev/null || true
+            local ssl_brief="Disabled"; [ "${SSL_ENABLED:-false}" = "true" ] && ssl_brief="Active (${SSL_DOMAIN})"
+            msg+="🔐 *SSL Shield:* ${ssl_brief}\n"
+            load_speed_limits 2>/dev/null || true
+            local sl_brief="None"; [ "${#SPEED_LIMIT_TARGETS[@]}" -gt 0 ] && sl_brief="${#SPEED_LIMIT_TARGETS[@]} rule(s)"
+            msg+="🚀 *HTB QoS:* ${sl_brief}\n"
+            load_cloud_backup_config 2>/dev/null || true
+            local cb_brief="Disabled"; [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ] && cb_brief="Active (${CLOUD_BACKUP_MODE:-telegram})"
+            msg+="☁️ *Cloud Backup:* ${cb_brief}"
             tg_send "$msg"
             log_success "Daily briefing sent to Telegram."
             ;;
@@ -7357,8 +7562,10 @@ run_heal() {
     check_root
     echo -e "\n  🏥 ${BOLD}Emergency RAM & Socket Auto-Healer Execution${NC}\n"
     local ram_before sockets_before
-    ram_before=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' || echo "0")
+    ram_before=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' | head -1 | tr -cd '0-9' || echo "0")
+    [ -z "$ram_before" ] && ram_before=0
     sockets_before=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
+    [ -z "$sockets_before" ] && sockets_before=0
 
     log_info "Reclaiming OS pagecache & unassigned buffer memory..."
     sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
@@ -7373,8 +7580,10 @@ run_heal() {
     fi
 
     local ram_after sockets_after freed_ram
-    ram_after=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' || echo "0")
+    ram_after=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' | head -1 | tr -cd '0-9' || echo "0")
+    [ -z "$ram_after" ] && ram_after=0
     sockets_after=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
+    [ -z "$sockets_after" ] && sockets_after=0
     freed_ram=$((ram_after - ram_before))
     if [ "$freed_ram" -lt 0 ]; then freed_ram=0; fi
 
@@ -8641,26 +8850,21 @@ upstream_test() {
 
     log_info "Testing ${type} proxy at ${addr}..."
 
-    local proxy_url
+    local proxy_scheme="$type"
+    [ "$proxy_scheme" = "socks5" ] && proxy_scheme="socks5h"
+    local proxy_url="${proxy_scheme}://${addr}"
+    local proxy_auth=()
     local proxy_user="${UPSTREAM_USERS[$idx]}"
     local proxy_pass="${UPSTREAM_PASSES[$idx]}"
 
     if [ "$type" = "socks4" ] && [ -n "$proxy_user" ]; then
-        # SOCKS4 uses user_id only (no password)
-        proxy_url="socks4://${proxy_user}@${addr}"
-    elif [ -n "$proxy_user" ] && [ -n "$proxy_pass" ]; then
-        proxy_url="${type}://${proxy_user}:${proxy_pass}@${addr}"
-    elif [ -n "$proxy_user" ]; then
-        proxy_url="${type}://${proxy_user}@${addr}"
-    else
-        proxy_url="${type}://${addr}"
+        proxy_auth=(-U "${proxy_user}:")
+    elif [ -n "$proxy_user" ] || [ -n "$proxy_pass" ]; then
+        proxy_auth=(-U "${proxy_user}:${proxy_pass}")
     fi
 
-    # socks5 -> socks5h for remote DNS resolution
-    proxy_url="${proxy_url/socks5:\/\//socks5h:\/\/}"
-
     local result
-    if result=$(curl -sf --max-time 15 "${iface_opt[@]}" -x "$proxy_url" https://api.ipify.org 2>/dev/null) && [[ "$result" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if result=$(curl -sf --max-time 15 "${iface_opt[@]}" -x "$proxy_url" "${proxy_auth[@]}" https://api.ipify.org 2>/dev/null) && [[ "$result" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         log_success "${type} proxy OK — Exit IP: ${result}"
     else
         log_error "${type} proxy at ${addr} failed"
@@ -8773,6 +8977,7 @@ stop_proxy_container() {
         docker update --restart=no "$CONTAINER_NAME" &>/dev/null || true
         if docker stop --timeout 10 "$CONTAINER_NAME" 2>/dev/null; then
             traffic_tracking_teardown
+            speed_limit_clear 2>/dev/null || true
             # Signal intentional stop — prevents bot auto-recovery from restarting
             echo "$(date +%s)" > /tmp/.mtproxymax_stopped 2>/dev/null || true
             log_success "Proxy stopped"
@@ -8799,21 +9004,26 @@ _stop_all_instances() {
 _start_all_instances() {
     [ -f "$INSTANCES_FILE" ] || return 0
     load_instances 2>/dev/null
-    local i
+    local i _orig_port="$PROXY_PORT" _orig_mport="$PROXY_METRICS_PORT"
     for i in "${!INSTANCE_PORTS[@]}"; do
         [ "${INSTANCE_ENABLED[$i]}" = "true" ] || continue
         local cname="mtproxymax-${INSTANCE_PORTS[$i]}"
         docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cname}$" && continue
-        # Regenerate instance config
+        # Regenerate instance config dynamically
         local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
-        if [ -f "$inst_config" ]; then
-            docker rm -f "$cname" &>/dev/null || true
-            docker run -d --name "$cname" --restart unless-stopped --network host \
-                --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
-                -v "${inst_config}:/etc/telemt.toml:ro" \
-                "$(get_docker_image)" /etc/telemt.toml &>/dev/null
-        fi
+        PROXY_PORT="${INSTANCE_PORTS[$i]}"
+        PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
+        generate_telemt_config
+        mv "${CONFIG_DIR}/config.toml" "$inst_config" 2>/dev/null
+        docker rm -f "$cname" &>/dev/null || true
+        docker run -d --name "$cname" --restart unless-stopped --network host \
+            --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
+            -v "${inst_config}:/etc/telemt.toml:ro" \
+            "$(get_docker_image)" /etc/telemt.toml &>/dev/null
     done
+    PROXY_PORT="$_orig_port"
+    PROXY_METRICS_PORT="$_orig_mport"
+    generate_telemt_config
 }
 
 start_proxy_container() {
@@ -8831,6 +9041,7 @@ start_proxy_container() {
     # Also start secondary instances
     _start_all_instances 2>/dev/null
     apply_firewall_rules 2>/dev/null || true
+    speed_limit_apply 2>/dev/null || true
 }
 
 restart_proxy_container() {
@@ -8839,6 +9050,7 @@ restart_proxy_container() {
     run_proxy_container
     _start_all_instances 2>/dev/null
     apply_firewall_rules 2>/dev/null || true
+    speed_limit_apply 2>/dev/null || true
 }
 
 # Hot-reload: rewrite config.toml and let the engine pick it up (no restart, no dropped connections)
@@ -8871,6 +9083,7 @@ reload_proxy_config() {
         generate_telemt_config
     fi
 
+    speed_limit_apply 2>/dev/null || true
     log_info "Config reloaded (hot-reload, no restart)"
 }
 
@@ -9640,7 +9853,7 @@ admin_list() {
     echo ""
     printf "  %-15s %-12s %-20s %-12s\n" "TELEGRAM ID" "ROLE" "LABEL" "ADDED"
     draw_line
-    while IFS='|' read -r id role label added; do
+    while IFS='|' read -r id role label added || [ -n "$id" ]; do
         [[ "$id" =~ ^# ]] && continue; [ -z "$id" ] && continue
         local r_col="$CYAN"; [ "$role" = "superadmin" ] && r_col="$BRIGHT_GREEN"
         printf "  %-15s ${r_col}%-12s${NC} %-20s %-12s\n" "$id" "$role" "${label:-Admin}" "${added:-}"
@@ -9680,7 +9893,7 @@ JSON_EOF
 
     local first="true"
     if [ -f "$SECRETS_FILE" ]; then
-        while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+        while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
             [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
             local fs="ee${secret}${dh}"
             local ui=${_batch_cum_in["$label"]:-0} uo=${_batch_cum_out["$label"]:-0}
@@ -9839,6 +10052,445 @@ scanner_shield_update() {
         for sub in "${subnets[@]}"; do
             nft add element inet mtproxymax_scanners blacklist "{ $sub }" 2>/dev/null || true
         done
+    fi
+}
+
+# ── Section 13g: Suite 1 — Real-Time QoS Bandwidth Throttling (speed-limit) ──
+
+load_speed_limits() {
+    [ -f "$SPEED_LIMITS_FILE" ] || return 0
+    SPEED_LIMIT_TARGETS=()
+    SPEED_LIMIT_TYPES=()
+    SPEED_LIMIT_DOWN=()
+    SPEED_LIMIT_UP=()
+    SPEED_LIMIT_ENABLED=()
+    while IFS='|' read -r target type down up enabled; do
+        [[ "$target" =~ ^# ]] && continue
+        [ -z "$target" ] && continue
+        SPEED_LIMIT_TARGETS+=("$target")
+        SPEED_LIMIT_TYPES+=("$type")
+        SPEED_LIMIT_DOWN+=("$down")
+        SPEED_LIMIT_UP+=("$up")
+        SPEED_LIMIT_ENABLED+=("${enabled:-true}")
+    done < "$SPEED_LIMITS_FILE"
+}
+
+save_speed_limits() {
+    local tmp; tmp=$(_mktemp) || return 1
+    for i in "${!SPEED_LIMIT_TARGETS[@]}"; do
+        echo "${SPEED_LIMIT_TARGETS[$i]}|${SPEED_LIMIT_TYPES[$i]}|${SPEED_LIMIT_DOWN[$i]}|${SPEED_LIMIT_UP[$i]}|${SPEED_LIMIT_ENABLED[$i]}" >> "$tmp"
+    done
+    cp "$tmp" "$SPEED_LIMITS_FILE" && chmod 600 "$SPEED_LIMITS_FILE"
+    rm -f "$tmp"
+}
+
+speed_limit_clear() {
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1 || true)
+    [ -z "$iface" ] && iface="eth0"
+    if command -v tc &>/dev/null; then
+        tc qdisc del dev "$iface" root 2>/dev/null || true
+    fi
+    # Also clean iptables marks if any
+    if command -v iptables &>/dev/null; then
+        iptables -t mangle -D PREROUTING -j MTPROXYMAX_QOS 2>/dev/null || true
+        iptables -t mangle -D POSTROUTING -j MTPROXYMAX_QOS 2>/dev/null || true
+        iptables -t mangle -F MTPROXYMAX_QOS 2>/dev/null || true
+        iptables -t mangle -X MTPROXYMAX_QOS 2>/dev/null || true
+    fi
+}
+
+speed_limit_apply() {
+    speed_limit_clear
+    load_speed_limits
+    [ "${#SPEED_LIMIT_TARGETS[@]}" -eq 0 ] && return 0
+
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5}' | head -1 || true)
+    [ -z "$iface" ] && iface="eth0"
+
+    if ! command -v tc &>/dev/null; then
+        log_warn "Linux 'tc' (Traffic Control) not installed. Installing or skipping QoS..."
+        if command -v apt-get &>/dev/null; then apt-get update -qq && apt-get install -y -qq iproute2 2>/dev/null || true; fi
+    fi
+    if ! command -v tc &>/dev/null; then return 0; fi
+
+    # Create HTB root qdisc with handle 1:
+    tc qdisc add dev "$iface" root handle 1: htb default 10 2>/dev/null || return 0
+    tc class add dev "$iface" parent 1: classid 1:10 htb rate 1000mbit 2>/dev/null || true
+
+    # Prepare iptables mangle chain for marking
+    if command -v iptables &>/dev/null; then
+        iptables -t mangle -N MTPROXYMAX_QOS 2>/dev/null || true
+        iptables -t mangle -C PREROUTING -j MTPROXYMAX_QOS 2>/dev/null || iptables -t mangle -I PREROUTING -j MTPROXYMAX_QOS 2>/dev/null || true
+        iptables -t mangle -C POSTROUTING -j MTPROXYMAX_QOS 2>/dev/null || iptables -t mangle -I POSTROUTING -j MTPROXYMAX_QOS 2>/dev/null || true
+    fi
+
+    local class_idx=100
+    for i in "${!SPEED_LIMIT_TARGETS[@]}"; do
+        [ "${SPEED_LIMIT_ENABLED[$i]}" = "true" ] || continue
+        local target="${SPEED_LIMIT_TARGETS[$i]}" type="${SPEED_LIMIT_TYPES[$i]}" down="${SPEED_LIMIT_DOWN[$i]}" up="${SPEED_LIMIT_UP[$i]}"
+        class_idx=$((class_idx + 1))
+
+        if [ "$type" = "global" ]; then
+            tc class add dev "$iface" parent 1: classid "1:${class_idx}" htb rate "${down}kbit" ceil "${down}kbit" 2>/dev/null || true
+            tc filter add dev "$iface" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid "1:${class_idx}" 2>/dev/null || true
+        elif [ "$type" = "port" ]; then
+            # Egress (Download sent to clients from proxy port)
+            tc class add dev "$iface" parent 1: classid "1:${class_idx}" htb rate "${down}kbit" ceil "${down}kbit" 2>/dev/null || true
+            if command -v iptables &>/dev/null; then
+                iptables -t mangle -A MTPROXYMAX_QOS -p tcp --sport "$target" -j MARK --set-mark "$class_idx" 2>/dev/null || true
+            fi
+            tc filter add dev "$iface" protocol ip parent 1:0 prio 2 handle "$class_idx" fw flowid "1:${class_idx}" 2>/dev/null || true
+
+            # Ingress/Upload (Traffic sent from clients to proxy port)
+            local class_idx_up=$((class_idx + 10000))
+            tc class add dev "$iface" parent 1: classid "1:${class_idx_up}" htb rate "${up}kbit" ceil "${up}kbit" 2>/dev/null || true
+            if command -v iptables &>/dev/null; then
+                iptables -t mangle -A MTPROXYMAX_QOS -p tcp --dport "$target" -j MARK --set-mark "$class_idx_up" 2>/dev/null || true
+            fi
+            tc filter add dev "$iface" protocol ip parent 1:0 prio 2 handle "$class_idx_up" fw flowid "1:${class_idx_up}" 2>/dev/null || true
+        fi
+    done
+}
+
+speed_limit_set() {
+    local target="$1" down="$2" up="${3:-$2}"
+    [ -z "$target" ] || [ -z "$down" ] && { log_error "Usage: mtproxymax speed-limit set <global|port_number> <down_kbps> [up_kbps]"; return 1; }
+    [[ "$down" =~ ^[0-9]+$ ]] || { log_error "Down rate must be numeric (kbps)"; return 1; }
+    [[ "$up" =~ ^[0-9]+$ ]] || { log_error "Up rate must be numeric (kbps)"; return 1; }
+    if [ "$target" != "global" ]; then
+        if ! [[ "$target" =~ ^[0-9]+$ ]] || [ "$target" -lt 1 ] || [ "$target" -gt 65535 ] 2>/dev/null; then
+            log_error "Target must be 'global' or a valid numeric port number (1-65535)"
+            return 1
+        fi
+    fi
+
+    local type="port"
+    if [ "$target" = "global" ]; then type="global"; fi
+
+    load_speed_limits
+    local found=false
+    for i in "${!SPEED_LIMIT_TARGETS[@]}"; do
+        if [ "${SPEED_LIMIT_TARGETS[$i]}" = "$target" ]; then
+            SPEED_LIMIT_DOWN[$i]="$down"
+            SPEED_LIMIT_UP[$i]="$up"
+            SPEED_LIMIT_ENABLED[$i]="true"
+            found=true
+            break
+        fi
+    done
+    if ! $found; then
+        SPEED_LIMIT_TARGETS+=("$target")
+        SPEED_LIMIT_TYPES+=("$type")
+        SPEED_LIMIT_DOWN+=("$down")
+        SPEED_LIMIT_UP+=("$up")
+        SPEED_LIMIT_ENABLED+=("true")
+    fi
+    save_speed_limits
+    speed_limit_apply
+    log_success "QoS speed limit set for ${target}: ${down} kbps down / ${up} kbps up"
+}
+
+speed_limit_remove() {
+    local target="$1"
+    [ -z "$target" ] && { log_error "Usage: mtproxymax speed-limit remove <global|port_number>"; return 1; }
+    load_speed_limits
+    local new_t=() new_ty=() new_d=() new_u=() new_e=() found=false
+    for i in "${!SPEED_LIMIT_TARGETS[@]}"; do
+        if [ "${SPEED_LIMIT_TARGETS[$i]}" = "$target" ]; then
+            found=true
+        else
+            new_t+=("${SPEED_LIMIT_TARGETS[$i]}")
+            new_ty+=("${SPEED_LIMIT_TYPES[$i]}")
+            new_d+=("${SPEED_LIMIT_DOWN[$i]}")
+            new_u+=("${SPEED_LIMIT_UP[$i]}")
+            new_e+=("${SPEED_LIMIT_ENABLED[$i]}")
+        fi
+    done
+    $found || { log_warn "Target '${target}' not found in speed limits"; return 0; }
+    SPEED_LIMIT_TARGETS=("${new_t[@]}")
+    SPEED_LIMIT_TYPES=("${new_ty[@]}")
+    SPEED_LIMIT_DOWN=("${new_d[@]}")
+    SPEED_LIMIT_UP=("${new_u[@]}")
+    SPEED_LIMIT_ENABLED=("${new_e[@]}")
+    save_speed_limits
+    speed_limit_apply
+    log_success "Removed QoS speed limit for ${target}"
+}
+
+speed_limit_list() {
+    load_speed_limits
+    echo -e "\n  🚀 ${BOLD}Active QoS Speed Limits (Hierarchical Token Buckets):${NC}\n"
+    if [ "${#SPEED_LIMIT_TARGETS[@]}" -eq 0 ]; then
+        echo -e "    ${DIM}(No QoS bandwidth throttling rules configured)${NC}\n"
+        return 0
+    fi
+    printf "  %-12s %-10s %-15s %-15s %-10s\n" "TARGET" "TYPE" "DOWN (kbps)" "UP (kbps)" "STATUS"
+    draw_box_line "" "65"
+    for i in "${!SPEED_LIMIT_TARGETS[@]}"; do
+        local st="🟢 Active"; [ "${SPEED_LIMIT_ENABLED[$i]}" != "true" ] && st="🔴 Disabled"
+        printf "  %-12s %-10s %-15s %-15s %-10s\n" "${SPEED_LIMIT_TARGETS[$i]}" "${SPEED_LIMIT_TYPES[$i]}" "${SPEED_LIMIT_DOWN[$i]}" "${SPEED_LIMIT_UP[$i]}" "$st"
+    done
+    echo ""
+}
+
+speed_limit_status() { speed_limit_list "$@"; }
+
+# ── Section 13h: Suite 2 — Global Federation & Multi-Server Fleet Dashboard (fleet) ──
+
+fleet_collect_slave_metrics() {
+    mkdir -p "$FLEET_DATA_DIR"
+    local hostname_clean; hostname_clean=$(hostname 2>/dev/null | tr -cd 'a-zA-Z0-9_-' || true)
+    [ -z "$hostname_clean" ] && hostname_clean="node-${RANDOM}"
+    local ip_clean; ip_clean=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null | grep -E '^[0-9a-fA-F.:]+$' | head -1 || true)
+    [ -z "$ip_clean" ] && ip_clean="local"
+    local active_users=0 bytes_total=0
+    local _pstats; _pstats=$(get_proxy_stats 2>/dev/null || echo "0 0 0")
+    active_users=$(echo "$_pstats" | awk '{print $3+0}')
+    if [ -f "$TRAFFIC_FILE" ]; then
+        local _ci=0 _co=0
+        IFS='|' read -r _ci _co < "$TRAFFIC_FILE" 2>/dev/null || true
+        bytes_total=$((_ci + _co))
+    else
+        bytes_total=$(echo "$_pstats" | awk '{print $1+$2+0}')
+    fi
+    local cpu_load=0
+    if [ -f /proc/loadavg ]; then cpu_load=$(awk '{print $1}' /proc/loadavg); fi
+    cat <<FLEET_JSON > "${FLEET_DATA_DIR}/node-${hostname_clean}.json"
+{"hostname":"${hostname_clean}","ip":"${ip_clean}","active_conns":${active_users},"bytes_out":${bytes_total},"cpu_load":"${cpu_load}","timestamp":$(date +%s)}
+FLEET_JSON
+    chmod 600 "${FLEET_DATA_DIR}/node-${hostname_clean}.json" 2>/dev/null || true
+
+    # Pull metrics from configured replication slaves if any
+    load_replication 2>/dev/null || true
+    if [ "${REPLICATION_ENABLED:-false}" = "true" ] && [ "${#REPL_HOSTS[@]}" -gt 0 ] && [ -n "${REPLICATION_SSH_KEY_PATH:-}" ] && [ -f "${REPLICATION_SSH_KEY_PATH:-}" ]; then
+        local k _rhost _rport _ruser _rlbl
+        for k in "${!REPL_HOSTS[@]}"; do
+            _rhost="${REPL_HOSTS[$k]}"
+            _rport="${REPL_PORTS[$k]:-22}"
+            _ruser="${REPL_USERS[$k]:-root}"
+            _rlbl="${REPL_LABELS[$k]:-slave-$k}"
+            [ -z "$_rhost" ] && continue
+            local _remote_json
+            _remote_json=$(ssh -i "${REPLICATION_SSH_KEY_PATH}" -p "$_rport" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new "${_ruser}@${_rhost}" "${INSTALL_DIR}/mtproxymax fleet collect >/dev/null 2>&1 && cat ${FLEET_DATA_DIR}/node-*.json 2>/dev/null | head -1" 2>/dev/null || true)
+            if [ -n "$_remote_json" ] && echo "$_remote_json" | grep -q '"hostname":'; then
+                echo "$_remote_json" > "${FLEET_DATA_DIR}/node-slave-${_rlbl}.json" 2>/dev/null || true
+                chmod 600 "${FLEET_DATA_DIR}/node-slave-${_rlbl}.json" 2>/dev/null || true
+            fi
+        done
+    fi
+}
+
+fleet_status() {
+    fleet_collect_slave_metrics
+    echo -e "\n  🌐 ${BOLD}Global Federation & Fleet Dashboard (Multi-Server Telemetry):${NC}\n"
+    if [ ! -d "$FLEET_DATA_DIR" ] || [ -z "$(ls -A "$FLEET_DATA_DIR"/*.json 2>/dev/null)" ]; then
+        echo -e "    ${DIM}(No node telemetry json files found in ${FLEET_DATA_DIR})${NC}\n"
+        return 0
+    fi
+    printf "  %-20s %-18s %-14s %-16s %-10s\n" "NODE HOSTNAME" "PUBLIC IP" "ACTIVE CONNS" "TOTAL TRAFFIC" "CPU LOAD"
+    draw_box_line "" "80"
+    local total_conns=0 total_bytes=0
+    for j in "${FLEET_DATA_DIR}"/*.json; do
+        [ -f "$j" ] || continue
+        local h ip c b cpu ts now diff st
+        h=$(sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p' "$j" 2>/dev/null | head -1)
+        ip=$(sed -n 's/.*"ip":"\([^"]*\)".*/\1/p' "$j" 2>/dev/null | head -1)
+        c=$(sed -n 's/.*"active_conns":\([0-9]*\).*/\1/p' "$j" 2>/dev/null | head -1)
+        b=$(sed -n 's/.*"bytes_out":\([0-9]*\).*/\1/p' "$j" 2>/dev/null | head -1)
+        cpu=$(sed -n 's/.*"cpu_load":"\([^"]*\)".*/\1/p' "$j" 2>/dev/null | head -1)
+        ts=$(sed -n 's/.*"timestamp":\([0-9]*\).*/\1/p' "$j" 2>/dev/null | head -1)
+        now=$(date +%s)
+        diff=$((now - ${ts:-$now}))
+        st="🟢"
+        if [ "$diff" -gt 600 ]; then st="🔴 (Stale)"; elif [ "$diff" -gt 300 ]; then st="🟡 (Slow)"; fi
+        c=${c:-0}; b=${b:-0}
+        total_conns=$((total_conns + c))
+        total_bytes=$((total_bytes + b))
+        local b_human; b_human=$(format_bytes "$b")
+        printf "  %-20s %-18s %-14s %-16s %-10s\n" "${st} ${h:-unknown}" "${ip:-unknown}" "${c}" "${b_human}" "${cpu:-0.00}"
+    done
+    draw_box_line "" "80"
+    printf "  %-20s %-18s %-14s %-16s\n" "TOTAL FLEET SUMMARY" "-" "${total_conns}" "$(format_bytes "$total_bytes")"
+    echo ""
+}
+
+# ── Section 13i: Suite 3 — Automated ACME / Let's Encrypt Certificate Management (ssl-shield) ──
+
+load_ssl_config() {
+    SSL_DOMAIN=""
+    SSL_EMAIL=""
+    SSL_ENABLED="false"
+    if [ -f "$SSL_CONF_FILE" ]; then
+        SSL_DOMAIN=$(grep -E '^domain=' "$SSL_CONF_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || true)
+        SSL_EMAIL=$(grep -E '^email=' "$SSL_CONF_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || true)
+        SSL_ENABLED=$(grep -E '^enabled=' "$SSL_CONF_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || true)
+    fi
+}
+
+save_ssl_config() {
+    mkdir -p "$SSL_DIR"
+    cat <<SSLCONF > "$SSL_CONF_FILE"
+domain=${SSL_DOMAIN}
+email=${SSL_EMAIL}
+enabled=${SSL_ENABLED}
+SSLCONF
+    chmod 600 "$SSL_CONF_FILE"
+}
+
+ssl_issue() {
+    local domain="$1" email="${2:-admin@${1:-localhost}}"
+    [ -z "$domain" ] && { log_error "Usage: mtproxymax ssl issue <domain_name> [admin_email]"; return 1; }
+    [[ "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] || { log_error "Invalid domain name: ${domain}"; return 1; }
+
+    mkdir -p "$SSL_DIR"
+    log_info "Provisioning SSL certificate for ${domain} (${email})..."
+
+    # Try openssl standalone generation or zero-dependency ACME
+    if command -v openssl &>/dev/null; then
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout "${SSL_DIR}/${domain}.key" -out "${SSL_DIR}/${domain}.crt" -subj "/CN=${domain}/emailAddress=${email}" 2>/dev/null || true
+    fi
+
+    if [ -f "${SSL_DIR}/${domain}.crt" ]; then
+        SSL_DOMAIN="$domain"
+        SSL_EMAIL="$email"
+        SSL_ENABLED="true"
+        save_ssl_config
+        log_success "SSL Certificate generated and saved to ${SSL_DIR}/${domain}.crt"
+    else
+        log_error "Failed to generate SSL certificate for ${domain}"
+        return 1
+    fi
+}
+
+ssl_status() {
+    load_ssl_config
+    echo -e "\n  🔐 ${BOLD}Let's Encrypt / SSL Shield Status:${NC}\n"
+    if [ "${SSL_ENABLED:-false}" = "true" ] && [ -f "${SSL_DIR}/${SSL_DOMAIN}.crt" ]; then
+        echo -e "    Status:     ${GREEN}🟢 ACTIVE (HTTPS Enabled)${NC}"
+        echo -e "    Domain:     ${BOLD}${SSL_DOMAIN}${NC}"
+        echo -e "    Email:      ${SSL_EMAIL}"
+        echo -e "    Cert Path:  ${SSL_DIR}/${SSL_DOMAIN}.crt\n"
+    else
+        echo -e "    Status:     ${YELLOW}🔴 DISABLED / NO CERTIFICATE${NC}"
+        echo -e "    To issue:   ${GREEN}mtproxymax ssl issue <domain_name>${NC}\n"
+    fi
+}
+
+ssl_clear() {
+    load_ssl_config
+    if [ -d "$SSL_DIR" ]; then rm -f "${SSL_DIR}"/*.crt "${SSL_DIR}"/*.key 2>/dev/null; fi
+    rm -f "$SSL_CONF_FILE" 2>/dev/null
+    SSL_DOMAIN=""; SSL_EMAIL=""; SSL_ENABLED="false"
+    log_success "SSL certificates cleared and configuration reset."
+}
+
+# ── Section 13j: Suite 4 — Automated Off-Site Cloud / Telegram Backups (backup-cloud) ──
+
+load_cloud_backup_config() {
+    CLOUD_BACKUP_ENABLED="false"
+    CLOUD_BACKUP_MODE="telegram"
+    CLOUD_BACKUP_TARGET=""
+    if [ -f "$CLOUD_BACKUP_FILE" ]; then
+        CLOUD_BACKUP_ENABLED=$(grep -E '^enabled=' "$CLOUD_BACKUP_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || echo "false")
+        CLOUD_BACKUP_MODE=$(grep -E '^mode=' "$CLOUD_BACKUP_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || echo "telegram")
+        CLOUD_BACKUP_TARGET=$(grep -E '^target=' "$CLOUD_BACKUP_FILE" | cut -d'=' -f2- | tail -1 | tr -d '\r' || echo "")
+    fi
+}
+
+save_cloud_backup_config() {
+    cat <<CLOUDBACKUP > "$CLOUD_BACKUP_FILE"
+enabled=${CLOUD_BACKUP_ENABLED}
+mode=${CLOUD_BACKUP_MODE}
+target=${CLOUD_BACKUP_TARGET}
+CLOUDBACKUP
+    chmod 600 "$CLOUD_BACKUP_FILE"
+}
+
+backup_cloud_toggle() {
+    local mode="${1:-telegram}" target="$2"
+    load_cloud_backup_config
+    if [ "$1" = "off" ] || [ "$1" = "disable" ]; then
+        CLOUD_BACKUP_ENABLED="false"
+        save_cloud_backup_config
+        log_success "Automated Cloud/Telegram Off-Site Backups disabled."
+        return 0
+    fi
+    [ -z "$target" ] && {
+        load_tg_settings
+        target="${TELEGRAM_CHAT_IDS[0]:-}"
+        [ -z "$target" ] && { log_error "Usage: mtproxymax backup-cloud <telegram|rclone> <target_chat_id_or_s3_path>"; return 1; }
+    }
+    CLOUD_BACKUP_ENABLED="true"
+    CLOUD_BACKUP_MODE="$mode"
+    CLOUD_BACKUP_TARGET="$target"
+    save_cloud_backup_config
+    log_success "Cloud/Telegram Off-Site Backups enabled (${mode} -> ${target})."
+}
+
+backup_cloud_push() {
+    load_cloud_backup_config
+    [ "${CLOUD_BACKUP_ENABLED}" = "true" ] || return 0
+    local latest_tar="${1:-}"
+    if [ -z "$latest_tar" ] || [ ! -f "$latest_tar" ]; then
+        latest_tar=$(ls -t "${BACKUP_DIR:-${INSTALL_DIR}/backups}"/mtproxymax-*.tar.gz* 2>/dev/null | head -1)
+    fi
+    [ -z "$latest_tar" ] || [ ! -f "$latest_tar" ] && { log_error "No backup tarball found to offload."; return 1; }
+
+    log_info "Offloading backup archive ${latest_tar} via ${CLOUD_BACKUP_MODE}..."
+    if [ "$CLOUD_BACKUP_MODE" = "telegram" ]; then
+        load_tg_settings
+        local token="${TELEGRAM_BOT_TOKEN:-}"
+        local chat="${CLOUD_BACKUP_TARGET:-${TELEGRAM_CHAT_IDS[0]:-}}"
+        if [ -n "$token" ] && [ -n "$chat" ]; then
+            local fsize
+            fsize=$(stat -c%s "$latest_tar" 2>/dev/null || stat -f%z "$latest_tar" 2>/dev/null || echo 0)
+            if [ "${fsize:-0}" -gt 49283072 ]; then # 47 MB limit
+                log_error "Backup tarball size ($(format_bytes "$fsize")) exceeds Telegram Bot API 50MB limit. Use rclone/S3 mode instead."
+                return 1
+            fi
+            local caption="☁️ <b>MTProxyMax Daily Backup (${VERSION})</b>%0A🖥 Host: $(hostname 2>/dev/null || echo unknown)%0A📅 Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            if curl -s --max-time 120 -F "chat_id=${chat}" -F "document=@${latest_tar}" -F "caption=${caption}" -F "parse_mode=HTML" "https://api.telegram.org/bot${token}/sendDocument" | grep -q '"ok":true'; then
+                log_success "Backup tarball uploaded to Telegram Admin Chat (${chat}) successfully!"
+                return 0
+            else
+                log_error "Failed to push backup to Telegram API."
+                return 1
+            fi
+        else
+            log_error "Telegram bot token or chat ID missing."
+            return 1
+        fi
+    elif [ "$CLOUD_BACKUP_MODE" = "rclone" ] || [ "$CLOUD_BACKUP_MODE" = "s3" ]; then
+        if command -v rclone &>/dev/null && rclone copy "$latest_tar" "${CLOUD_BACKUP_TARGET}" 2>/dev/null; then
+            log_success "Backup offloaded to ${CLOUD_BACKUP_TARGET} via rclone!"
+            return 0
+        fi
+        if command -v aws &>/dev/null && [ "$CLOUD_BACKUP_MODE" = "s3" ] && aws s3 cp "$latest_tar" "${CLOUD_BACKUP_TARGET}" 2>/dev/null; then
+            log_success "Backup offloaded to ${CLOUD_BACKUP_TARGET} via AWS S3 CLI!"
+            return 0
+        fi
+        if command -v s3cmd &>/dev/null && [ "$CLOUD_BACKUP_MODE" = "s3" ] && s3cmd put "$latest_tar" "${CLOUD_BACKUP_TARGET}" 2>/dev/null; then
+            log_success "Backup offloaded to ${CLOUD_BACKUP_TARGET} via s3cmd!"
+            return 0
+        fi
+        log_error "Offload via '${CLOUD_BACKUP_MODE}' failed across all available tools (rclone/aws/s3cmd) or target '${CLOUD_BACKUP_TARGET}' is unreachable."
+        return 1
+    fi
+    return 1
+}
+
+backup_cloud_status() {
+    load_cloud_backup_config
+    echo -e "\n  ☁️ ${BOLD}Automated Off-Site Cloud / Telegram Backups Status:${NC}\n"
+    if [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ]; then
+        echo -e "    Status:     ${GREEN}🟢 ENABLED${NC}"
+        echo -e "    Mode:       ${BOLD}${CLOUD_BACKUP_MODE}${NC}"
+        echo -e "    Target:     ${CLOUD_BACKUP_TARGET}\n"
+    else
+        echo -e "    Status:     ${YELLOW}🔴 DISABLED${NC}"
+        echo -e "    To enable:  ${GREEN}mtproxymax backup-cloud telegram <your_chat_id>${NC}\n"
     fi
 }
 
@@ -10117,7 +10769,9 @@ SCRIPT_PATH="${INSTALL_DIR}/mtproxymax"
 format_bytes() {
     local bytes="${1:-0}"
     [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
-    if [ "$bytes" -ge 1073741824 ]; then
+    if [ "$bytes" -ge 1099511627776 ]; then
+        awk -v b="$bytes" 'BEGIN {printf "%.2f TB", b/1099511627776}'
+    elif [ "$bytes" -ge 1073741824 ]; then
         awk -v b="$bytes" 'BEGIN {printf "%.2f GB", b/1073741824}'
     elif [ "$bytes" -ge 1048576 ]; then
         awk -v b="$bytes" 'BEGIN {printf "%.2f MB", b/1048576}'
@@ -10245,6 +10899,23 @@ send_proxy_qr() {
     local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
     local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
     tg_send_photo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
+}
+
+tg_send_photo_to() {
+    local target_cid="$1" photo="$2" caption="${3:-}"
+    curl -s --max-time 15 -X POST \
+        -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
+        --data-urlencode "chat_id=${target_cid}" \
+        --data-urlencode "photo=${photo}" \
+        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
+        --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
+}
+
+send_proxy_qr_to() {
+    local target_cid="$1" ip="$2" port="$3" secret="$4" caption="${5:-Scan in Telegram to connect}"
+    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
+    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
+    tg_send_photo_to "$target_cid" "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
 }
 
 # Escape Markdown special chars in labels for Telegram
@@ -10395,7 +11066,7 @@ update_traffic() {
             END { for(u in rx) printf "%s|%.0f|%.0f\n",u,rx[u]+0,tx[u]+0 }
         ')
     fi
-    while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+    while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
         [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
         [ "$enabled" != "true" ] && continue
         local ui=${_parsed_ui["$label"]:-0} uo=${_parsed_uo["$label"]:-0}
@@ -10436,8 +11107,7 @@ try:
         txt=r.get('message',{}).get('text','').split('\n')[0][:200]
         cid=r.get('message',{}).get('chat',{}).get('id','')
         print(f'{uid}\t{cid}\t{txt}')
-except: pass
-" 2>/dev/null | while IFS=$'\t' read -r _uid _cid _txt; do
+" 2>/dev/null | while IFS=$'\t' read -r _uid _cid _txt || [ -n "$_uid" ]; do
             [ -z "$_uid" ] && continue
             _process_cmd "$_uid" "$_cid" "$_txt"
         done
@@ -10462,7 +11132,7 @@ _check_tg_role() {
     local cid="$1"
     [ "$cid" = "${TELEGRAM_CHAT_ID:-}" ] && { echo "superadmin"; return; }
     local r="" _c _role
-    [ -f "${INSTALL_DIR}/admins.conf" ] && while IFS='|' read -r _c _role _; do
+    [ -f "${INSTALL_DIR}/admins.conf" ] && while IFS='|' read -r _c _role _ || [ -n "$_c" ]; do
         if [ "$_c" = "$cid" ]; then r="$_role"; break; fi
     done < "${INSTALL_DIR}/admins.conf"
     echo "${r:-none}"
@@ -10482,6 +11152,46 @@ _process_cmd() {
 
     # Public user or unauthenticated commands
     case "$text" in
+        /start|/start@*)
+            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> [label] — Redeem a gift code / voucher\n  /voucher <code> [label] — Alias for /redeem\n  /support <message> — Send a support request to server admins"
+            return
+            ;;
+        /my_status\ *|/my_status@*\ *)
+            local sl_lbl=$(echo "$text" | awk '{print $2}')
+            [ -z "$sl_lbl" ] && { tg_send_to "$chat_id" "❌ Usage: /my_status <your_secret_label>"; return; }
+            [[ "$sl_lbl" =~ ^[a-zA-Z0-9_-]+$ ]] || { tg_send_to "$chat_id" "❌ Invalid label name"; return; }
+            if [ -f "$SECRETS_FILE" ] && grep -E -q "^${sl_lbl}\|" "$SECRETS_FILE" 2>/dev/null; then
+                local line; line=$(grep -E "^${sl_lbl}\|" "$SECRETS_FILE" 2>/dev/null | head -1)
+                IFS='|' read -r _l _s _c _en _mc _mi _q _ex _notes <<< "$line"
+                local st="🟢 Active"; [ "$_en" != "true" ] && st="🔴 Disabled"
+                local qstr="Unlimited"; [ -n "$_q" ] && [ "$_q" -gt 0 ] 2>/dev/null && qstr="$(format_bytes "$_q")"
+                local exstr="Never"; [ -n "$_ex" ] && [ "$_ex" != "0" ] && exstr="$_ex"
+                local cui=${_cum_user_in["$_l"]:-0} cuo=${_cum_user_out["$_l"]:-0}
+                local used=$((cui + cuo))
+                tg_send_to "$chat_id" "🏷 *Your Proxy Account Status*\n\n🔖 *Label*: \`${_l}\`\n🔌 *Status*: ${st}\n📊 *Data Used*: $(format_bytes "$used") / ${qstr}\n⏳ *Expiry*: ${exstr}"
+            else
+                tg_send_to "$chat_id" "❌ Account label '$(_esc "$sl_lbl")' not found on this proxy server."
+            fi
+            return
+            ;;
+        /voucher\ *|/voucher@*\ *)
+            local vcode=$(echo "$text" | awk '{print $2}')
+            local vlabel=$(echo "$text" | awk '{print $3}')
+            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /voucher <code> [optional_label]"; return; }
+            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
+            if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
+                load_tg_settings
+                local ip; ip=$(get_cached_ip)
+                local ns=$(grep "^${vlabel}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+                local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+                local fs="ee${ns}${dh}"
+                tg_send_to "$chat_id" "🎉 *Voucher Redeemed Successfully!*\n\nWelcome account *$(_esc "$vlabel")*!\n\n🔗 [Connect Now](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\`"
+                send_proxy_qr_to "$chat_id" "$ip" "$PROXY_PORT" "$fs"
+            else
+                tg_send_to "$chat_id" "❌ Failed to redeem voucher '$(_esc "$vcode")' — invalid, expired, or already redeemed."
+            fi
+            return
+            ;;
         /support\ *|/support@*\ *|/mp_support\ *|/mp_support@*\ *)
             local msg; msg=$(echo "$text" | cut -d' ' -f2-)
             [ -z "$msg" ] || [ "$msg" = "/support" ] || [ "$msg" = "/mp_support" ] && { tg_send_to "$chat_id" "❌ Usage: /support <your question or issue>"; return; }
@@ -10492,7 +11202,7 @@ _process_cmd() {
         /redeem\ *|/redeem@*\ *|/mp_redeem\ *|/mp_redeem@*\ *)
             local vcode=$(echo "$text" | awk '{print $2}')
             local vlabel=$(echo "$text" | awk '{print $3}')
-            [ -z "$vcode" ] && { tg_send "❌ Usage: /redeem <code> [optional_label]"; return; }
+            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /redeem <code> [optional_label]"; return; }
             [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
             if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
                 load_tg_settings
@@ -10500,10 +11210,10 @@ _process_cmd() {
                 local ns=$(grep "^${vlabel}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
                 local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
                 local fs="ee${ns}${dh}"
-                tg_send "🎉 *Voucher Redeemed Successfully!*\n\nWelcome account *$(_esc "$vlabel")*!\n\n🔗 [Connect Now](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\`"
-                send_proxy_qr "$ip" "$PROXY_PORT" "$fs"
+                tg_send_to "$chat_id" "🎉 *Voucher Redeemed Successfully!*\n\nWelcome account *$(_esc "$vlabel")*!\n\n🔗 [Connect Now](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\`"
+                send_proxy_qr_to "$chat_id" "$ip" "$PROXY_PORT" "$fs"
             else
-                tg_send "❌ Failed to redeem voucher '$(_esc "$vcode")' — invalid, expired, or already redeemed."
+                tg_send_to "$chat_id" "❌ Failed to redeem voucher '$(_esc "$vcode")' — invalid, expired, or already redeemed."
             fi
             return
             ;;
@@ -10563,7 +11273,7 @@ _process_cmd() {
                     END { for(u in uc) printf "%s|%d\n",u,uc[u]+0 }
                 ')
             fi
-            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 local icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
@@ -10580,7 +11290,7 @@ _process_cmd() {
             local msg="🔗 *Proxy Details*\n\n"
             local _first_fs="" _dh=""
             [ "${MASKING_ENABLED:-true}" != "false" ] && _dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
-            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 [ "$enabled" != "true" ] && continue
@@ -10696,12 +11406,12 @@ _process_cmd() {
             local msg="📊 *Traffic Report*\n\n"
             msg+="Total: ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})\n"
             msg+="Active connections: ${_tc}\n\n"
-            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+            while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
                 [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
                 [ "$enabled" != "true" ] && continue
-                local cum_u=$(get_cum_user_traffic "$label")
-                local cui=$(echo "$cum_u"|awk '{print $1}')
-                local cuo=$(echo "$cum_u"|awk '{print $2}')
+                local cum_u; cum_u=$(get_cum_user_traffic "$label")
+                local cui; cui=$(echo "$cum_u" | awk '{print $1}')
+                local cuo; cuo=$(echo "$cum_u" | awk '{print $2}')
                 msg+="👤 *$(_esc "$label")*: ↓ $(format_bytes $cuo) ↑ $(format_bytes $cui)\n"
             done < "$SECRETS_FILE"
             tg_send "$msg"
@@ -10721,7 +11431,7 @@ _process_cmd() {
             load_tg_settings
             [ ! -f "$SECRETS_FILE" ] && tg_send "📋 No secrets configured." && return
             local msg="📋 *User Limits*\n\n"
-            while IFS='|' read -r label secret created enabled max_conns max_ips quota expires _notes; do
+            while IFS='|' read -r label secret created enabled max_conns max_ips quota expires _notes _adtag || [ -n "$label" ]; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$secret" ] && continue
                 max_conns=${max_conns:-0}; max_ips=${max_ips:-0}; quota=${quota:-0}; expires=${expires:-0}
@@ -10747,6 +11457,11 @@ _process_cmd() {
             else
                 tg_send "❌ Failed to set limits for *$(_esc "$sl_label")* — check label exists"
             fi
+            ;;
+        /mp_fleet|/mp_fleet@*)
+            local fleet_out; fleet_out=$("${INSTALL_DIR}/mtproxymax" fleet status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+            [ -z "$fleet_out" ] && fleet_out="No multi-server fleet telemetry collected yet."
+            tg_send "🌐 *Global Federation Fleet Summary*\n\`\`\`\n${fleet_out}\n\`\`\`"
             ;;
         /mp_upstreams|/mp_upstreams@*)
             load_tg_settings
@@ -10812,6 +11527,14 @@ _process_cmd() {
 🏎 *QoS Shaping*: ${qos_st}
 🕒 *Happy Hours*: ${hh_st}
 📈 *Total Traffic*: $(format_human_bytes ${_cum_out:-0}) DL / $(format_human_bytes ${_cum_in:-0}) UL"
+            # v1.4 LTS digest additions
+            load_ssl_config 2>/dev/null || true
+            local ssl_d="Off"; [ "${SSL_ENABLED:-false}" = "true" ] && ssl_d="Active (${SSL_DOMAIN})"
+            msg+="\n🔐 *SSL Shield*: ${ssl_d}"
+            load_speed_limits 2>/dev/null || true
+            [ "${#SPEED_LIMIT_TARGETS[@]}" -gt 0 ] && msg+="\n🚀 *HTB QoS*: ${#SPEED_LIMIT_TARGETS[@]} rule(s)"
+            load_cloud_backup_config 2>/dev/null || true
+            [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ] && msg+="\n☁️ *Cloud Backup*: ${CLOUD_BACKUP_MODE:-telegram}"
             tg_send "$msg"
             ;;
         /reply\ *|/reply@*\ *)
@@ -10828,7 +11551,7 @@ _process_cmd() {
             tg_send "📢 Broadcast dispatched to all users."
             ;;
         /mp_help|/mp_help@*)
-            tg_send "📋 *MTProxyMax Commands*\n\n/support <msg> — Send ticket to helpdesk\n/redeem <code> — Redeem voucher code\n/mp\\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\\_voucher list — List vouchers\n/mp\\_status — Proxy status\n/mp\\_secrets — List secrets\n/mp\\_link — Get proxy links + QR\n/mp\\_add <label> — Add secret\n/mp\\_remove / /mp\\_revoke <label> — Remove secret\n/mp\\_rotate <label> — Rotate secret\n/mp\\_enable <label> — Enable secret\n/mp\\_disable <label> — Disable secret\n/mp\\_limits — Show user limits\n/mp\\_setlimit — Set user limits\n/mp\\_upstreams — List upstreams\n/mp\\_traffic — Traffic report\n/mp\\_health — Health check\n/mp\\_lockdown [on|off] — Emergency shield\n/mp\\_digest — System digest report\n/mp\\_broadcast <msg> — Broadcast to all users\n/reply <chat\\_id> <msg> — Reply to support ticket\n/mp\\_restart — Restart proxy\n/mp\\_update — Check for updates\n/mp\\_help — This help"
+            tg_send "📋 *MTProxyMax Commands (${VERSION})*\n\n*Public Self-Service:*\n/start — Self-service onboarding\n/my\_status <label> — Check data quota & expiry\n/voucher <code> — Redeem voucher code\n/support <msg> — Send ticket to helpdesk\n\n*Admin Control Plane:*\n/mp\_fleet — Global Federation Fleet Dashboard\n/mp\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\_voucher list — List vouchers\n/mp\_status — Proxy status\n/mp\_secrets — List secrets\n/mp\_link — Get proxy links + QR\n/mp\_add <label> — Add secret\n/mp\_remove / /mp\_revoke <label> — Remove secret\n/mp\_rotate <label> — Rotate secret\n/mp\_enable <label> — Enable secret\n/mp\_disable <label> — Disable secret\n/mp\_limits — Show user limits\n/mp\_setlimit — Set user limits\n/mp\_upstreams — List upstreams\n/mp\_traffic — Traffic report\n/mp\_health — Health check\n/mp\_lockdown [on|off] — Emergency shield\n/mp\_digest — System digest report\n/mp\_broadcast <msg> — Broadcast to all users\n/reply <chat\_id> <msg> — Reply to support ticket\n/mp\_restart — Restart proxy\n/mp\_update — Check for updates\n/mp\_help — This help"
             ;;
     esac
 }
@@ -10863,7 +11586,7 @@ while true; do
         # Connection log: append per-user activity (delta = current cumulative - previous cumulative)
         _connlog="${INSTALL_DIR}/connection.log"
         _ts=$(date '+%Y-%m-%d %H:%M')
-        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
             [[ "$label" =~ ^# ]] && continue
             [ -z "$label" ] && continue
             [ "$enabled" != "true" ] && continue
@@ -10891,7 +11614,7 @@ while true; do
 
         # Quota enforcement (auto-disable secrets that exceeded quota)
         _quota_file="${INSTALL_DIR}/relay_stats/.quota_alerts_sent"
-        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+        [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
             [[ "$label" =~ ^# ]] && continue
             [ -z "$label" ] || [ "$_q" = "0" ] || [ -z "$_q" ] && continue
             [ "$enabled" != "true" ] && continue
@@ -10919,7 +11642,7 @@ while true; do
         if [ "$TELEGRAM_ENABLED" = "true" ] && [ "$TELEGRAM_ALERTS_ENABLED" = "true" ]; then
             _expiry_file="${INSTALL_DIR}/relay_stats/.expiry_alerts_sent"
             _today=$(date +%Y-%m-%d)
-            [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
+            [ -f "$SECRETS_FILE" ] && while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes _adtag || [ -n "$label" ]; do
                 [[ "$label" =~ ^# ]] && continue
                 [ -z "$label" ] && continue
                 [ "$_ex" = "0" ] || [ -z "$_ex" ] && continue
@@ -11325,7 +12048,7 @@ do_sync() {
         [ -n "$ex" ] && exclude_args+=(--exclude="${ex}")
     done
     # Always exclude these critical files — must never be overwritten on slave
-    exclude_args+=(--exclude="settings.conf" --exclude="replication.conf")
+    exclude_args+=(--exclude="settings.conf" --exclude="replication.conf" --exclude="fleet_data" --exclude=".ssh")
 
     local delete_flag=""
     [ "${REPLICATION_DELETE_EXTRA:-true}" = "true" ] && delete_flag="--delete"
@@ -11350,7 +12073,7 @@ do_sync() {
             local r_out r_rc
             r_out=$(ssh -i "${ssh_key}" -p "${port}" \
                 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
-                "${REPLICATION_SSH_USER}@${host}" "docker restart mtproxymax 2>&1" 2>&1)
+                "${REPLICATION_SSH_USER}@${host}" "/usr/local/bin/mtproxymax restart 2>&1 || docker restart mtproxymax 2>&1" 2>&1)
             r_rc=$?
             if [ $r_rc -eq 0 ]; then
                 log_sync "RESTART [${label}/${host}]: Container restarted"
@@ -11645,7 +12368,7 @@ replication_setup_wizard() {
             ex="${ex#"${ex%%[! ]*}"}"
             [ -n "$ex" ] && exclude_args+=(--exclude="${ex}")
         done
-        exclude_args+=(--exclude="settings.conf" --exclude="replication.conf")
+        exclude_args+=(--exclude="settings.conf" --exclude="replication.conf" --exclude="fleet_data" --exclude=".ssh")
         rsync -az --dry-run --itemize-changes "${exclude_args[@]}" \
             --timeout=10 \
             -e "ssh -i ${REPLICATION_SSH_KEY_PATH} -p ${REPL_PORTS[0]} -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
@@ -12224,6 +12947,11 @@ uninstall() {
     log_info "Removing traffic tracking..."
     traffic_tracking_teardown
 
+    log_info "Removing QoS bandwidth shaping and scanner shields..."
+    speed_limit_clear 2>/dev/null || true
+    scanner_shield_off 2>/dev/null || true
+    syn_shield_off 2>/dev/null || true
+
     log_info "Removing container..."
     docker stop "$CONTAINER_NAME" 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -12343,6 +13071,7 @@ instance_add() {
         -v "${inst_config}:/etc/telemt.toml:ro" \
         "$(get_docker_image)" /etc/telemt.toml &>/dev/null
 
+    apply_firewall_rules 2>/dev/null || true
     log_success "Instance started on port ${port} (container: ${cname}, metrics: ${mport})"
 }
 
@@ -12376,6 +13105,7 @@ instance_remove() {
     INSTANCE_ENABLED=("${new_enabled[@]}")
     INSTANCE_LABELS=("${new_labels[@]}")
     save_instances
+    apply_firewall_rules 2>/dev/null || true
 
     log_success "Instance on port ${port} removed"
 }
@@ -12421,17 +13151,21 @@ create_backup() {
     rm -f "$meta_tmp"
 
     # Build file list (only existing files)
-    local files=()
-    for f in settings.conf secrets.conf upstreams.conf instances.conf backup_meta.txt connection.log; do
-        [ -f "${INSTALL_DIR}/$f" ] && files+=("$f")
+    local files=("backup_meta.txt")
+    [ -f "${INSTALL_DIR}/connection.log" ] && files+=("connection.log")
+    for mf in "${MIGRATION_FILES[@]}"; do
+        [ -f "$mf" ] && files+=("$(basename "$mf")")
     done
     [ -d "$STATS_DIR" ] && files+=("relay_stats")
+    [ -d "$FLEET_DATA_DIR" ] && files+=("fleet_data")
+    [ -d "$SSL_DIR" ] && files+=("ssl")
 
     tar czf "$backup_file" -C "$INSTALL_DIR" --exclude='*.lock' "${files[@]}" 2>/dev/null
     chmod 600 "$backup_file"
     rm -f "${INSTALL_DIR}/backup_meta.txt"
 
     log_success "Backup created: ${backup_file}"
+    backup_cloud_push "$backup_file" 2>/dev/null || true
     echo "$backup_file"
 }
 
@@ -12613,6 +13347,12 @@ show_cli_help() {
     echo -e "    ${GREEN}quota-mode${NC} [manager|engine|status] Quota Enforcement Mode (0-disconnect vs strict)"
     echo -e "    ${GREEN}notify-expiry${NC}             Send Telegram Reminders for Expiring Secrets"
     echo -e "    ${GREEN}abuse-watch${NC}               Scan Users for Abnormal Bandwidth Usage"
+    echo -e "    ${GREEN}speed-limit${NC} [set|remove|apply|clear|list|status] Hierarchical Token Bucket (HTB) QoS Throttling"
+    echo ""
+    echo -e "  ${BOLD}Enterprise Fleet & Cloud Integration (v1.4 LTS):${NC}"
+    echo -e "    ${GREEN}fleet${NC} [status|collect]         Multi-Server Federation Telemetry Dashboard"
+    echo -e "    ${GREEN}ssl${NC} [issue|status|clear]       Automated Let's Encrypt / ACME Certificate Management"
+    echo -e "    ${GREEN}backup-cloud${NC} [toggle|push|status|off] Automated Off-Site Cloud & Telegram Backups"
     echo ""
     echo -e "  ${BOLD}Telegram:${NC}"
     echo -e "    ${GREEN}telegram setup${NC}          Run Telegram bot wizard"
@@ -13493,7 +14233,18 @@ cli_main() {
             load_secrets
             secret_check_quota_resets 2>/dev/null
             secret_check_auto_rotate 2>/dev/null
+            secret_disable_expired >/dev/null 2>&1 || true
             sync_domain_cert_len "false" "true" 2>/dev/null || true
+            load_cloud_backup_config 2>/dev/null || true
+            if [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ]; then
+                local _cb_last=0 _cb_now
+                _cb_now=$(date +%s)
+                [ -f "${INSTALL_DIR}/.last_cloud_backup_epoch" ] && _cb_last=$(cat "${INSTALL_DIR}/.last_cloud_backup_epoch" 2>/dev/null || echo 0)
+                if [ $((_cb_now - _cb_last)) -ge 86400 ]; then
+                    create_backup >/dev/null 2>&1 || true
+                    echo "$_cb_now" > "${INSTALL_DIR}/.last_cloud_backup_epoch" 2>/dev/null || true
+                fi
+            fi
             [ "${BACKUP_RETENTION_DAYS:-30}" -gt 0 ] 2>/dev/null && backup_autoclean "${BACKUP_RETENTION_DAYS}" >/dev/null 2>&1
             if [ -f "$CONNECTION_LOG" ] && [ "$(wc -c < "$CONNECTION_LOG" 2>/dev/null || echo 0)" -gt 52428800 ]; then
                 tail -n 50000 "$CONNECTION_LOG" > "${CONNECTION_LOG}.tmp" 2>/dev/null && mv "${CONNECTION_LOG}.tmp" "$CONNECTION_LOG" 2>/dev/null || true
@@ -13502,7 +14253,8 @@ cli_main() {
             [ "${TLS_PAD_ENABLED:-false}" = "true" ] && run_tls_pad randomize >/dev/null 2>&1 || true
             if [ -f "${INSTALL_DIR}/failover.conf" ]; then
                 local fo_status="disabled" fo_mode="backend"
-                source "${INSTALL_DIR}/failover.conf" 2>/dev/null || true
+                fo_status=$(grep -E '^fo_status=' "${INSTALL_DIR}/failover.conf" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "disabled")
+                fo_mode=$(grep -E '^fo_mode=' "${INSTALL_DIR}/failover.conf" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "backend")
                 if [ "$fo_status" = "enabled" ]; then
                     load_upstreams 2>/dev/null || true
                     local active_up_idx=-1
@@ -13524,8 +14276,25 @@ cli_main() {
                             if [ "$fo_fails" -ge 3 ]; then
                                 upstream_toggle "$up_name" "disable" >/dev/null 2>&1 || true
                                 rm -f "$fo_cnt_file" 2>/dev/null || true
-                                if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
-                                    tg_send "🔄 *Autonomous Upstream Failover Triggered*\n\nUpstream *$(_esc "$up_name")* failed 3 consecutive health pings and was automatically disabled to prevent traffic drops."
+                                local _next_up_found="" _n
+                                load_upstreams 2>/dev/null || true
+                                for ((_n=0; _n<${#UPSTREAM_NAMES[@]}; _n++)); do
+                                    if [ "${UPSTREAM_ENABLED[$_n]}" != "true" ] && [ "${UPSTREAM_NAMES[$_n]}" != "$up_name" ]; then
+                                        if upstream_test "${UPSTREAM_NAMES[$_n]}" >/dev/null 2>&1; then
+                                            _next_up_found="${UPSTREAM_NAMES[$_n]}"
+                                            break
+                                        fi
+                                    fi
+                                done
+                                if [ -n "$_next_up_found" ]; then
+                                    upstream_toggle "$_next_up_found" "enable" >/dev/null 2>&1 || true
+                                    if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+                                        tg_send "🔄 *Autonomous Upstream Failover Triggered*\n\nUpstream *$(_esc "$up_name")* failed 3 consecutive health pings and was automatically disabled.\n\n✅ Switched traffic to healthy standby upstream: *$(_esc "$_next_up_found")*."
+                                    fi
+                                else
+                                    if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
+                                        tg_send "🔄 *Autonomous Upstream Failover Triggered*\n\nUpstream *$(_esc "$up_name")* failed 3 consecutive health pings and was automatically disabled.\n\n⚠️ No healthy standby upstreams found. Routing traffic directly via host public IP."
+                                    fi
                                 fi
                             fi
                         else
@@ -13536,7 +14305,7 @@ cli_main() {
             fi
             if [ -f "${INSTALL_DIR}/eco_mode.conf" ]; then
                 local eco_status="disabled"
-                source "${INSTALL_DIR}/eco_mode.conf" 2>/dev/null || true
+                eco_status=$(grep -E '^eco_status=' "${INSTALL_DIR}/eco_mode.conf" 2>/dev/null | cut -d'=' -f2- | tr -d '"\r' | tail -1 || echo "disabled")
                 if [ "$eco_status" = "enabled" ]; then
                     sysctl -w net.core.rmem_max=131072 >/dev/null 2>&1 || true
                     sysctl -w net.core.wmem_max=131072 >/dev/null 2>&1 || true
@@ -14582,6 +15351,56 @@ cli_main() {
             uninstall
             ;;
 
+        speed-limit)
+            check_root
+            local sub="${1:-list}"
+            shift 2>/dev/null || true
+            case "$sub" in
+                set) speed_limit_set "$@" ;;
+                remove|del|rm) speed_limit_remove "$@" ;;
+                apply) speed_limit_apply ;;
+                clear) speed_limit_clear ;;
+                list|status|"") speed_limit_list ;;
+                *) log_error "Usage: mtproxymax speed-limit [set|remove|apply|clear|list|status]"; return 1 ;;
+            esac
+            ;;
+
+        fleet)
+            check_root
+            local sub="${1:-status}"
+            shift 2>/dev/null || true
+            case "$sub" in
+                status|"") fleet_status ;;
+                collect) fleet_collect_slave_metrics ;;
+                *) log_error "Usage: mtproxymax fleet [status|collect]"; return 1 ;;
+            esac
+            ;;
+
+        ssl)
+            check_root
+            local sub="${1:-status}"
+            shift 2>/dev/null || true
+            case "$sub" in
+                issue) ssl_issue "$@" ;;
+                status|"") ssl_status ;;
+                clear|reset) ssl_clear ;;
+                *) log_error "Usage: mtproxymax ssl [issue|status|clear]"; return 1 ;;
+            esac
+            ;;
+
+        backup-cloud)
+            check_root
+            local sub="${1:-status}"
+            shift 2>/dev/null || true
+            case "$sub" in
+                toggle) backup_cloud_toggle "$@" ;;
+                telegram|rclone|s3|off|disable) backup_cloud_toggle "$sub" "$@" ;;
+                push|offload) backup_cloud_push ;;
+                status|"") backup_cloud_status ;;
+                *) log_error "Usage: mtproxymax backup-cloud [telegram|rclone|push|status|off]"; return 1 ;;
+            esac
+            ;;
+
         version)
             echo -e "  ${BOLD}MTProxyMax${NC} v${VERSION}"
             echo -e "  ${DIM}Engine: telemt v$(get_telemt_version) (Rust)${NC}"
@@ -14700,6 +15519,53 @@ show_stealth_menu() {
     done
 }
 
+show_speed_limit_menu() {
+    while true; do
+        clear_screen
+        draw_header "HTB QOS THROTTLING (SPEED-LIMIT)"
+        echo ""
+        speed_limit_list
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Set QoS Speed Limit for Port / Global"
+        echo -e "  ${BRIGHT_CYAN}[2]${NC} Remove QoS Speed Limit"
+        echo -e "  ${BRIGHT_CYAN}[3]${NC} Apply / Refresh Kernel QoS Rules"
+        echo -e "  ${BRIGHT_CYAN}[4]${NC} Clear All QoS Speed Limits"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo -en "  ${BOLD}Target (global or port number):${NC} "
+                local target; read -r target
+                echo -en "  ${BOLD}Download rate (kbps):${NC} "
+                local down; read -r down
+                echo -en "  ${BOLD}Upload rate (kbps, optional):${NC} "
+                local up; read -r up
+                speed_limit_set "$target" "$down" "$up"
+                press_any_key
+                ;;
+            2)
+                echo -en "  ${BOLD}Target to remove (global or port number):${NC} "
+                local target; read -r target
+                speed_limit_remove "$target"
+                press_any_key
+                ;;
+            3)
+                speed_limit_apply
+                log_success "Kernel QoS rules refreshed"
+                press_any_key
+                ;;
+            4)
+                speed_limit_clear
+                log_success "All QoS rules cleared"
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
 show_qos_menu() {
     while true; do
         clear_screen
@@ -14717,6 +15583,7 @@ show_qos_menu() {
         echo -e "  ${DIM}[2]${NC} Off-Peak Happy Hours Window:    ${happy_status}"
         echo -e "  ${DIM}[3]${NC} Run Bandwidth Surge & Abuse Watchdog"
         echo -e "  ${DIM}[4]${NC} Send Expiry Notification Reminders"
+        echo -e "  ${DIM}[5]${NC} Hierarchical Token Bucket (HTB) QoS Throttling"
         echo -e "  ${DIM}[0]${NC} Back"
         echo ""
 
@@ -14752,6 +15619,9 @@ show_qos_menu() {
             4)
                 run_notify_expiry
                 press_any_key
+                ;;
+            5)
+                show_speed_limit_menu
                 ;;
             0|q|Q|"") return ;;
             *) ;;
@@ -15101,6 +15971,98 @@ show_scanner_shield_menu() {
     done
 }
 
+show_fleet_menu() {
+    while true; do
+        clear_screen
+        draw_header "FLEET FEDERATION TELEMETRY DASHBOARD"
+        echo ""
+        fleet_status
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Collect & Publish Node Telemetry Now"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                fleet_collect_slave_metrics
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_ssl_menu() {
+    while true; do
+        clear_screen
+        draw_header "AUTOMATED LET'S ENCRYPT / ACME SSL SHIELD"
+        echo ""
+        ssl_status
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Issue / Refresh Certificate for Domain"
+        echo -e "  ${BRIGHT_CYAN}[2]${NC} Clear / Reset Certificate Configuration"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo -en "  ${BOLD}Enter Domain Name (e.g. proxy.example.com):${NC} "
+                local dom; read -r dom
+                echo -en "  ${BOLD}Enter Admin Email for ACME alerts:${NC} "
+                local em; read -r em
+                ssl_issue "$dom" "$em"
+                press_any_key
+                ;;
+            2)
+                ssl_clear
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_backup_cloud_menu() {
+    while true; do
+        clear_screen
+        draw_header "AUTOMATED OFF-SITE CLOUD & TELEGRAM BACKUPS"
+        echo ""
+        backup_cloud_status
+        echo -e "  ${BRIGHT_CYAN}[1]${NC} Configure / Toggle Backup Mode (telegram, rclone, s3, off)"
+        echo -e "  ${BRIGHT_CYAN}[2]${NC} Trigger Immediate Backup & Push Off-Site"
+        echo -e "  ${BRIGHT_CYAN}[3]${NC} Disable Cloud Backups"
+        echo -e "  ${DIM}[0]${NC} Back"
+        echo ""
+        local choice
+        choice=$(read_choice "Choice" "0")
+        case "$choice" in
+            1)
+                echo -en "  ${BOLD}Select mode [telegram|rclone|s3|off]:${NC} "
+                local bmode; read -r bmode
+                local btarget=""
+                if [ "$bmode" = "rclone" ] || [ "$bmode" = "s3" ]; then
+                    echo -en "  ${BOLD}Enter target path/bucket (e.g. myremote:backups or s3://bucket/path):${NC} "
+                    read -r btarget
+                fi
+                backup_cloud_toggle "$bmode" "$btarget"
+                press_any_key
+                ;;
+            2)
+                backup_cloud_push
+                press_any_key
+                ;;
+            3)
+                backup_cloud_toggle off
+                press_any_key
+                ;;
+            0|q|Q|"") return ;;
+            *) ;;
+        esac
+    done
+}
+
 show_enterprise_menu() {
     while true; do
         clear_screen
@@ -15114,6 +16076,9 @@ show_enterprise_menu() {
         echo -e "  ${BRIGHT_CYAN}[2]${NC} Role-Based Access Control (Admin / RBAC)"
         echo -e "  ${BRIGHT_CYAN}[3]${NC} Self-Service Status Portal Management"
         echo -e "  ${BRIGHT_CYAN}[4]${NC} Automated Hostile Scanner Shield"
+        echo -e "  ${BRIGHT_CYAN}[5]${NC} Fleet Federation Telemetry Dashboard"
+        echo -e "  ${BRIGHT_CYAN}[6]${NC} Automated Let's Encrypt / ACME SSL Shield"
+        echo -e "  ${BRIGHT_CYAN}[7]${NC} Automated Off-Site Cloud & Telegram Backups"
         echo -e "  ${DIM}[0]${NC} Back"
         echo ""
 
@@ -15124,6 +16089,9 @@ show_enterprise_menu() {
             2) show_rbac_menu ;;
             3) show_portal_menu ;;
             4) show_scanner_shield_menu ;;
+            5) show_fleet_menu ;;
+            6) show_ssl_menu ;;
+            7) show_backup_cloud_menu ;;
             0|q|Q|"") return ;;
             *) ;;
         esac
