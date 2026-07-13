@@ -10100,6 +10100,56 @@ PID_FILE="${INSTALL_DIR}/mtproxymax-telegram.pid"
 # Source the main script functions
 SCRIPT_PATH="${INSTALL_DIR}/mtproxymax"
 
+# Keep the generated bot daemon self-contained.  It does not source the main
+# manager script, so helpers used by Telegram command handlers must be defined
+# here as well.
+format_bytes() {
+    local bytes="${1:-0}"
+    [[ "$bytes" =~ ^[0-9]+$ ]] || bytes=0
+    if [ "$bytes" -ge 1073741824 ]; then
+        awk -v b="$bytes" 'BEGIN {printf "%.2f GB", b/1073741824}'
+    elif [ "$bytes" -ge 1048576 ]; then
+        awk -v b="$bytes" 'BEGIN {printf "%.2f MB", b/1048576}'
+    elif [ "$bytes" -ge 1024 ]; then
+        awk -v b="$bytes" 'BEGIN {printf "%.2f KB", b/1024}'
+    else
+        printf '%s B' "$bytes"
+    fi
+}
+
+format_human_bytes() {
+    format_bytes "$1"
+}
+
+format_duration() {
+    local seconds="${1:-0}"
+    [[ "$seconds" =~ ^[0-9]+$ ]] || seconds=0
+    local days=$((seconds / 86400))
+    local hours=$(((seconds % 86400) / 3600))
+    local minutes=$(((seconds % 3600) / 60))
+    if [ "$days" -gt 0 ]; then
+        printf '%dd %dh %dm' "$days" "$hours" "$minutes"
+    elif [ "$hours" -gt 0 ]; then
+        printf '%dh %dm' "$hours" "$minutes"
+    else
+        printf '%dm' "$minutes"
+    fi
+}
+
+is_proxy_running() {
+    [ "$(docker inspect -f '{{.State.Running}}' mtproxymax 2>/dev/null)" = "true" ]
+}
+
+get_container_uptime() {
+    get_uptime
+}
+
+get_active_connections() {
+    local _in _out _connections
+    read -r _in _out _connections <<< "$(get_stats)"
+    printf '%s\n' "${_connections:-0}"
+}
+
 # Load settings (inline minimal version)
 load_tg_settings() {
     [ -f "$SETTINGS_FILE" ] || return
@@ -10483,7 +10533,7 @@ _process_cmd() {
             fi
             local _si _so _sc; read -r _si _so _sc <<< "$(get_stats)"
             local up=$(get_uptime)
-            tg_send "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${_sc}\n📊 Traffic: ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}"
+            tg_send "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${_sc}\n📊 Traffic: ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}"
             ;;
         /mp_secrets|/mp_secrets@*)
             load_tg_settings
@@ -10508,7 +10558,7 @@ _process_cmd() {
                 local icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
                 local uc=${_parsed_uc["$label"]:-0}
                 local cui=${_cum_user_in["$label"]:-0} cuo=${_cum_user_out["$label"]:-0}
-                msg+="${icon} *$(_esc "$label")* — ${uc} conn | ↓$(format_bytes $cui) ↑$(format_bytes $cuo)\n"
+                msg+="${icon} *$(_esc "$label")* — ${uc} conn | ↓$(format_bytes $cuo) ↑$(format_bytes $cui)\n"
             done < "$SECRETS_FILE"
             tg_send "$msg"
             ;;
@@ -10633,7 +10683,7 @@ _process_cmd() {
             load_tg_settings
             local _ti _to _tc; read -r _ti _to _tc <<< "$(get_stats)"
             local msg="📊 *Traffic Report*\n\n"
-            msg+="Total: ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})\n"
+            msg+="Total: ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})\n"
             msg+="Active connections: ${_tc}\n\n"
             while IFS='|' read -r label secret created enabled _mc _mi _q _ex _notes; do
                 [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
@@ -10641,7 +10691,7 @@ _process_cmd() {
                 local cum_u=$(get_cum_user_traffic "$label")
                 local cui=$(echo "$cum_u"|awk '{print $1}')
                 local cuo=$(echo "$cum_u"|awk '{print $2}')
-                msg+="👤 *$(_esc "$label")*: ↓ $(format_bytes $cui) ↑ $(format_bytes $cuo)\n"
+                msg+="👤 *$(_esc "$label")*: ↓ $(format_bytes $cuo) ↑ $(format_bytes $cui)\n"
             done < "$SECRETS_FILE"
             tg_send "$msg"
             ;;
@@ -10750,7 +10800,7 @@ _process_cmd() {
 🔌 *Connections*: ${_rc} live
 🏎 *QoS Shaping*: ${qos_st}
 🕒 *Happy Hours*: ${hh_st}
-📈 *Total Traffic*: $(format_human_bytes ${_cum_in:-0}) DL / $(format_human_bytes ${_cum_out:-0}) UL"
+📈 *Total Traffic*: $(format_human_bytes ${_cum_out:-0}) DL / $(format_human_bytes ${_cum_in:-0}) UL"
             tg_send "$msg"
             ;;
         /reply\ *|/reply@*\ *)
@@ -10811,7 +10861,7 @@ while true; do
             _di=$((_ci - _pci)); _do=$((_co - _pco))
             [ "$_di" -le 0 ] && [ "$_do" -le 0 ] && { _prev_log_in[$label]=$_ci; _prev_log_out[$label]=$_co; continue; }
             [ "$_di" -lt 0 ] && _di=0; [ "$_do" -lt 0 ] && _do=0
-            echo "${_ts} ${label}: ↓$(format_bytes $_di) ↑$(format_bytes $_do)" >> "$_connlog"
+            echo "${_ts} ${label}: ↓$(format_bytes $_do) ↑$(format_bytes $_di)" >> "$_connlog"
             _prev_log_in[$label]=$_ci; _prev_log_out[$label]=$_co
         done < "$SECRETS_FILE"
         # Auto-rotate: keep last 8000 lines if over 10000
@@ -10909,7 +10959,7 @@ while true; do
             _ri=0 _ro=0 _rc=0
             read -r _ri _ro _rc <<< "$(get_stats)" || true
             _up=$(get_uptime)
-            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration ${_up:-0})\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_in:-0}) ↑ $(format_bytes ${_cum_out:-0})"
+            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration ${_up:-0})\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})"
         fi
     fi
 
