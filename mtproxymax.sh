@@ -1303,6 +1303,8 @@ generate_telemt_config() {
         UNKNOWN_SNI_ACTION="mask"
     fi
     local ad_tag="${AD_TAG:-}"
+    ad_tag=$(echo "$ad_tag" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    [[ "$ad_tag" =~ ^[0-9a-f]{32}$ ]] || ad_tag=""
     local port="${PROXY_PORT:-443}"
     local metrics_port="${PROXY_METRICS_PORT:-9090}"
 
@@ -1451,8 +1453,10 @@ TOML_EOF
         echo "[access.user_ad_tags]" >> "$tmp"
         for i in "${!SECRETS_LABELS[@]}"; do
             [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
-            [ -n "${SECRETS_AD_TAGS[$i]:-}" ] || continue
-            echo "${SECRETS_LABELS[$i]} = \"${SECRETS_AD_TAGS[$i]}\"" >> "$tmp"
+            local _uat="${SECRETS_AD_TAGS[$i]:-}"
+            _uat=$(echo "$_uat" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            [[ "$_uat" =~ ^[0-9a-f]{32}$ ]] || continue
+            echo "${SECRETS_LABELS[$i]} = \"${_uat}\"" >> "$tmp"
         done
     fi
 
@@ -2548,17 +2552,17 @@ secret_set_adtag() {
     local label="$1" ad_tag="$2" no_restart="${3:-false}"
     [ -z "$label" ] && { log_error "Usage: mtproxymax secret adtag <label> [32-hex-tag|clear]"; return 1; }
 
-    if [ "$ad_tag" = "clear" ] || [ -z "$ad_tag" ]; then
+    ad_tag=$(echo "${ad_tag:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    if [[ "$ad_tag" =~ ^(clear|remove|off|delete)$ ]] || [ -z "$ad_tag" ]; then
         secret_clear_adtag "$label" "$no_restart"
         return $?
     fi
 
     # Validate exactly 32 hex chars
-    if ! [[ "$ad_tag" =~ ^[0-9a-fA-F]{32}$ ]]; then
-        log_error "Ad-tag must be exactly 32 hexadecimal characters (obtained from @MTProxybot)"
+    if ! [[ "$ad_tag" =~ ^[0-9a-f]{32}$ ]]; then
+        log_error "Ad-tag must be exactly 32 hexadecimal characters (obtained from @MTProxyBot)"
         return 1
     fi
-    ad_tag=$(echo "$ad_tag" | tr '[:upper:]' '[:lower:]')
 
     local idx=-1 i
     for i in "${!SECRETS_LABELS[@]}"; do
@@ -12729,7 +12733,8 @@ run_installer() {
             echo -en "  ${DIM}Enter ad-tag hex:${NC} "
             local adtag_input
             read -r adtag_input
-            if [[ "$adtag_input" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            adtag_input=$(echo "$adtag_input" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            if [[ "$adtag_input" =~ ^[0-9a-f]{32}$ ]]; then
                 AD_TAG="$adtag_input"
             else
                 log_warn "Invalid ad-tag (must be 32 hex characters), skipping"
@@ -14758,21 +14763,23 @@ cli_main() {
             case "$1" in
                 set)
                     check_root
-                    if [[ "$2" =~ ^[0-9a-fA-F]{32}$ ]]; then
-                        AD_TAG="$2"
+                    local _in
+                    _in=$(echo "${2:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+                    if [[ "$_in" =~ ^[0-9a-f]{32}$ ]]; then
+                        AD_TAG="$_in"
                         save_settings
-                        log_success "Ad-tag set"
+                        log_success "Ad-tag set to: ${_in}"
                         load_secrets; reload_proxy_config
                     else
-                        log_error "Ad-tag must be 32 hex characters"
+                        log_error "Ad-tag must be exactly 32 hexadecimal characters (obtained from @MTProxyBot)"
                         return 1
                     fi
                     ;;
-                remove)
+                remove|clear|off|delete)
                     check_root
                     AD_TAG=""
                     save_settings
-                    log_success "Ad-tag removed"
+                    log_success "Ad-tag removed (promoted channel disabled)"
                     load_secrets; reload_proxy_config
                     ;;
                 view|"")
@@ -17030,13 +17037,14 @@ show_settings_menu() {
             6)
                 echo -en "  ${BOLD}Ad-tag (32 hex chars, or 'remove'):${NC} "
                 local at; read -r at
-                if [ "$at" = "remove" ]; then
+                at=$(echo "$at" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+                if [[ "$at" =~ ^(remove|clear|off|delete)$ ]] || [ -z "$at" ]; then
                     AD_TAG=""
-                    log_success "Ad-tag removed"
+                    log_success "Ad-tag removed (promoted channel disabled)"
                     save_settings
-                elif [[ "$at" =~ ^[0-9a-fA-F]{32}$ ]]; then
+                elif [[ "$at" =~ ^[0-9a-f]{32}$ ]]; then
                     AD_TAG="$at"
-                    log_success "Ad-tag set"
+                    log_success "Ad-tag set to: ${at}"
                     save_settings
                 else
                     log_error "Invalid ad-tag (must be 32 hex characters)"
