@@ -8926,9 +8926,37 @@ run_proxy_container() {
         --ulimit nofile=65535:65535 \
         -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
         "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
-            log_error "Failed to start container"
-            echo -e "  ${DIM}${_run_out}${NC}"
-            return 1
+            if echo "$_run_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
+                log_warn "Docker cgroup/D-Bus timeout detected on minimal/low-RAM VPS. Attempting auto-recovery..."
+                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+                if command -v systemctl &>/dev/null; then
+                    systemctl daemon-reload 2>/dev/null || true
+                    systemctl restart dbus 2>/dev/null || true
+                    sleep 1
+                    systemctl restart docker 2>/dev/null || true
+                    sleep 2
+                fi
+                docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                log_info "Retrying container launch after D-Bus & memory cache recovery..."
+                _run_out=$(docker run -d "${_docker_args[@]}" \
+                    --ulimit nofile=65535:65535 \
+                    -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
+                    "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                        # If standard retry still fails, attempt fallback with explicit host cgroup namespace
+                        _run_out=$(docker run -d "${_docker_args[@]}" \
+                            --cgroupns host \
+                            -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
+                            "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                                log_error "Failed to start container after recovery attempts"
+                                echo -e "  ${DIM}${_run_out}${NC}"
+                                return 1
+                            }
+                    }
+            else
+                log_error "Failed to start container"
+                echo -e "  ${DIM}${_run_out}${NC}"
+                return 1
+            fi
         }
 
     # Wait for startup
@@ -9016,10 +9044,23 @@ _start_all_instances() {
         generate_telemt_config
         mv "${CONFIG_DIR}/config.toml" "$inst_config" 2>/dev/null
         docker rm -f "$cname" &>/dev/null || true
-        docker run -d --name "$cname" --restart unless-stopped --network host \
+        local _inst_out
+        _inst_out=$(docker run -d --name "$cname" --restart unless-stopped --network host \
             --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
             -v "${inst_config}:/etc/telemt.toml:ro" \
-            "$(get_docker_image)" /etc/telemt.toml &>/dev/null
+            "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                if echo "$_inst_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
+                    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+                    systemctl daemon-reload 2>/dev/null || true
+                    systemctl restart dbus docker 2>/dev/null || true
+                    sleep 2
+                    docker rm -f "$cname" &>/dev/null || true
+                    docker run -d --name "$cname" --restart unless-stopped --network host \
+                        --cgroupns host --log-opt max-size=10m --log-opt max-file=3 \
+                        -v "${inst_config}:/etc/telemt.toml:ro" \
+                        "$(get_docker_image)" /etc/telemt.toml &>/dev/null || true
+                fi
+            }
     done
     PROXY_PORT="$_orig_port"
     PROXY_METRICS_PORT="$_orig_mport"
@@ -13067,9 +13108,26 @@ instance_add() {
         --log-opt max-size=10m
         --log-opt max-file=3
     )
-    docker run -d "${_docker_args[@]}" \
+    local _inst_add_out
+    _inst_add_out=$(docker run -d "${_docker_args[@]}" \
         -v "${inst_config}:/etc/telemt.toml:ro" \
-        "$(get_docker_image)" /etc/telemt.toml &>/dev/null
+        "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+            if echo "$_inst_add_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
+                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+                systemctl daemon-reload 2>/dev/null || true
+                systemctl restart dbus docker 2>/dev/null || true
+                sleep 2
+                docker rm -f "$cname" &>/dev/null || true
+                docker run -d "${_docker_args[@]}" \
+                    -v "${inst_config}:/etc/telemt.toml:ro" \
+                    "$(get_docker_image)" /etc/telemt.toml &>/dev/null || {
+                        docker run -d --name "$cname" --restart unless-stopped --network host \
+                            --cgroupns host --log-opt max-size=10m --log-opt max-file=3 \
+                            -v "${inst_config}:/etc/telemt.toml:ro" \
+                            "$(get_docker_image)" /etc/telemt.toml &>/dev/null || true
+                    }
+            fi
+        }
 
     apply_firewall_rules 2>/dev/null || true
     log_success "Instance started on port ${port} (container: ${cname}, metrics: ${mport})"
