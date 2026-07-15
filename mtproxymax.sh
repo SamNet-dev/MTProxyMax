@@ -5123,10 +5123,12 @@ apply_firewall_rules() {
 
     if command -v iptables >/dev/null 2>&1; then
         for _p in "${_all_ports[@]}"; do
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m hashlimit --hashlimit-name mtproxy_syn_in --hashlimit-mode srcip --hashlimit-above 25/sec --hashlimit-burst 60 -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
             while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn 2>/dev/null; do :; done
             while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null; do :; done
             while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -j DROP 2>/dev/null; do :; done
             while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
+            while iptables -D INPUT -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --rcheck --seconds 2 --hitcount 20 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; do :; done
             for _chain in FORWARD OUTPUT POSTROUTING; do
                 while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${_p}" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
                 while iptables -t mangle -D "$_chain" -p tcp --tcp-flags SYN,RST SYN --dport "${_p}" -m comment --comment "mtproxymax_mss" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
@@ -5144,16 +5146,22 @@ apply_firewall_rules() {
         local _shield_ok=false
         if command -v iptables >/dev/null 2>&1; then
             for _p in "${_all_ports[@]}"; do
-                iptables -I INPUT 1 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null && \
-                iptables -I INPUT 2 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --update --seconds 5 --hitcount 15 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null && _shield_ok=true || true
+                # Prefer hashlimit with token-bucket burst (25/sec, burst 60) to allow instant multi-socket Telegram client connection without dropping a single packet
+                if iptables -I INPUT 1 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m hashlimit --hashlimit-name mtproxy_syn_in --hashlimit-mode srcip --hashlimit-above 25/sec --hashlimit-burst 60 -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null; then
+                    _shield_ok=true
+                else
+                    # Safe fallback to xt_recent using --rcheck (NEVER --update!) and 20 hits/2s so clients never get trapped in infinite drop loops
+                    iptables -I INPUT 1 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --set --name mtproxy_syn -m comment --comment "mtproxymax_shield" 2>/dev/null && \
+                    iptables -I INPUT 2 -p tcp --dport "${_p}" -m conntrack --ctstate NEW -m recent --rcheck --seconds 2 --hitcount 20 --name mtproxy_syn -m comment --comment "mtproxymax_shield" -j DROP 2>/dev/null && _shield_ok=true || true
+                fi
             done
         fi
         if [ "$_shield_ok" = "false" ] && command -v nft >/dev/null 2>&1; then
             nft add table inet mtproxymax_shield 2>/dev/null || true
             nft add chain inet mtproxymax_shield input '{ type filter hook input priority filter; policy accept; }' 2>/dev/null || true
-            nft add set inet mtproxymax_shield syn_meter '{ type ipv4_addr; flags dynamic,timeout; timeout 5s; }' 2>/dev/null || true
+            nft add set inet mtproxymax_shield syn_meter '{ type ipv4_addr; flags dynamic,timeout; timeout 60s; }' 2>/dev/null || true
             for _p in "${_all_ports[@]}"; do
-                nft add rule inet mtproxymax_shield input tcp dport "${_p}" ct state new add @syn_meter '{ ip saddr limit rate over 15/second }' counter drop 2>/dev/null && _shield_ok=true || true
+                nft add rule inet mtproxymax_shield input tcp dport "${_p}" ct state new add @syn_meter '{ ip saddr limit rate over 25/second burst 60 packets }' counter drop 2>/dev/null && _shield_ok=true || true
             done
         fi
     fi
