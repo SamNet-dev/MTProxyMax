@@ -38,8 +38,8 @@ CLOUD_BACKUP_FILE="${CLOUD_BACKUP_FILE:-${INSTALL_DIR}/cloud_backup.conf}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.4.23"
-TELEMT_COMMIT="2ac93c6"  # Pinned: v3.4.23 — Synlimit per-target netfilter rules, CidrRateLimitKey IpNetwork, regression coverage
+TELEMT_MIN_VERSION="3.4.24"
+TELEMT_COMMIT="1f9c82c"  # Pinned: v3.4.24 — Bounded ME/Direct relay memory budgets, AES key schedule zeroization, flow pressure hysteresis
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
