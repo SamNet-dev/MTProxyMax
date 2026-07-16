@@ -6,7 +6,7 @@ on:
       telemt_commit:
         description: 'Telemt commit hash to build from'
         required: true
-        default: '1f9c82c924c2e75d7d160300d83a1dc0ba46d9bd'
+        default: '1f9c82c'
       version_tag:
         description: 'Version tag (e.g. 3.4.8-10c9bcd)'
         required: true
