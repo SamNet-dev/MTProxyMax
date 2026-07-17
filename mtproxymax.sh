@@ -307,50 +307,7 @@ draw_status() {
     esac
 }
 
-# Draw a progress bar
-draw_progress() {
-    local current="$1" total="$2" width="${3:-20}" label="${4:-}"
-    local filled empty pct
-    if [ "$total" -gt 0 ] 2>/dev/null; then
-        pct=$(( (current * 100) / total ))
-        filled=$(( (current * width) / total ))
-    else
-        pct=0
-        filled=0
-    fi
-    [ "$filled" -gt "$width" ] && filled=$width
-    empty=$((width - filled))
 
-    local bar_color="$GREEN"
-    [ "$pct" -ge 70 ] && bar_color="$YELLOW"
-    [ "$pct" -ge 90 ] && bar_color="$RED"
-
-    local bar="${bar_color}$(_repeat '█' "$filled")${DIM}$(_repeat '░' "$empty")${NC}"
-    if [ -n "$label" ]; then
-        echo -e "  ${label} [${bar}] ${pct}%"
-    else
-        echo -e "  [${bar}] ${pct}%"
-    fi
-}
-
-# Draw a sparkline from array of values
-draw_sparkline() {
-    local -a values=("$@")
-    local chars=('▁' '▂' '▃' '▄' '▅' '▆' '▇' '█')
-    local max=0
-    for v in "${values[@]}"; do
-        [ "$v" -gt "$max" ] 2>/dev/null && max=$v
-    done
-    [ "$max" -eq 0 ] && max=1
-
-    local result=""
-    for v in "${values[@]}"; do
-        local idx=$(( (v * 7) / max ))
-        [ "$idx" -gt 7 ] && idx=7
-        result+="${chars[$idx]}"
-    done
-    echo -e "${BRIGHT_CYAN}${result}${NC}"
-}
 
 # Prompt for menu choice with retro styling
 read_choice() {
@@ -367,16 +324,7 @@ read_choice() {
     echo "$choice"
 }
 
-# Typing effect for retro banner
-typing_effect() {
-    local text="$1" delay="${2:-0.01}"
-    local i
-    for (( i=0; i<${#text}; i++ )); do
-        echo -n "${text:$i:1}"
-        sleep "$delay" 2>/dev/null || true
-    done
-    echo ""
-}
+
 
 # Press any key prompt
 press_any_key() {
@@ -468,18 +416,7 @@ format_duration() {
     fi
 }
 
-# Format large numbers
-format_number() {
-    local num=$1
-    [ -z "$num" ] || [ "$num" = "0" ] && { echo "0"; return; }
-    if [ "$num" -ge 1000000 ] 2>/dev/null; then
-        echo "$(awk -v n="$num" 'BEGIN {printf "%.1f", n/1000000}')M"
-    elif [ "$num" -ge 1000 ] 2>/dev/null; then
-        echo "$(awk -v n="$num" 'BEGIN {printf "%.1f", n/1000}')K"
-    else
-        echo "$num"
-    fi
-}
+
 
 # Escape markdown special characters
 escape_md() {
@@ -1701,52 +1638,6 @@ get_user_stats() {
     echo "0 0 0"
 }
 
-# Get cumulative per-user traffic (persisted across restarts)
-# Reads saved cumulative + adds delta from current live Prometheus session
-# Returns: bytes_in bytes_out connections
-get_cumulative_user_stats() {
-    local user="$1"
-    local _stats_dir="${INSTALL_DIR}/relay_stats"
-    local _ut_file="${_stats_dir}/user_traffic"
-    local _snap_file="${_stats_dir}/user_traffic_snapshot"
-
-    # Read saved cumulative for this user
-    local saved_in=0 saved_out=0
-    if [ -f "$_ut_file" ]; then
-        local _line
-        _line=$(awk -F'|' -v u="$user" '$1 == u {print $2"|"$3; exit}' "$_ut_file")
-        if [ -n "$_line" ]; then
-            IFS='|' read -r saved_in saved_out <<< "$_line"
-        fi
-    fi
-    [[ "${saved_in:-0}" =~ ^[0-9]+$ ]] || saved_in=0
-    [[ "${saved_out:-0}" =~ ^[0-9]+$ ]] || saved_out=0
-
-    # Read snapshot (raw Prometheus values at last save)
-    local snap_in=0 snap_out=0
-    if [ -f "$_snap_file" ]; then
-        local _sline
-        _sline=$(awk -F'|' -v u="$user" '$1 == u {print $2"|"$3; exit}' "$_snap_file")
-        if [ -n "$_sline" ]; then
-            IFS='|' read -r snap_in snap_out <<< "$_sline"
-        fi
-    fi
-    [[ "${snap_in:-0}" =~ ^[0-9]+$ ]] || snap_in=0
-    [[ "${snap_out:-0}" =~ ^[0-9]+$ ]] || snap_out=0
-
-    # Get current live Prometheus values
-    local live_in=0 live_out=0 live_conns=0
-    read -r live_in live_out live_conns <<< "$(get_user_stats "$user" 2>/dev/null)"
-
-    # Compute delta since last save
-    # If live < snapshot, a restart happened — delta is just the live value
-    local delta_in=$((live_in - snap_in))
-    local delta_out=$((live_out - snap_out))
-    [ "$delta_in" -lt 0 ] 2>/dev/null && delta_in=$live_in
-    [ "$delta_out" -lt 0 ] 2>/dev/null && delta_out=$live_out
-
-    echo "$(( saved_in + delta_in )) $(( saved_out + delta_out )) ${live_conns}"
-}
 
 # Batch-load cumulative stats for ALL users in one pass (avoids N*8 forks)
 # Populates: _batch_cum_in[label], _batch_cum_out[label], _batch_cum_conns[label]
@@ -3986,13 +3877,7 @@ secret_list_by_tag() {
     echo ""
 }
 
-# Return array of labels matching a given tag (for bulk ops)
-_secret_labels_with_tag() {
-    local tag="$1"
-    [ -f "$_TAGS_FILE" ] || return 0
-    local tag_lower; tag_lower=$(echo "$tag" | tr '[:upper:]' '[:lower:]')
-    awk -F'|' -v t=",${tag_lower}," '{ if(index(","$2",", t)) print $1 }' "$_TAGS_FILE"
-}
+
 
 # ── Maintenance mode (iptables-based) ──
 MAINTENANCE_FILE="${INSTALL_DIR}/.maintenance"
@@ -9417,10 +9302,6 @@ geoblock_remove_all() {
     fi
 }
 
-build_blocklist_config() {
-    [ -z "$BLOCKLIST_COUNTRIES" ] && return
-    geoblock_reapply_all
-}
 
 show_geoblock_menu() {
     while true; do
@@ -9578,12 +9459,6 @@ health_check() {
     echo ""
 }
 
-auto_recover() {
-    if ! is_proxy_running && [ ! -f /tmp/.mtproxymax_stopped ]; then
-        log_warn "Proxy is down, attempting auto-recovery..."
-        start_proxy_container
-    fi
-}
 
 # ── Section 13: Auto-Update ─────────────────────────────────
 
@@ -9913,17 +9788,6 @@ admin_list() {
     done < "$ADMINS_FILE"
 }
 
-admin_check_role() {
-    local tg_id="$1"
-    [ -z "$tg_id" ] && { echo "none"; return; }
-    if [ "$tg_id" = "${TELEGRAM_CHAT_ID:-}" ]; then
-        echo "superadmin"
-        return
-    fi
-    load_admins
-    local role; role=$(grep "^${tg_id}|" "$ADMINS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
-    echo "${role:-none}"
-}
 
 # ── Section 13e: Decoupled Self-Service Web Portal ──────────
 portal_export_data() {
@@ -10288,7 +10152,6 @@ speed_limit_list() {
     echo ""
 }
 
-speed_limit_status() { speed_limit_list "$@"; }
 
 # ── Section 13h: Suite 2 — Global Federation & Multi-Server Fleet Dashboard (fleet) ──
 
@@ -11015,15 +10878,6 @@ get_uptime() {
     [ "$se" -gt 0 ] 2>/dev/null && echo $(( $(date +%s) - se )) || echo 0
 }
 
-get_user_stats_tg() {
-    local user="$1" m="${2:-}"
-    [ -z "$m" ] && m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
-    [ -z "$m" ] && echo "0 0 0" && return
-    local i=$(echo "$m"|awk -v u="$user" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {print $NF}')
-    local o=$(echo "$m"|awk -v u="$user" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {print $NF}')
-    local c=$(echo "$m"|awk -v u="$user" '$0 ~ "^telemt_user_connections_current\\{.*user=\"" u "\"" {print $NF}')
-    echo "${i:-0} ${o:-0} ${c:-0}"
-}
 
 domain_to_hex() { printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 
@@ -11138,7 +10992,7 @@ update_traffic() {
     save_traffic
 }
 
-get_cum_traffic() { echo "${_cum_in:-0} ${_cum_out:-0}"; }
+
 get_cum_user_traffic() { echo "${_cum_user_in[$1]:-0} ${_cum_user_out[$1]:-0}"; }
 
 process_commands() {
