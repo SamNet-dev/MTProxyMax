@@ -1300,7 +1300,7 @@ proxy_protocol = ${PROXY_PROTOCOL:-false}
 $([ "$PROXY_PROTOCOL" = "true" ] && [ -n "$PROXY_PROTOCOL_TRUSTED_CIDRS" ] && echo "proxy_protocol_trusted_cidrs = [$(echo "$PROXY_PROTOCOL_TRUSTED_CIDRS" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//;s/[[:space:]]*,[[:space:]]*/", "/g;s/^/"/;s/$/"/' )]")
 metrics_listen = "127.0.0.1:${metrics_port}"
 metrics_whitelist = ["127.0.0.1", "::1"]
-client_mss = "${CLIENT_MSS:-tspu}"
+${CLIENT_MSS:+client_mss = "${CLIENT_MSS}"}
 
 [timeouts]
 client_handshake = 30
