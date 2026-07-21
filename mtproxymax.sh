@@ -11014,6 +11014,8 @@ try:
         txt=r.get('message',{}).get('text','').split('\n')[0][:200]
         cid=r.get('message',{}).get('chat',{}).get('id','')
         print(f'{uid}\t{cid}\t{txt}')
+except Exception:
+    pass
 " 2>/dev/null | while IFS=$'\t' read -r _uid _cid _txt || [ -n "$_uid" ]; do
             [ -z "$_uid" ] && continue
             _process_cmd "$_uid" "$_cid" "$_txt"
