@@ -6148,9 +6148,9 @@ run_tag() {
         return 0
     fi
     if [ "$tag_str" = "clear" ] || [ "$tag_str" = "remove" ]; then
-        run_secret note "$label" ""
+        secret_edit_note "$label" ""
     else
-        run_secret note "$label" "$tag_str"
+        secret_edit_note "$label" "$tag_str"
     fi
 }
 
@@ -6334,39 +6334,44 @@ EOF
 # ── Suite 2: Commercial & Quota Intelligence Suite ─────────────────────────────
 
 run_guest() {
-    local label="$1"
+    local guest_label="${1:-}"
     local limit_str="${2:-24h}"
-    [ -z "$label" ] && { echo -e "\n  ── ⌛ ${BOLD}Disposable Burner / Guest Links${NC} ──\n\n  ${DIM}Usage: mtproxymax guest <label> <24h|7d|500mb|1gb>${NC}\n"; return 1; }
+    [ -z "$guest_label" ] && { echo -e "\n  ── ⌛ ${BOLD}Disposable Burner / Guest Links${NC} ──\n\n  ${DIM}Usage: mtproxymax guest <label> <24h|7d|500mb|1gb>${NC}\n"; return 1; }
     
     check_root
     load_settings
     load_secrets
     
     local note="🔥 Burner link (${limit_str})"
-    local days=0 quota=0 expires=""
+    local quota=0 expires=""
     
     if [[ "${limit_str,,}" =~ ^([0-9]+)h(ours?)?$ ]]; then
         local hours="${BASH_REMATCH[1]}"
-        days=$(( (hours + 23) / 24 ))
-        [ "$days" -lt 1 ] && days=1
         expires=$(date -u -d "+${hours} hours" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r $(( $(date +%s) + hours*3600 )) "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
     elif [[ "${limit_str,,}" =~ ^([0-9]+)d(ays?)?$ ]]; then
-        days="${BASH_REMATCH[1]}"
+        local days="${BASH_REMATCH[1]}"
         expires=$(date -u -d "+${days} days" "+%Y-%m-%d" 2>/dev/null || date -u -r $(( $(date +%s) + days*86400 )) "+%Y-%m-%d" 2>/dev/null || echo "")
     elif [[ "${limit_str,,}" =~ ^([0-9]+)(mb|gb|kb|b)$ ]]; then
-        quota=$(parse_bytes "$limit_str")
-        days=30
+        quota=$(parse_human_bytes "$limit_str") || {
+            log_error "Invalid quota format: ${limit_str}"
+            return 1
+        }
     else
         log_error "Invalid limit format. Use e.g. 12h, 24h, 7d, 500mb, 1gb."
         return 1
     fi
+
+    if [ "$quota" -eq 0 ] && [ -z "$expires" ]; then
+        log_error "Failed to calculate guest expiry"
+        return 1
+    fi
     
-    log_info "Creating disposable guest link '${label}'..."
-    secret_add "$label" "" "true"
-    secret_set_limits "$label" "0" "0" "${quota}" "${expires}" "true"
-    run_secret note "$label" "$note"
-    reload_proxy_config
-    log_success "Burner link '${label}' created successfully!"
+    log_info "Creating disposable guest link '${guest_label}'..."
+    secret_add "$guest_label" "" "true" || return 1
+    secret_set_limits "$guest_label" "0" "0" "${quota}" "${expires}" "true" || return 1
+    secret_edit_note "$guest_label" "$note" || return 1
+    reload_proxy_config || return 1
+    log_success "Burner link '${guest_label}' created successfully!"
 }
 
 run_pool() {
