@@ -6424,7 +6424,7 @@ run_pool() {
             local p_name="$2" p_limit_str="${3:-0}" p_notes="${4:-}"
             [ -z "$p_name" ] && { log_error "Usage: mtproxymax pool create <pool_name> <limit_mb/gb>"; return 1; }
             local p_limit=0
-            [ "$p_limit_str" != "0" ] && p_limit=$(parse_bytes "$p_limit_str")
+            [ "$p_limit_str" != "0" ] && p_limit=$(parse_human_bytes "$p_limit_str")
             awk -v p="$p_name" -F'|' '$1 != p' "$pool_file" > "${pool_file}.tmp" 2>/dev/null || true
             echo "${p_name}|${p_limit}||${p_notes}" >> "${pool_file}.tmp"
             mv "${pool_file}.tmp" "$pool_file" && chmod 600 "$pool_file"
