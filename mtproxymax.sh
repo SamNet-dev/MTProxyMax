@@ -6333,6 +6333,46 @@ EOF
 
 # ── Suite 2: Commercial & Quota Intelligence Suite ─────────────────────────────
 
+run_traffic_reset_global() {
+    local force="${1:-}"
+    check_root
+    load_settings
+    
+    echo -e "\n  ── ⚠️ ${BOLD}Global Traffic Reset${NC} ──\n"
+    if [ "$force" != "--force" ] && [ "$force" != "-y" ]; then
+        echo -e "This will permanently reset the cumulative server-wide traffic counters."
+        echo -e "Per-secret traffic and quotas will NOT be affected."
+        echo -n -e "Are you sure you want to proceed? (y/N) "
+        read -r confirm
+        [[ "${confirm,,}" =~ ^y ]] || { log_error "Aborted."; return 0; }
+    fi
+    
+    local _stats_dir="${INSTALL_DIR}/relay_stats"
+    mkdir -p "$_stats_dir"
+    
+    log_info "Fetching current live metrics baseline..."
+    local _metrics
+    _metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
+    local cur_in=0 cur_out=0
+    if [ -n "$_metrics" ]; then
+        cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
+        cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+        cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
+    fi
+    
+    log_info "Resetting cumulative counters..."
+    exec 9>"${_stats_dir}/.traffic.lock"
+    flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    
+    echo "0|0" > "${_stats_dir}/cumulative_traffic"
+    echo "${cur_in}|${cur_out}" > "${_stats_dir}/global_traffic_snapshot"
+    
+    exec 9>&-
+    
+    audit_log "Global traffic reset to 0 (baseline: ${cur_in}|${cur_out})"
+    log_success "Global traffic has been successfully reset!"
+}
+
 run_guest() {
     local guest_label="${1:-}"
     local limit_str="${2:-24h}"
@@ -10902,6 +10942,15 @@ load_traffic() {
     _cum_in=${_cum_in:-0}; _cum_out=${_cum_out:-0}
     [[ "$_cum_in" =~ ^[0-9]+$ ]] || _cum_in=0
     [[ "$_cum_out" =~ ^[0-9]+$ ]] || _cum_out=0
+    
+    if [ -f "${INSTALL_DIR}/relay_stats/global_traffic_snapshot" ]; then
+        IFS='|' read -r _prev_total_in _prev_total_out < "${INSTALL_DIR}/relay_stats/global_traffic_snapshot"
+    fi
+    _prev_total_in=${_prev_total_in:-0}
+    _prev_total_out=${_prev_total_out:-0}
+    [[ "$_prev_total_in" =~ ^[0-9]+$ ]] || _prev_total_in=0
+    [[ "$_prev_total_out" =~ ^[0-9]+$ ]] || _prev_total_out=0
+
     if [ -f "$USER_TRAFFIC_FILE" ]; then
         while IFS='|' read -r _ul _ui _uo; do
             [[ "$_ul" =~ ^# ]] && continue; [ -z "$_ul" ] && continue
@@ -10912,6 +10961,18 @@ load_traffic() {
             _cum_user_in["$_ul"]=$_vi
             _cum_user_out["$_ul"]=$_vo
         done < "$USER_TRAFFIC_FILE"
+    fi
+
+    if [ -f "${INSTALL_DIR}/relay_stats/user_traffic_snapshot" ]; then
+        while IFS='|' read -r _ul _ui _uo; do
+            [[ "$_ul" =~ ^# ]] && continue; [ -z "$_ul" ] && continue
+            [[ "$_ul" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
+            local _vi=${_ui:-0} _vo=${_uo:-0}
+            [[ "$_vi" =~ ^[0-9]+$ ]] || _vi=0
+            [[ "$_vo" =~ ^[0-9]+$ ]] || _vo=0
+            _prev_user_in["$_ul"]=$_vi
+            _prev_user_out["$_ul"]=$_vo
+        done < "${INSTALL_DIR}/relay_stats/user_traffic_snapshot"
     fi
 }
 
@@ -14750,8 +14811,13 @@ cli_main() {
             ;;
 
         traffic)
-            load_settings
-            load_secrets
+            local subcmd="${1:-}"
+            if [ "$subcmd" = "reset-global" ]; then
+                shift
+                run_traffic_reset_global "$@"
+            else
+                load_settings
+                load_secrets
             echo ""
             draw_header "TRAFFIC"
             local t_in t_out conns
@@ -14772,6 +14838,7 @@ cli_main() {
                 echo -e "  ${GREEN}${SYM_OK}${NC} ${BOLD}${label}${NC}: ${SYM_DOWN} $(format_bytes "$u_in")  ${SYM_UP} $(format_bytes "$u_out")  conns: ${u_conns}"
             done
             echo ""
+            fi
             ;;
 
         connections)
