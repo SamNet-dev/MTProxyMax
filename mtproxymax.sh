@@ -1244,6 +1244,7 @@ generate_telemt_config() {
     [[ "$ad_tag" =~ ^[0-9a-f]{32}$ ]] || ad_tag=""
     local port="${PROXY_PORT:-443}"
     local metrics_port="${PROXY_METRICS_PORT:-9090}"
+    local stats_port=$((metrics_port + 1))
 
     local domains_toml=""
     if [[ "$raw_domain" == *","* ]]; then
@@ -1294,11 +1295,13 @@ show = [$(get_enabled_labels_quoted)]
 
 [server]
 port = ${port}
-listen_addr_ipv4 = "0.0.0.0"
-listen_addr_ipv6 = "::"
+listen_addr_ipv4 = "${PROXY_BIND_IPV4:-0.0.0.0}"
+listen_addr_ipv6 = "${PROXY_BIND_IPV6:-::}"
 proxy_protocol = ${PROXY_PROTOCOL:-false}
 $([ "$PROXY_PROTOCOL" = "true" ] && [ -n "$PROXY_PROTOCOL_TRUSTED_CIDRS" ] && echo "proxy_protocol_trusted_cidrs = [$(echo "$PROXY_PROTOCOL_TRUSTED_CIDRS" | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//;s/[[:space:]]*,[[:space:]]*/", "/g;s/^/"/;s/$/"/' )]")
 metrics_listen = "127.0.0.1:${metrics_port}"
+internal_stats_listen = "127.0.0.1:${stats_port}"
+stats_listen = "127.0.0.1:${stats_port}"
 metrics_whitelist = ["127.0.0.1", "::1"]
 ${CLIENT_MSS:+client_mss = \"${CLIENT_MSS}\"}
 
@@ -13279,6 +13282,7 @@ show_cli_help() {
     echo ""
     echo -e "  ${BOLD}Configuration:${NC}"
     echo -e "    ${GREEN}port${NC} [get|<number>]       Show or change proxy port"
+    echo -e "    ${GREEN}bind${NC} [get|<ip4> <ip6>]    Show or change proxy binding addresses"
     echo -e "    ${GREEN}ip${NC} [get|auto|<address>]   Show, reset, or set custom IP/domain for links"
     echo -e "    ${GREEN}domain${NC} [get|clear|<host>] Show, clear, or change FakeTLS domain"
     echo -e "    ${GREEN}domain-pool${NC} [get|<pool>] Configure multi-domain SNI pool (comma-separated)"
@@ -14031,6 +14035,28 @@ cli_main() {
             else
                 log_error "Invalid port: ${new_port} (must be 1-65535)"
                 return 1
+            fi
+            ;;
+
+        bind)
+            load_settings
+            local ipv4="${1:-}"
+            local ipv6="${2:-}"
+            if [ -z "$ipv4" ] || [ "$ipv4" = "get" ]; then
+                echo -e "  ── ${BOLD}Bind Addresses${NC} ──"
+                echo "  IPv4: ${PROXY_BIND_IPV4:-0.0.0.0}"
+                echo "  IPv6: ${PROXY_BIND_IPV6:-::}"
+                echo -e "\n  ${DIM}Usage: mtproxymax bind <ipv4> [ipv6]${NC}"
+                return 0
+            fi
+            check_root
+            PROXY_BIND_IPV4="$ipv4"
+            [ -n "$ipv6" ] && PROXY_BIND_IPV6="$ipv6"
+            save_settings
+            log_success "Bind addresses updated."
+            if is_proxy_running; then
+                load_secrets
+                restart_proxy_container
             fi
             ;;
 
