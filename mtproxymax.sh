@@ -2540,14 +2540,33 @@ secret_reset_traffic() {
     local _ut="${STATS_DIR}/user_traffic"
     local _snap="${STATS_DIR}/user_traffic_snapshot"
     local _qa="${STATS_DIR}/.quota_alerts_sent"
+    local _pending="${STATS_DIR}/.traffic_reset_pending"
     mkdir -p "${STATS_DIR}" 2>/dev/null
+
+    # A reset needs a live baseline. Without it the engine's lifetime
+    # Prometheus counters would appear as newly consumed traffic immediately.
+    local _reset_metrics
+    if ! _reset_metrics=$(_fetch_metrics 2>/dev/null) || [ -z "$_reset_metrics" ]; then
+        log_error "Cannot reset traffic: live metrics are unavailable."
+        return 1
+    fi
+
+    # A running Telegram daemon keeps its own counters in memory. Serialize the
+    # disk update with save_traffic() and leave it a reset command to consume
+    # before its next write, otherwise it would restore the pre-reset values.
+    exec 9>"${STATS_DIR}/.traffic.lock"
+    flock -w 5 9 2>/dev/null || {
+        log_error "Could not acquire traffic lock. Telegram daemon may be busy."
+        exec 9>&-
+        return 1
+    }
 
     if [ "$label" = "all" ]; then
         : > "$_ut" 2>/dev/null || true
         : > "$_qa" 2>/dev/null || true
         # Update snapshot with current live Prometheus values so delta becomes 0 right now
-        local _m
-        if _m=$(_fetch_metrics 2>/dev/null) && [ -n "$_m" ]; then
+        local _m="$_reset_metrics"
+        if [ -n "$_m" ]; then
             echo "$_m" | awk '
                 function get_user(s,   p,q) {
                     p = index(s, "user=\"")
@@ -2567,6 +2586,8 @@ secret_reset_traffic() {
         else
             : > "$_snap" 2>/dev/null || true
         fi
+        printf 'users-all\n' >> "$_pending"
+        chmod 600 "$_ut" "$_qa" "$_snap" "$_pending" 2>/dev/null || true
         log_success "Traffic counters reset for all users"
     else
         # Verify label exists
@@ -2574,7 +2595,11 @@ secret_reset_traffic() {
         for i in "${!SECRETS_LABELS[@]}"; do
             [ "${SECRETS_LABELS[$i]}" = "$label" ] && { found=true; break; }
         done
-        [ "$found" = "false" ] && { log_error "Secret '${label}' not found"; return 1; }
+        if [ "$found" = "false" ]; then
+            log_error "Secret '${label}' not found"
+            exec 9>&-
+            return 1
+        fi
 
         # Clear saved user_traffic and quota alerts
         for f in "$_ut" "$_qa"; do
@@ -2583,7 +2608,8 @@ secret_reset_traffic() {
 
         # Update user_traffic_snapshot to exact current live Prometheus values so delta becomes 0 right now
         local live_in=0 live_out=0
-        read -r live_in live_out _ <<< "$(get_user_stats "$label" 2>/dev/null)"
+        live_in=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
+        live_out=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
         [[ "${live_in:-0}" =~ ^[0-9]+$ ]] || live_in=0
         [[ "${live_out:-0}" =~ ^[0-9]+$ ]] || live_out=0
         if [ -f "$_snap" ]; then
@@ -2591,8 +2617,12 @@ secret_reset_traffic() {
             mv "${_snap}.tmp" "$_snap" 2>/dev/null || true
         fi
         echo "${label}|${live_in}|${live_out}" >> "$_snap"
+        printf 'user|%s|%s|%s\n' "$label" "$live_in" "$live_out" >> "$_pending"
+        chmod 600 "$_ut" "$_qa" "$_snap" "$_pending" 2>/dev/null || true
         log_success "Traffic counters reset for '${label}'"
     fi
+
+    exec 9>&-
 
     if [ "${no_reload:-}" != "no_reload" ]; then
         load_settings 2>/dev/null || true
@@ -6355,20 +6385,32 @@ run_traffic_reset_global() {
     
     log_info "Fetching current live metrics baseline..."
     local _metrics
-    _metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
-    local cur_in=0 cur_out=0
-    if [ -n "$_metrics" ]; then
-        cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-        cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
-        cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
+    if ! _metrics=$(curl -fsS --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null); then
+        log_error "Cannot reset traffic: live metrics are unavailable."
+        return 1
     fi
+    local cur_in=0 cur_out=0
+    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
     
     log_info "Resetting cumulative counters..."
     exec 9>"${_stats_dir}/.traffic.lock"
     flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
     
-    echo "0|0" > "${_stats_dir}/cumulative_traffic"
-    echo "${cur_in}|${cur_out}" > "${_stats_dir}/global_traffic_snapshot"
+    local _tmp
+    _tmp=$(_mktemp "$_stats_dir") || { exec 9>&-; return 1; }
+    echo "0|0" > "$_tmp"
+    chmod 600 "$_tmp"
+    mv "$_tmp" "${_stats_dir}/cumulative_traffic"
+
+    _tmp=$(_mktemp "$_stats_dir") || { exec 9>&-; return 1; }
+    echo "${cur_in}|${cur_out}" > "$_tmp"
+    chmod 600 "$_tmp"
+    mv "$_tmp" "${_stats_dir}/global_traffic_snapshot"
+
+    printf 'global|%s|%s\n' "$cur_in" "$cur_out" >> "${_stats_dir}/.traffic_reset_pending"
+    chmod 600 "${_stats_dir}/.traffic_reset_pending" 2>/dev/null || true
     
     exec 9>&-
     
@@ -10938,6 +10980,50 @@ _cum_in=0
 _cum_out=0
 declare -A _prev_user_in _prev_user_out _cum_user_in _cum_user_out
 
+apply_pending_traffic_resets() {
+    local _pending="${INSTALL_DIR}/relay_stats/.traffic_reset_pending"
+    [ -s "$_pending" ] || return 0
+
+    local _kind _label _in _out
+    while IFS='|' read -r _kind _label _in _out; do
+        case "$_kind" in
+            global)
+                [[ "${_label:-}" =~ ^[0-9]+$ ]] || _label=0
+                [[ "${_in:-}" =~ ^[0-9]+$ ]] || _in=0
+                _cum_in=0
+                _cum_out=0
+                _prev_total_in="$_label"
+                _prev_total_out="$_in"
+                ;;
+            user)
+                [[ "$_label" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
+                [[ "${_in:-}" =~ ^[0-9]+$ ]] || _in=0
+                [[ "${_out:-}" =~ ^[0-9]+$ ]] || _out=0
+                _cum_user_in["$_label"]=0
+                _cum_user_out["$_label"]=0
+                _prev_user_in["$_label"]="$_in"
+                _prev_user_out["$_label"]="$_out"
+                ;;
+            users-all)
+                _cum_user_in=()
+                _cum_user_out=()
+                _prev_user_in=()
+                _prev_user_out=()
+                if [ -f "${INSTALL_DIR}/relay_stats/user_traffic_snapshot" ]; then
+                    while IFS='|' read -r _label _in _out; do
+                        [[ "$_label" =~ ^[a-zA-Z0-9_-]+$ ]] || continue
+                        [[ "${_in:-}" =~ ^[0-9]+$ ]] || _in=0
+                        [[ "${_out:-}" =~ ^[0-9]+$ ]] || _out=0
+                        _prev_user_in["$_label"]="$_in"
+                        _prev_user_out["$_label"]="$_out"
+                    done < "${INSTALL_DIR}/relay_stats/user_traffic_snapshot"
+                fi
+                ;;
+        esac
+    done < "$_pending"
+    rm -f "$_pending"
+}
+
 load_traffic() {
     if [ -f "$TRAFFIC_FILE" ]; then
         IFS='|' read -r _cum_in _cum_out < "$TRAFFIC_FILE"
@@ -10985,6 +11071,7 @@ save_traffic() {
     # Acquire lock to prevent race with flush_traffic_to_disk
     exec 9>"${_tdir}/.traffic.lock"
     flock -w 5 9 2>/dev/null || { exec 9>&- 2>/dev/null; return 0; }
+    apply_pending_traffic_resets
     local _tmp=$(mktemp "${_tdir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
     chmod 600 "$_tmp"
     echo "${_cum_in}|${_cum_out}" > "$_tmp"
