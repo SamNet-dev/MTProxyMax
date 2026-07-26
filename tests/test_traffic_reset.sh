@@ -11,7 +11,7 @@ TEST_TMPDIR=$(mktemp -d)
 INSTALL_DIR="$TEST_TMPDIR/install"
 mkdir -p "$INSTALL_DIR/relay_stats"
 
-MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "$0")/../mtproxymax.sh"
+MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "${BASH_SOURCE[0]}")/../mtproxymax.sh"
 set +e
 trap 'rm -rf "$TEST_TMPDIR"' EXIT
 

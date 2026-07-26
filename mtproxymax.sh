@@ -2555,11 +2555,13 @@ secret_reset_traffic() {
     # disk update with save_traffic() and leave it a reset command to consume
     # before its next write, otherwise it would restore the pre-reset values.
     exec 9>"${STATS_DIR}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || {
-        log_error "Could not acquire traffic lock. Telegram daemon may be busy."
-        exec 9>&-
-        return 1
-    }
+    if command -v flock &>/dev/null; then
+        flock -w 5 9 2>/dev/null || {
+            log_error "Could not acquire traffic lock. Telegram daemon may be busy."
+            exec 9>&-
+            return 1
+        }
+    fi
 
     if [ "$label" = "all" ]; then
         : > "$_ut" 2>/dev/null || true
@@ -6396,7 +6398,9 @@ run_traffic_reset_global() {
     
     log_info "Resetting cumulative counters..."
     exec 9>"${_stats_dir}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    if command -v flock &>/dev/null; then
+        flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    fi
     
     local _tmp
     _tmp=$(_mktemp "$_stats_dir") || { exec 9>&-; return 1; }
