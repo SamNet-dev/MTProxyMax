@@ -1071,7 +1071,7 @@ install_docker() {
 
 wait_for_docker() {
     local retries=10
-    while [ $retries -gt 0 ]; do
+    while [ "${retries:-0}" -gt 0 ]; do
         docker info &>/dev/null && return 0
         sleep 1
         retries=$((retries - 1))
@@ -1968,7 +1968,7 @@ secret_remove() {
         fi
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Secret '${label}' not found"
         return 1
     fi
@@ -2052,7 +2052,7 @@ secret_add_batch() {
     done
 
     # Single hot-reload after all additions
-    if [ "$no_restart" != "true" ] && [ $added -gt 0 ]; then
+    if [ "$no_restart" != "true" ] && [ "${added:-0}" -gt 0 ]; then
         reload_proxy_config
     fi
 
@@ -2084,7 +2084,7 @@ secret_remove_batch() {
         done
     done
 
-    if [ $match_count -ge ${#SECRETS_LABELS[@]} ]; then
+    if [ "${match_count:-0}" -ge ${#SECRETS_LABELS[@]} ]; then
         log_error "Cannot remove all secrets — proxy needs at least one"
         return 1
     fi
@@ -2109,7 +2109,7 @@ secret_remove_batch() {
     done
 
     # Single hot-reload after all removals
-    if [ "$no_restart" != "true" ] && [ $removed -gt 0 ]; then
+    if [ "$no_restart" != "true" ] && [ "${removed:-0}" -gt 0 ]; then
         reload_proxy_config
     fi
 
@@ -2217,7 +2217,7 @@ secret_rotate() {
         fi
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Secret '${label}' not found"
         return 1
     fi
@@ -2267,7 +2267,7 @@ secret_toggle() {
         fi
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Secret '${label}' not found"
         return 1
     fi
@@ -2332,7 +2332,7 @@ get_proxy_link() {
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
     done
 
-    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
 
     local full_secret
     full_secret=$(build_faketls_secret "${SECRETS_KEYS[$idx]}")
@@ -2362,7 +2362,7 @@ secret_set_limits() {
         fi
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Secret '${label}' not found"
         return 1
     fi
@@ -2555,11 +2555,13 @@ secret_reset_traffic() {
     # disk update with save_traffic() and leave it a reset command to consume
     # before its next write, otherwise it would restore the pre-reset values.
     exec 9>"${STATS_DIR}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || {
-        log_error "Could not acquire traffic lock. Telegram daemon may be busy."
-        exec 9>&-
-        return 1
-    }
+    if command -v flock &>/dev/null; then
+        flock -w 5 9 2>/dev/null || {
+            log_error "Could not acquire traffic lock. Telegram daemon may be busy."
+            exec 9>&-
+            return 1
+        }
+    fi
 
     if [ "$label" = "all" ]; then
         : > "$_ut" 2>/dev/null || true
@@ -2672,7 +2674,7 @@ secret_show_limits() {
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Secret '${label}' not found"
         return 1
     fi
@@ -2705,7 +2707,7 @@ secret_rename() {
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_LABELS[$i]}" = "$old_label" ] && { idx=$i; break; }
     done
-    [ $idx -eq -1 ] && { log_error "Secret '${old_label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${old_label}' not found"; return 1; }
 
     # Check new label doesn't exist
     for i in "${!SECRETS_LABELS[@]}"; do
@@ -2732,7 +2734,7 @@ secret_clone() {
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_LABELS[$i]}" = "$src_label" ] && { idx=$i; break; }
     done
-    [ $idx -eq -1 ] && { log_error "Secret '${src_label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${src_label}' not found"; return 1; }
 
     # Check new label doesn't exist
     for i in "${!SECRETS_LABELS[@]}"; do
@@ -2792,7 +2794,7 @@ secret_bulk_extend() {
         log_info "${SECRETS_LABELS[$i]} → ${new_date%%T*}"
     done
 
-    if [ $extended -gt 0 ]; then
+    if [ "${extended:-0}" -gt 0 ]; then
         save_secrets
         reload_proxy_config
         log_success "Extended ${extended} secret(s) by ${days} days"
@@ -2867,7 +2869,7 @@ secret_import() {
         added=$((added + 1))
     done < <(sed 's/,/|/g' "$file" 2>/dev/null || cat "$file")
 
-    if [ $added -gt 0 ]; then
+    if [ "${added:-0}" -gt 0 ]; then
         save_secrets
         reload_proxy_config
     fi
@@ -2957,7 +2959,7 @@ secret_disable_expired() {
         fi
     done
 
-    if [ $disabled -gt 0 ]; then
+    if [ "${disabled:-0}" -gt 0 ]; then
         save_secrets
         reload_proxy_config
         if [ "${TELEGRAM_ENABLED:-false}" = "true" ]; then
@@ -2979,7 +2981,7 @@ secret_extend() {
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
     done
-    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
 
     local exp="${SECRETS_EXPIRES[$idx]:-0}"
     local base_epoch
@@ -3067,9 +3069,9 @@ secret_stats() {
         if [ "$exp" != "0" ]; then
             local exp_epoch; exp_epoch=$(_iso_to_epoch "$exp")
             local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
-            if [ $days_left -lt 0 ]; then
+            if [ "${days_left:-0}" -lt 0 ]; then
                 exp_str="${RED}expired${NC}"
-            elif [ $days_left -le 3 ]; then
+            elif [ "${days_left:-0}" -le 3 ]; then
                 exp_str="${YELLOW}${days_left}d${NC}"
             else
                 exp_str="${days_left}d"
@@ -3216,15 +3218,15 @@ run_doctor() {
         fi
     done
 
-    if [ $active -gt 0 ]; then
+    if [ "${active:-0}" -gt 0 ]; then
         echo -e "  ${GREEN}${SYM_CHECK}${NC} ${active} active secret(s)"
     else
         echo -e "  ${RED}${SYM_CROSS}${NC} No active secrets"
         issues=$((issues + 1))
     fi
 
-    [ $expired -gt 0 ] && { echo -e "  ${YELLOW}!${NC}  ${expired} expired secret(s) — run: mtproxymax secret disable-expired"; issues=$((issues + 1)); }
-    [ $near_expiry -gt 0 ] && echo -e "  ${YELLOW}!${NC}  ${near_expiry} secret(s) expiring within 3 days"
+    [ "${expired:-0}" -gt 0 ] && { echo -e "  ${YELLOW}!${NC}  ${expired} expired secret(s) — run: mtproxymax secret disable-expired"; issues=$((issues + 1)); }
+    [ "${near_expiry:-0}" -gt 0 ] && echo -e "  ${YELLOW}!${NC}  ${near_expiry} secret(s) expiring within 3 days"
 
     # Disk space
     local disk_pct
@@ -3281,7 +3283,7 @@ run_doctor() {
     fi
 
     echo ""
-    if [ $issues -eq 0 ]; then
+    if [ "${issues:--1}" -eq 0 ]; then
         echo -e "  ${BRIGHT_GREEN}All checks passed${NC}"
     else
         echo -e "  ${YELLOW}${issues} issue(s) found${NC}"
@@ -3301,12 +3303,12 @@ _startup_warnings() {
         [ "$exp" = "0" ] && continue
         local exp_epoch; exp_epoch=$(_iso_to_epoch "$exp")
         if [ "$exp_epoch" -le "$now_epoch" ]; then
-            [ $warnings -eq 0 ] && echo ""
+            [ "${warnings:--1}" -eq 0 ] && echo ""
             log_warn "Secret '${SECRETS_LABELS[$i]}' is expired"
             warnings=$((warnings + 1))
         elif [ $((exp_epoch - now_epoch)) -le 259200 ]; then
             local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
-            [ $warnings -eq 0 ] && echo ""
+            [ "${warnings:--1}" -eq 0 ] && echo ""
             log_warn "Secret '${SECRETS_LABELS[$i]}' expires in ${days_left}d"
             warnings=$((warnings + 1))
         fi
@@ -3322,7 +3324,7 @@ secret_info() {
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
     done
-    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
 
     local enabled="${SECRETS_ENABLED[$idx]}"
     local created="${SECRETS_CREATED[$idx]}"
@@ -3353,7 +3355,7 @@ secret_info() {
         local exp_epoch; exp_epoch=$(_iso_to_epoch "$exp")
         local now_epoch; now_epoch=$(date +%s)
         local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
-        if [ $days_left -lt 0 ]; then
+        if [ "${days_left:-0}" -lt 0 ]; then
             echo -e "    Expires:     ${RED}expired${NC} (${exp%%T*})"
         else
             echo -e "    Expires:     ${exp%%T*} (${days_left}d left)"
@@ -3456,8 +3458,8 @@ secret_search() {
             found=$((found + 1))
         fi
     done
-    [ $found -eq 0 ] && log_info "No secrets matching '${query}'"
-    [ $found -gt 0 ] && echo -e "\n  ${DIM}${found} result(s)${NC}"
+    [ "${found:--1}" -eq 0 ] && log_info "No secrets matching '${query}'"
+    [ "${found:-0}" -gt 0 ] && echo -e "\n  ${DIM}${found} result(s)${NC}"
 }
 
 # Archive a secret (soft-delete, restorable)
@@ -3469,7 +3471,7 @@ secret_archive() {
     for i in "${!SECRETS_LABELS[@]}"; do
         [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
     done
-    [ $idx -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
+    [ "${idx:--1}" -eq -1 ] && { log_error "Secret '${label}' not found"; return 1; }
 
     # Prevent archiving the last secret
     [ ${#SECRETS_LABELS[@]} -le 1 ] && { log_error "Cannot archive the last secret"; return 1; }
@@ -3900,13 +3902,13 @@ secret_list_by_tag() {
         for i in "${!SECRETS_LABELS[@]}"; do
             [ "${SECRETS_LABELS[$i]}" = "$label" ] && { idx=$i; break; }
         done
-        [ $idx -eq -1 ] && continue
+        [ "${idx:--1}" -eq -1 ] && continue
         local icon="${GREEN}●${NC}"
         [ "${SECRETS_ENABLED[$idx]}" != "true" ] && icon="${RED}○${NC}"
         echo -e "  ${icon} ${BOLD}${label}${NC}  ${DIM}[${tags}]${NC}"
         found=$((found + 1))
     done < "$_TAGS_FILE"
-    [ $found -eq 0 ] && echo -e "  ${DIM}No secrets with tag '${tag_lower}'${NC}"
+    [ "${found:--1}" -eq 0 ] && echo -e "  ${DIM}No secrets with tag '${tag_lower}'${NC}"
     echo ""
 }
 
@@ -4752,7 +4754,7 @@ run_verify() {
 
     unset -f _check
     echo ""
-    if [ $fail -eq 0 ]; then
+    if [ "${fail:--1}" -eq 0 ]; then
         echo -e "  ${BRIGHT_GREEN}${BOLD}All ${pass} checks passed${NC}"
     else
         echo -e "  ${YELLOW}${pass} passed, ${RED}${fail} failed${NC}"
@@ -6396,7 +6398,9 @@ run_traffic_reset_global() {
     
     log_info "Resetting cumulative counters..."
     exec 9>"${_stats_dir}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    if command -v flock &>/dev/null; then
+        flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    fi
     
     local _tmp
     _tmp=$(_mktemp "$_stats_dir") || { exec 9>&-; return 1; }
@@ -8656,7 +8660,7 @@ upstream_remove() {
         [ "${UPSTREAM_NAMES[$i]}" = "$name" ] && { idx=$i; break; }
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Upstream '${name}' not found"
         return 1
     fi
@@ -8752,7 +8756,7 @@ upstream_toggle() {
         [ "${UPSTREAM_NAMES[$i]}" = "$name" ] && { idx=$i; break; }
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Upstream '${name}' not found"
         return 1
     fi
@@ -8807,7 +8811,7 @@ upstream_test() {
         [ "${UPSTREAM_NAMES[$i]}" = "$name" ] && { idx=$i; break; }
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Upstream '${name}' not found"
         return 1
     fi
@@ -10536,7 +10540,7 @@ telegram_send_message() {
         2>/dev/null) || true
     local rc=$?
     rm -f "$_cfg"
-    [ $rc -ne 0 ] && return 1
+    [ "${rc:--1}" -ne 0 ] && return 1
     echo "$response" | grep -q '"ok":true' && return 0
     return 1
 }
@@ -11935,7 +11939,7 @@ replication_remove() {
         fi
     done
 
-    if [ $idx -eq -1 ]; then
+    if [ "${idx:--1}" -eq -1 ]; then
         log_error "Slave '${target}' not found"
         return 1
     fi
@@ -11985,8 +11989,8 @@ replication_list() {
         if [[ "$ts" =~ ^[0-9]+$ ]] && [ "$ts" -gt 0 ]; then
             local now; now=$(date +%s)
             local ago=$(( now - ts ))
-            if   [ $ago -lt 120 ];  then sync_fmt="${ago}s ago"
-            elif [ $ago -lt 3600 ]; then sync_fmt="$((ago/60))m ago"
+            if   [ "${ago:-0}" -lt 120 ];  then sync_fmt="${ago}s ago"
+            elif [ "${ago:-0}" -lt 3600 ]; then sync_fmt="$((ago/60))m ago"
             else                         sync_fmt="$((ago/3600))h ago"
             fi
         fi
@@ -12126,7 +12130,7 @@ do_sync() {
         "${REPLICATION_SSH_USER}@${host}:${INSTALL_DIR}/" 2>&1)
     rc=$?
 
-    if [ $rc -ne 0 ]; then
+    if [ "${rc:--1}" -ne 0 ]; then
         log_sync "ERROR [${label}/${host}]: rsync failed (exit ${rc}): $(echo "$output" | tail -1)"
         return 1
     fi
@@ -12140,7 +12144,7 @@ do_sync() {
                 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
                 "${REPLICATION_SSH_USER}@${host}" "/usr/local/bin/mtproxymax restart 2>&1 || docker restart mtproxymax 2>&1" 2>&1)
             r_rc=$?
-            if [ $r_rc -eq 0 ]; then
+            if [ "${r_rc:--1}" -eq 0 ]; then
                 log_sync "RESTART [${label}/${host}]: Container restarted"
             else
                 log_sync "WARN [${label}/${host}]: Docker restart failed: $(echo "$r_out" | tail -1)"
@@ -13074,7 +13078,7 @@ save_instances() {
 
 _next_free_metrics_port() {
     local p=9091
-    while [ $p -lt 9200 ]; do
+    while [ "${p:-0}" -lt 9200 ]; do
         local used=false
         # Check against primary metrics port
         [ "$p" = "${PROXY_METRICS_PORT:-9090}" ] && used=true
