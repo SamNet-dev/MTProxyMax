@@ -316,7 +316,7 @@ Fine-grained limits enforced at the engine level:
 
 > **Tip:** Each Telegram app opens **~3 TCP connections** (one per DC). So for device limiting, multiply by 3: `conns 15` ≈ max 5 devices. Setting below 5 will likely break even a single device. IP limits are less reliable because mobile users roam between cell towers (briefly showing 2 IPs for 1 device), and multiple devices behind the same WiFi share 1 IP. Use `ips` as a secondary anti-sharing measure.
 >
-> **Traffic and quotas are lifetime (cumulative)**, not monthly. They don't auto-reset. Use `mtproxymax secret reset-traffic <label>` to manually reset counters, or rotate the secret.
+> **Traffic and quotas are cumulative by default.** Use `mtproxymax secret quota-reset <label> <day>` for a recurring monthly quota period, or `mtproxymax secret reset-traffic <label>` to start a new period manually. `mtproxymax traffic` shows usage since each counter's most recent reset; its server-wide `Total` is independent from per-user resets.
 
 ```bash
 mtproxymax secret setlimits alice 100 5 10G 2026-12-31
@@ -769,6 +769,9 @@ Automatic scheduled operations — no cron setup required (runs from the Telegra
 mtproxymax secret quota-reset alice 1          # Reset on the 1st
 mtproxymax secret quota-reset bob 15           # Reset on the 15th
 mtproxymax secret quota-reset alice off        # Disable
+
+# Reset the independent server-wide total (does not change user quotas)
+mtproxymax traffic reset-global
 
 # Global auto-rotate — rotates secrets older than N days
 mtproxymax auto-rotate 90                      # Rotate every 90 days
