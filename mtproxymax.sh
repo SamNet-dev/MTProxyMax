@@ -4643,6 +4643,10 @@ tune_set() {
     fi
     [[ "$value" =~ $regex ]] || { log_error "Invalid value for '${param}' (expected pattern: ${regex})"; return 1; }
 
+    if ! confirm_settings_restart "engine tune '${param}=${value}'"; then
+        return 0
+    fi
+
     mkdir -p "$INSTALL_DIR"
     touch "$_TUNE_FILE"; chmod 600 "$_TUNE_FILE"
     local tmp; tmp=$(_mktemp) || return 1
@@ -4651,9 +4655,8 @@ tune_set() {
     mv "$tmp" "$_TUNE_FILE"; chmod 600 "$_TUNE_FILE"
     log_success "Tune '${param}' = ${value}"
     if is_proxy_running; then
-        echo -en "  ${DIM}Restart to apply? [Y/n]:${NC} "
-        local r; read -r r 2>/dev/null || r="y"
-        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+        load_secrets
+        restart_proxy_container || true
     fi
 }
 
@@ -4662,6 +4665,10 @@ tune_clear() {
     local param="$1"
     [ -z "$param" ] && { log_error "Usage: mtproxymax tune clear <param|all>"; return 1; }
     [ ! -f "$_TUNE_FILE" ] && { log_info "No tunings set"; return 0; }
+
+    if ! confirm_settings_restart "clearing engine tune '${param}'"; then
+        return 0
+    fi
 
     if [ "$param" = "all" ]; then
         rm -f "$_TUNE_FILE"
@@ -4673,9 +4680,8 @@ tune_clear() {
         log_success "Tune '${param}' cleared"
     fi
     if is_proxy_running; then
-        echo -en "  ${DIM}Restart to apply? [Y/n]:${NC} "
-        local r; read -r r 2>/dev/null || r="y"
-        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+        load_secrets
+        restart_proxy_container || true
     fi
 }
 
@@ -16922,6 +16928,34 @@ show_telegram_menu() {
     done
 }
 
+confirm_settings_change() {
+    local description="${1:-this settings change}"
+    echo -en "  ${DIM}Apply ${description}? [y/N]:${NC} "
+    local reply
+    read -r reply
+    if [[ "$reply" =~ ^[yY] ]]; then
+        return 0
+    fi
+    log_info "Change cancelled; settings were not modified"
+    return 1
+}
+
+confirm_settings_restart() {
+    local description="${1:-this settings change}"
+    if ! is_proxy_running; then
+        return 0
+    fi
+
+    echo -en "  ${DIM}Apply ${description} and restart proxy now? [Y/n]:${NC} "
+    local reply
+    read -r reply
+    if [[ "$reply" =~ ^[nN] ]]; then
+        log_info "Change cancelled; settings were not modified"
+        return 1
+    fi
+    return 0
+}
+
 show_settings_menu() {
     while true; do
         clear_screen
@@ -16965,15 +16999,18 @@ show_settings_menu() {
                 echo -en "  ${BOLD}New port:${NC} "
                 local p; read -r p
                 if validate_port "$p"; then
+                    if ! confirm_settings_restart "port change to ${p}"; then
+                        press_any_key
+                        continue
+                    fi
                     # Remove geoblock rules on old port before changing
                     [ -n "$BLOCKLIST_COUNTRIES" ] && { geoblock_remove_all; _remove_default_drop; }
                     PROXY_PORT="$p"
                     save_settings
                     log_success "Port set to ${p}"
                     if is_proxy_running; then
-                        echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                        local r; read -r r
-                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        load_secrets
+                        restart_proxy_container || true
                     fi
                 else
                     log_error "Invalid port (must be 1-65535)"
@@ -17004,15 +17041,16 @@ show_settings_menu() {
                 echo -e "  ${DIM}[1] cloudflare.com  [2] google.com  [3] microsoft.com  [4] Custom${NC}"
                 local d; d=$(read_choice "Choice" "1")
                 local _domain_changed=true
+                local _new_domain="$PROXY_DOMAIN"
                 case "$d" in
-                    1) PROXY_DOMAIN="cloudflare.com" ;;
-                    2) PROXY_DOMAIN="www.google.com" ;;
-                    3) PROXY_DOMAIN="www.microsoft.com" ;;
+                    1) _new_domain="cloudflare.com" ;;
+                    2) _new_domain="www.google.com" ;;
+                    3) _new_domain="www.microsoft.com" ;;
                     4)
                         echo -en "  Domain: "
                         local cd; read -r cd
                         if [ -n "$cd" ] && validate_domain "$cd"; then
-                            PROXY_DOMAIN="$cd"
+                            _new_domain="$cd"
                         elif [ -n "$cd" ]; then
                             log_error "Invalid domain format"; press_any_key; continue
                         else
@@ -17022,6 +17060,11 @@ show_settings_menu() {
                     *) _domain_changed=false ;;
                 esac
                 if $_domain_changed; then
+                    if ! confirm_settings_restart "domain change to ${_new_domain}"; then
+                        press_any_key
+                        continue
+                    fi
+                    PROXY_DOMAIN="$_new_domain"
                     sync_domain_cert_len "true" "false" || true
                     save_settings
                     log_success "Domain set to ${PROXY_DOMAIN}"
@@ -17037,9 +17080,8 @@ show_settings_menu() {
                         log_success "All secrets rotated — share new links with your users"
                     fi
                     if is_proxy_running; then
-                        echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                        local r; read -r r
-                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        load_secrets
+                        restart_proxy_container || true
                     fi
                 fi
                 press_any_key
@@ -17048,9 +17090,11 @@ show_settings_menu() {
                 echo -en "  ${BOLD}CPU cores [${PROXY_CPUS:-unlimited}]:${NC} "
                 local c; read -r c
                 local _res_changed=false
+                local _new_cpus="$PROXY_CPUS"
+                local _new_memory="$PROXY_MEMORY"
                 if [ -n "$c" ]; then
                     if [[ "$c" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit ($c < 0.1)}" 2>/dev/null; then
-                        PROXY_CPUS="$c"; _res_changed=true
+                        _new_cpus="$c"; _res_changed=true
                     else
                         log_error "Invalid CPU value (must be a number >= 0.1, e.g. 1, 2, 0.5)"
                     fi
@@ -17060,30 +17104,40 @@ show_settings_menu() {
                 if [ -n "$m" ]; then
                     if [[ "$m" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
                         [[ "$m" =~ ^[0-9]+$ ]] && m="${m}m"
-                        PROXY_MEMORY="$m"; _res_changed=true
+                        _new_memory="$m"; _res_changed=true
                     else
                         log_error "Invalid memory value (e.g. 256m, 1g)"
                     fi
                 fi
                 if $_res_changed; then
+                    if ! confirm_settings_restart "resource changes"; then
+                        press_any_key
+                        continue
+                    fi
+                    PROXY_CPUS="$_new_cpus"
+                    PROXY_MEMORY="$_new_memory"
                     save_settings
-                    log_success "Resources updated (takes effect on next restart)"
+                    log_success "Resources updated"
                     if is_proxy_running; then
-                        echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                        local r; read -r r
-                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        load_secrets
+                        restart_proxy_container || true
                     fi
                 fi
                 press_any_key
                 ;;
             5)
-                [ "$MASKING_ENABLED" = "true" ] && MASKING_ENABLED="false" || MASKING_ENABLED="true"
+                local _new_masking
+                [ "$MASKING_ENABLED" = "true" ] && _new_masking="false" || _new_masking="true"
+                if ! confirm_settings_restart "traffic masking=${_new_masking}"; then
+                    press_any_key
+                    continue
+                fi
+                MASKING_ENABLED="$_new_masking"
                 save_settings
                 log_success "Traffic masking: ${MASKING_ENABLED}"
                 if is_proxy_running; then
-                    echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                    local r; read -r r
-                    [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                    load_secrets
+                    restart_proxy_container || true
                 fi
                 press_any_key
                 ;;
@@ -17107,26 +17161,35 @@ show_settings_menu() {
                 press_any_key
                 ;;
             7)
-                [ "$AUTO_UPDATE_ENABLED" = "true" ] && AUTO_UPDATE_ENABLED="false" || AUTO_UPDATE_ENABLED="true"
+                local _new_auto_update
+                [ "$AUTO_UPDATE_ENABLED" = "true" ] && _new_auto_update="false" || _new_auto_update="true"
+                if ! confirm_settings_change "auto-update=${_new_auto_update}"; then
+                    press_any_key
+                    continue
+                fi
+                AUTO_UPDATE_ENABLED="$_new_auto_update"
                 save_settings
                 log_success "Auto-update: ${AUTO_UPDATE_ENABLED}"
                 press_any_key
                 ;;
             8)
-                [ "$PROXY_PROTOCOL" = "true" ] && PROXY_PROTOCOL="false" || PROXY_PROTOCOL="true"
-                if [ "$PROXY_PROTOCOL" = "true" ]; then
+                local _new_proxy_protocol _new_trusted_cidrs=""
+                [ "$PROXY_PROTOCOL" = "true" ] && _new_proxy_protocol="false" || _new_proxy_protocol="true"
+                if [ "$_new_proxy_protocol" = "true" ]; then
                     echo -en "  ${BOLD}Trusted CIDRs (comma-separated, e.g. 10.0.0.0/8,172.16.0.0/12, empty=reject all):${NC} "
-                    local cidrs; read -r cidrs
-                    PROXY_PROTOCOL_TRUSTED_CIDRS="$cidrs"
-                else
-                    PROXY_PROTOCOL_TRUSTED_CIDRS=""
+                    read -r _new_trusted_cidrs
                 fi
+                if ! confirm_settings_restart "PROXY protocol=${_new_proxy_protocol}"; then
+                    press_any_key
+                    continue
+                fi
+                PROXY_PROTOCOL="$_new_proxy_protocol"
+                PROXY_PROTOCOL_TRUSTED_CIDRS="$_new_trusted_cidrs"
                 save_settings
                 log_success "PROXY protocol: ${PROXY_PROTOCOL}"
                 if is_proxy_running; then
-                    echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                    local r; read -r r
-                    [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                    load_secrets
+                    restart_proxy_container || true
                 fi
                 press_any_key
                 ;;
@@ -17140,23 +17203,31 @@ show_settings_menu() {
                 echo -en "  ${BOLD}Port [${MASKING_PORT:-443}]:${NC} "
                 local _mp; read -r _mp
                 local _changed=false
+                local _new_mask_host="$MASKING_HOST"
+                local _new_mask_port="$MASKING_PORT"
                 if [ -n "$_mh" ]; then
-                    MASKING_HOST="$_mh"; _changed=true
+                    _new_mask_host="$_mh"; _changed=true
                 fi
                 if [ -n "$_mp" ]; then
                     if [[ "$_mp" =~ ^[0-9]+$ ]] && [ "$_mp" -ge 1 ] && [ "$_mp" -le 65535 ]; then
-                        MASKING_PORT="$_mp"; _changed=true
+                        _new_mask_port="$_mp"; _changed=true
                     else
                         log_error "Invalid port"
+                        _changed=false
                     fi
                 fi
                 if $_changed; then
+                    if ! confirm_settings_restart "mask backend change"; then
+                        press_any_key
+                        continue
+                    fi
+                    MASKING_HOST="$_new_mask_host"
+                    MASKING_PORT="$_new_mask_port"
                     save_settings
                     log_success "Mask backend set to ${MASKING_HOST:-${PROXY_DOMAIN}}:${MASKING_PORT:-443}"
                     if is_proxy_running; then
-                        echo -en "  ${DIM}Restart proxy to apply? [Y/n]:${NC} "
-                        local r; read -r r
-                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                        load_secrets
+                        restart_proxy_container || true
                     fi
                 fi
                 press_any_key
@@ -17173,23 +17244,32 @@ show_settings_menu() {
                 local _v; read -r _v
                 if [ -n "$_v" ]; then
                     local _mrb_changed=false
+                    local _new_mrb="$MASKING_RELAY_MAX_BYTES"
                     if [ "$_v" = "default" ] || [ "$_v" = "clear" ]; then
-                        MASKING_RELAY_MAX_BYTES=""
-                        save_settings
-                        log_success "mask_relay_max_bytes cleared (using engine default)"
+                        _new_mrb=""
                         _mrb_changed=true
                     elif [[ "$_v" =~ ^[0-9]+$ ]]; then
-                        MASKING_RELAY_MAX_BYTES="$_v"
-                        save_settings
-                        log_success "mask_relay_max_bytes set to ${_v}"
+                        _new_mrb="$_v"
                         _mrb_changed=true
                     else
                         log_error "Must be a non-negative integer, 'default', or 'clear'"
                     fi
-                    if $_mrb_changed && is_proxy_running; then
-                        echo -en "  ${DIM}Restart proxy to apply? [Y/n]:${NC} "
-                        local r; read -r r
-                        [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                    if $_mrb_changed; then
+                        if ! confirm_settings_restart "mask relay byte cap change"; then
+                            press_any_key
+                            continue
+                        fi
+                        MASKING_RELAY_MAX_BYTES="$_new_mrb"
+                        save_settings
+                        if [ -n "$MASKING_RELAY_MAX_BYTES" ]; then
+                            log_success "mask_relay_max_bytes set to ${MASKING_RELAY_MAX_BYTES}"
+                        else
+                            log_success "mask_relay_max_bytes cleared (using engine default)"
+                        fi
+                        if is_proxy_running; then
+                            load_secrets
+                            restart_proxy_container || true
+                        fi
                     fi
                 fi
                 press_any_key
@@ -17243,42 +17323,38 @@ show_settings_menu() {
                     2) _field="config-v4" ;;
                     3) _field="config-v6" ;;
                     4)
-                        PROXY_SECRET_URL=""; PROXY_CONFIG_V4_URL=""; PROXY_CONFIG_V6_URL=""
+                        if ! confirm_settings_restart "Telegram URL reset"; then
+                            press_any_key
+                            continue
+                        fi
+                        PROXY_SECRET_URL=""
+                        PROXY_CONFIG_V4_URL=""
+                        PROXY_CONFIG_V6_URL=""
                         save_settings
                         log_success "Telegram URLs reset to defaults"
                         if is_proxy_running; then
-                            echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                            local r; read -r r
-                            [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                            load_secrets
+                            restart_proxy_container || true
                         fi
                         ;;
                 esac
                 if [ -n "$_field" ]; then
                     echo -en "  ${BOLD}URL (empty to clear):${NC} "
                     read -r _url
-                    if [ -z "$_url" ]; then
-                        case "$_field" in
-                            secret)    PROXY_SECRET_URL="" ;;
-                            config-v4) PROXY_CONFIG_V4_URL="" ;;
-                            config-v6) PROXY_CONFIG_V6_URL="" ;;
-                        esac
-                        save_settings
-                        log_success "${_field} URL cleared"
-                    elif [[ "$_url" =~ ^https?:// ]]; then
+                    if [ -n "$_url" ] && [[ ! "$_url" =~ ^https?:// ]]; then
+                        log_error "URL must start with http:// or https://"
+                    elif confirm_settings_restart "${_field} URL change"; then
                         case "$_field" in
                             secret)    PROXY_SECRET_URL="$_url" ;;
                             config-v4) PROXY_CONFIG_V4_URL="$_url" ;;
                             config-v6) PROXY_CONFIG_V6_URL="$_url" ;;
                         esac
                         save_settings
-                        log_success "${_field} URL set"
+                        [ -n "$_url" ] && log_success "${_field} URL set" || log_success "${_field} URL cleared"
                         if is_proxy_running; then
-                            echo -en "  ${DIM}Restart proxy now? [Y/n]:${NC} "
-                            local r; read -r r
-                            [[ ! "$r" =~ ^[nN] ]] && { load_secrets; restart_proxy_container || true; }
+                            load_secrets
+                            restart_proxy_container || true
                         fi
-                    else
-                        log_error "URL must start with http:// or https://"
                     fi
                 fi
                 press_any_key
@@ -17317,14 +17393,20 @@ show_settings_menu() {
                 echo -en "  ${BOLD}New value (days, 0=disabled):${NC} "
                 local _av; read -r _av
                 if [ -n "$_av" ]; then
+                    local _new_auto_rotate
                     if [ "$_av" = "off" ] || [ "$_av" = "0" ]; then
-                        SECRET_AUTO_ROTATE_DAYS="0"
+                        _new_auto_rotate="0"
                     elif [[ "$_av" =~ ^[0-9]+$ ]] && [ "$_av" -ge 1 ] && [ "$_av" -le 3650 ]; then
-                        SECRET_AUTO_ROTATE_DAYS="$_av"
+                        _new_auto_rotate="$_av"
                     else
                         log_error "Must be a positive integer (days) or 'off'"
                         press_any_key; continue
                     fi
+                    if ! confirm_settings_change "secret auto-rotation=${_new_auto_rotate} days"; then
+                        press_any_key
+                        continue
+                    fi
+                    SECRET_AUTO_ROTATE_DAYS="$_new_auto_rotate"
                     save_settings
                     log_success "Auto-rotate policy: ${SECRET_AUTO_ROTATE_DAYS} days"
                 fi
