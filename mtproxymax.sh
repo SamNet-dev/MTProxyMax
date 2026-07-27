@@ -117,7 +117,7 @@ PROXY_PORT=443
 PROXY_METRICS_PORT=9090
 PROXY_DOMAIN="cloudflare.com"
 PROXY_CONCURRENCY=8192
-CLIENT_MSS="tspu"
+CLIENT_MSS=""
 PROXY_CPUS=""
 PROXY_MEMORY=""
 CUSTOM_IP=""
@@ -5234,6 +5234,66 @@ run_clamp_mss() {
             ;;
         *)
             log_error "Usage: mtproxymax clamp-mss [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+run_client_mss() {
+    local mode="${1:-}"
+    case "$mode" in
+        ""|get|status)
+            load_settings 2>/dev/null || true
+            echo -e "  ── ${BOLD}Telemt Client MSS Settings${NC} ──"
+            if [ -n "${CLIENT_MSS:-}" ]; then
+                echo -e "  Mode:               ${GREEN}${CLIENT_MSS}${NC} (anti-censorship segment sizing)"
+                echo -e "  Generated TOML:     ${GREEN}client_mss = \"${CLIENT_MSS}\"${NC}"
+            else
+                echo -e "  Mode:               ${DIM}off / disabled${NC} (normal TCP behavior, max throughput — default)"
+                echo -e "  Generated TOML:     ${DIM}<omitted>${NC}"
+            fi
+
+            local clamp_status="disabled"
+            [ "${STEALTH_MSS_CLAMP:-false}" = "true" ] && clamp_status="${GREEN}enabled${NC}"
+            echo -e "  Kernel PMTU clamp:  ${clamp_status} (mtproxymax clamp-mss)"
+
+            if [ -n "${CLIENT_MSS:-}" ] && [ "${STEALTH_MSS_CLAMP:-false}" = "true" ]; then
+                echo -e "\n  ${YELLOW}! Warning:${NC} Both Telemt client_mss and kernel clamp-mss are active."
+                echo -e "    If media downloads are slow, try turning client-mss off: ${BOLD}mtproxymax client-mss off${NC}"
+            fi
+            echo -e "\n  ${DIM}Usage: mtproxymax client-mss [status|off|tspu]${NC}"
+            return 0
+            ;;
+        off|none|clear|disable)
+            check_root
+            load_settings 2>/dev/null || true
+            if ! confirm_settings_restart "Telemt client_mss=off"; then
+                return 0
+            fi
+            CLIENT_MSS=""
+            save_settings
+            log_success "Telemt client_mss disabled (using normal TCP behavior for max throughput)"
+            if is_proxy_running; then
+                load_secrets
+                restart_proxy_container || true
+            fi
+            ;;
+        tspu|enable)
+            check_root
+            load_settings 2>/dev/null || true
+            if ! confirm_settings_restart "Telemt client_mss=tspu"; then
+                return 0
+            fi
+            CLIENT_MSS="tspu"
+            save_settings
+            log_success "Telemt client_mss set to 'tspu' (DPI / censorship circumvention mode)"
+            if is_proxy_running; then
+                load_secrets
+                restart_proxy_container || true
+            fi
+            ;;
+        *)
+            log_error "Usage: mtproxymax client-mss [status|off|tspu]"
             return 1
             ;;
     esac
@@ -13386,6 +13446,7 @@ show_cli_help() {
     echo -e "    ${GREEN}syn-shield${NC} [on|off|status] Kernel SYN Shield rate limiter (>15 SYN/5s tarpit)"
     echo -e "    ${GREEN}stealth${NC} [ultra|normal|status]  Switch stealth defense preset (anti-replay tuning)"
     echo -e "    ${GREEN}clamp-mss${NC} [on|off|status] Toggle TCP MSS Clamping (--clamp-mss-to-pmtu)"
+    echo -e "    ${GREEN}client-mss${NC} [status|off|tspu]  Configure Telemt client-side MSS (off=normal TCP, tspu=DPI evasion)"
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
     echo -e "    ${GREEN}mask-relay-bytes${NC} [N|0|clear]  Max bytes per direction on mask relay (0=unlimited)"
     echo -e "    ${GREEN}tg-urls${NC} [get|set <field> <url>|clear]  Custom Telegram infrastructure URLs (restricted regions)"
@@ -14548,6 +14609,10 @@ cli_main() {
             run_clamp_mss "$@"
             ;;
 
+        client-mss)
+            run_client_mss "$@"
+            ;;
+
         domain-pool)
             run_domain_pool "$@"
             ;;
@@ -15563,6 +15628,7 @@ show_stealth_menu() {
         echo -e "  ${BOLD}Kernel SYN Shield:${NC}     $([ "${STEALTH_SHIELD:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
         echo -e "  ${BOLD}Stealth Preset:${NC}        $([ "${STEALTH_PRESET:-normal}" = "ultra" ] && echo "${RED}${BOLD}ULTRA${NC}" || echo "${GREEN}NORMAL${NC}")"
         echo -e "  ${BOLD}TCP MSS Clamping:${NC}      $([ "${STEALTH_MSS_CLAMP:-false}" = "true" ] && echo "${GREEN}ENABLED${NC}" || echo "${YELLOW}DISABLED${NC}")"
+        echo -e "  ${BOLD}Telemt Client MSS:${NC}     $([ -n "${CLIENT_MSS:-}" ] && echo "${GREEN}${CLIENT_MSS}${NC}" || echo "${DIM}off (default, max throughput)${NC}")"
         echo -e "  ${BOLD}Domain SNI Pool:${NC}       ${CYAN}${PROXY_DOMAIN:-not set}${NC}"
         echo -e "  ${BOLD}Emergency Lockdown:${NC}    $([ "${LOCKDOWN_MODE:-false}" = "true" ] && echo "${RED}${BOLD}ACTIVE${NC}" || echo "${GREEN}INACTIVE${NC}")"
         echo -e "  ${BOLD}Secondary Port Pool:${NC}   ${CYAN}${PORT_POOL_PORTS:-none}${NC}"
@@ -15575,6 +15641,7 @@ show_stealth_menu() {
         echo -e "  ${DIM}[6]${NC} Test Cover Domain Health (Watchdog probe)"
         echo -e "  ${DIM}[7]${NC} Toggle Emergency Lockdown Mode"
         echo -e "  ${DIM}[8]${NC} Manage Secondary Port Pool Listener"
+        echo -e "  ${DIM}[9]${NC} Configure Telemt Client MSS (anti-censorship: ${CLIENT_MSS:-off})"
         echo -e "  ${DIM}[0]${NC} Back"
 
         local choice
@@ -15635,6 +15702,18 @@ show_stealth_menu() {
                 elif [ "$_pchoice" = "2" ]; then
                     run_port_pool remove "$_pport"
                 fi
+                press_any_key
+                ;;
+            9)
+                echo -e "\n  ── ${BOLD}Telemt Client MSS Mode${NC} ──"
+                echo -e "  ${DIM}[1] Off / Disabled (normal TCP behavior, max throughput — default)${NC}"
+                echo -e "  ${DIM}[2] TSPU (DPI / censorship circumvention mode)${NC}"
+                local _mchoice; _mchoice=$(read_choice "Choice" "1")
+                case "$_mchoice" in
+                    1) run_client_mss off ;;
+                    2) run_client_mss tspu ;;
+                    *) log_warn "No changes made" ;;
+                esac
                 press_any_key
                 ;;
             0|q|Q|"") return ;;

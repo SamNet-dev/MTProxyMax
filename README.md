@@ -133,7 +133,8 @@ Your proxy traffic looks identical to normal HTTPS traffic. The **Fake TLS V2** 
 - **Anti-DPI Packet Padding Shield (`mtproxymax shield on`):** Randomizes TCP MSS clamping (`1360`) and scrubs FakeTLS packet size distributions to defeat GFW, TSPU, and TIC heuristic analysis.
 - **Reverse-Proxy Cover Shield (`mtproxymax cover-shield on`):** Active scanner trapdoor that seamlessly forwards non-MTProto HTTP GETs and invalid TLS handshakes directly to a fallback website (e.g., `https://cloudflare.com`) instead of closing or resetting the TCP socket.
 - **Stealth Presets (`normal` vs `ultra`):** Hot-swappable anti-replay hardening (`mtproxymax stealth ultra`). `ultra` tightens the replay window to 180 seconds, expands the nonce cache to 131,072 entries, and drops unknown SNI probes immediately.
-- **TCP MSS Clamping:** Prevents MTU black hole drops and packet fragmentation by aligning TCP Maximum Segment Size `--clamp-mss-to-pmtu` (`mtproxymax clamp-mss on`).
+- **TCP MSS Clamping:** Prevents MTU black hole drops and packet fragmentation by aligning kernel TCP Maximum Segment Size `--clamp-mss-to-pmtu` (`mtproxymax clamp-mss on`).
+- **Telemt Client MSS Control:** Configure Telemt's internal anti-censorship segment sizing (`mtproxymax client-mss status|off|tspu`). Defaults to `off` (normal TCP behavior for maximum throughput across WireGuard/policy-routed networks), with optional `tspu` mode for DPI evasion in heavily censored regions.
 - **Multi-Port Listener Pool:** Listen on multiple fallback TCP ports simultaneously (e.g., 443, 8443, 2053) using automated kernel NAT redirection without spawning extra container instances (`mtproxymax port-pool add <port>`).
 
 ---
@@ -1308,6 +1309,7 @@ mtproxymax cover-shield [on|off|target] # Toggle Reverse-Proxy Cover Shield (Act
 mtproxymax bbr [on|off|status]          # Toggle TCP BBRv3 Congestion Control & ECN tuning
 mtproxymax stealth [ultra|normal|status] # Hot-swap engine replay window and cache size
 mtproxymax clamp-mss [on|off|status]    # Align TCP MSS to PMTU preventing packet drops
+mtproxymax client-mss [status|off|tspu] # Telemt client-side MSS (off=max speed, tspu=DPI evasion)
 mtproxymax domain-pool [add|remove|list] # Manage multi-domain SNI rotation pool
 mtproxymax port-pool [add|remove|list]  # Listen on multi-port fallback pool via kernel NAT
 mtproxymax lockdown [on|off|status]     # Engage emergency panic defense posture
