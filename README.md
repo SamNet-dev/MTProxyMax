@@ -98,6 +98,20 @@ mtproxymax           # Open interactive TUI
 mtproxymax status    # Check proxy health
 ```
 
+### 🐳 Official Docker Image & Registry
+
+MTProxyMax is powered by pre-compiled multi-architecture (`linux/amd64`, `linux/arm64`) Docker images hosted on GitHub Container Registry (GHCR):
+
+```bash
+docker pull ghcr.io/samnet-dev/mtproxymax-telemt:latest
+```
+
+#### How it Works:
+- **Pre-compiled High Performance Engine**: Packages the high-performance Rust/Tokio `telemt` MTProto engine built with Link-Time Optimization (`LTO`).
+- **Multi-Arch Support**: Runs natively on `x86_64` (AMD64) servers and `aarch64` (ARM64 / Raspberry Pi / Ampere Cloud) instances.
+- **Automated Container Orchestration**: During `mtproxymax install` or `mtproxymax start`, MTProxyMax automatically pulls `ghcr.io/samnet-dev/mtproxymax-telemt:latest` and manages it inside an isolated Docker container with host network permissions.
+- **Offline / Source Fallback**: If internet access to GHCR is restricted, MTProxyMax automatically compiles `telemt` from Rust source locally.
+
 ### ⚡ Post-Install Performance & Anti-DPI Setup Guide
 
 **Why aren't advanced kernel & Anti-DPI settings asked during the initial setup wizard (`mtproxymax install`)?**  
