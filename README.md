@@ -1413,6 +1413,7 @@ mtproxymax metrics live [seconds]       # Auto-refresh metrics (default: 5s)
 mtproxymax logs                         # Stream live logs
 mtproxymax health                       # Quick health check
 mtproxymax doctor                       # Comprehensive diagnostics (port, TLS, secrets, disk, bot)
+mtproxymax upload-test                  # Audit proxy upload mechanisms, socket write buffers & DC egress
 mtproxymax verify                       # End-to-end install check (port, TLS, Telegram API, metrics)
 mtproxymax port-check                   # Test if proxy port is reachable from outside
 mtproxymax speedtest                    # Outbound bandwidth/latency test from server

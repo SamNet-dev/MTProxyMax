@@ -3281,6 +3281,9 @@ run_doctor() {
     if [ "${CLOUD_BACKUP_ENABLED:-false}" = "true" ]; then
         echo -e "  ${GREEN}${SYM_CHECK}${NC} Cloud Backups enabled (${CLOUD_BACKUP_MODE:-telegram} -> ${CLOUD_BACKUP_TARGET:-admin})"
     fi
+    if [ -n "${CLIENT_MSS:-}" ]; then
+        echo -e "  ${YELLOW}!${NC}  Telemt Client MSS active (${CLIENT_MSS}) — run 'mtproxymax upload-test' if upload stalls occur"
+    fi
 
     echo ""
     if [ "${issues:--1}" -eq 0 ]; then
@@ -4818,7 +4821,7 @@ _mtproxymax_completion() {
 
     # Top-level commands
     if [ "$COMP_CWORD" -eq 1 ]; then
-        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate speed-limit fleet ssl backup-cloud"
+        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate speed-limit fleet ssl backup-cloud upload-test"
         COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
         return 0
     fi
@@ -5035,6 +5038,112 @@ run_ping_dc() {
         echo -e "  🏆 ${BOLD}Fastest DC:${NC} ${CYAN}${best_dc}${NC}"
         echo ""
     fi
+}
+
+run_upload_test() {
+    echo ""
+    draw_header "UPLOAD MECHANISM DIAGNOSTICS"
+    echo ""
+    echo -e "  ${DIM}Auditing proxy upload mechanism, socket write buffers, and DC egress...${NC}"
+    echo ""
+
+    local issues=0 warnings=0
+
+    # 1. Telemt client_mss Audit
+    load_settings 2>/dev/null || true
+    printf "  %-35s" "Telemt Client MSS mode:"
+    if [ -n "${CLIENT_MSS:-}" ]; then
+        echo -e "${YELLOW}${CLIENT_MSS}${NC} (anti-censorship segment sizing)"
+        echo -e "    ${YELLOW}! Note:${NC} 'tspu' mode can throttle or drop large upload chunks on tunneled/wireguard paths."
+        echo -e "      If users experience upload stalls, run: ${BOLD}mtproxymax client-mss off${NC}"
+        warnings=$((warnings + 1))
+    else
+        echo -e "${GREEN}off (disabled — max throughput default)${NC}"
+    fi
+
+    # 2. Kernel Socket Write Buffer (wmem) Audit
+    printf "  %-35s" "Kernel TCP Write Buffer (wmem_max):"
+    local wmem_max wmem_def tcp_wmem
+    wmem_max=$(sysctl -n net.core.wmem_max 2>/dev/null || echo "212992")
+    wmem_def=$(sysctl -n net.core.wmem_default 2>/dev/null || echo "212992")
+    tcp_wmem=$(sysctl -n net.ipv4.tcp_wmem 2>/dev/null || echo "4096 16384 4194304")
+
+    local wmem_max_int="${wmem_max%.*}"
+    if [ "${wmem_max_int:-0}" -ge 8388608 ]; then
+        echo -e "${GREEN}$(format_bytes "$wmem_max_int") (${wmem_max_int} bytes)${NC}"
+    else
+        echo -e "${YELLOW}$(format_bytes "$wmem_max_int") (${wmem_max_int} bytes)${NC}"
+        echo -e "    ${YELLOW}! Warning:${NC} Low socket write buffer limit may restrict upload throughput."
+        echo -e "      To optimize, run: ${BOLD}mtproxymax tcp-boost on${NC} or ${BOLD}mtproxymax ram-tune auto${NC}"
+        warnings=$((warnings + 1))
+    fi
+
+    # 3. Live Traffic Upload vs Download Ratio Audit
+    printf "  %-35s" "Live Ingress vs Egress metrics:"
+    local _metrics
+    _metrics=$(fetch_metrics 2>/dev/null || true)
+    if [ -n "$_metrics" ]; then
+        local up_bytes down_bytes
+        up_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
+        down_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+
+        local up_fmt; up_fmt=$(format_bytes "${up_bytes:-0}")
+        local down_fmt; down_fmt=$(format_bytes "${down_bytes:-0}")
+
+        echo -e "Upload RX: ${CYAN}${up_fmt}${NC} | Download TX: ${CYAN}${down_fmt}${NC}"
+        if [ "${down_bytes:-0}" -gt 1048576 ] && [ "${up_bytes:-0}" -eq 0 ]; then
+            echo -e "    ${RED}${SYM_CROSS} Alert:${NC} Download traffic exists (${down_fmt}) but 0 bytes uploaded!"
+            echo -e "      Check if client_mss is blocking upload packets or if firewall is blocking outbound DC connections."
+            issues=$((issues + 1))
+        fi
+    else
+        echo -e "${DIM}Metrics offline (proxy container stopped)${NC}"
+    fi
+
+    # 4. Outbound Telegram DC Port 443 Egress Reachability
+    echo ""
+    echo -e "  ${BOLD}Outbound Telegram DC Port 443 Egress Check:${NC}"
+    local dc_names=("DC1 (MIA)" "DC2 (AMS)" "DC3 (MIA)" "DC4 (AMS)" "DC5 (SIN)")
+    local dc_ips=("149.154.175.50" "149.154.167.51" "149.154.175.100" "149.154.167.91" "91.108.56.130")
+
+    local i dc_failed=0
+    for i in "${!dc_ips[@]}"; do
+        local name="${dc_names[$i]}" ip="${dc_ips[$i]}"
+        printf "    %-12s (%-15s:443)  " "$name" "$ip"
+        local time_s
+        time_s=$(curl -o /dev/null -s -w "%{time_connect}" --connect-timeout 4 "http://${ip}:443" 2>/dev/null || echo "")
+        if [ -n "$time_s" ] && [ "$time_s" != "0.000000" ]; then
+            local time_ms
+            time_ms=$(awk -v t="$time_s" 'BEGIN { printf "%.1f", t * 1000 }')
+            printf "${GREEN}%s ms${NC}\n" "$time_ms"
+        else
+            echo -e "${RED}CONNECTION TIMEOUT / BLOCKED${NC}"
+            dc_failed=$((dc_failed + 1))
+        fi
+    done
+    if [ "$dc_failed" -gt 0 ]; then
+        echo -e "    ${YELLOW}! Note:${NC} ${dc_failed} DC(s) blocked on port 443. Outbound uploads to those DCs may fail."
+        issues=$((issues + 1))
+    fi
+
+    # 5. QoS Upload Rules Audit
+    load_speed_limits 2>/dev/null || true
+    printf "\n  %-35s" "QoS Bandwidth Shaping Upload Rules:"
+    if [ "${#SPEED_LIMIT_TARGETS[@]}" -gt 0 ]; then
+        echo -e "${GREEN}${#SPEED_LIMIT_TARGETS[@]} active rule(s)${NC}"
+    else
+        echo -e "${DIM}No upload speed limit restrictions active${NC}"
+    fi
+
+    echo ""
+    if [ "$issues" -eq 0 ] && [ "$warnings" -eq 0 ]; then
+        echo -e "  ${BRIGHT_GREEN}${BOLD}Upload Mechanism Status: ALL CHECKS OPTIMAL${NC}"
+    elif [ "$issues" -eq 0 ]; then
+        echo -e "  ${YELLOW}${BOLD}Upload Mechanism Status: OPTIMAL (${warnings} warning(s))${NC}"
+    else
+        echo -e "  ${RED}${BOLD}Upload Mechanism Status: ${issues} issue(s), ${warnings} warning(s) detected${NC}"
+    fi
+    echo ""
 }
 
 # Apply or clean up kernel firewall anti-DPI rules
@@ -13477,6 +13586,7 @@ show_cli_help() {
     echo -e "    ${GREEN}connections${NC}             Show live active connections per user"
     echo -e "    ${GREEN}metrics${NC}                 Show live engine metrics (connections, upstream, users, ME)"
     echo -e "    ${GREEN}doctor${NC}                  Comprehensive diagnostics (port, TLS, secrets, disk, bot)"
+    echo -e "    ${GREEN}upload-test${NC}             Audit proxy upload mechanisms, socket write buffers & DC egress"
     echo -e "    ${GREEN}uptime${NC}                  One-line status (for scripts/monitoring)"
     echo -e "    ${GREEN}config${NC}                  Show current engine config"
     echo -e "    ${GREEN}notify${NC} <message>        Send custom Telegram notification"
@@ -14692,6 +14802,10 @@ cli_main() {
 
         qr-sheet)
             run_qr_sheet "$@"
+            ;;
+
+        upload-test|upload-check)
+            run_upload_test "$@"
             ;;
 
         guest|burner)
