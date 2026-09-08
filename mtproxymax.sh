@@ -4822,12 +4822,13 @@ _mtproxymax_completion() {
 
     # Top-level commands
     if [ "$COMP_CWORD" -eq 1 ]; then
-        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate speed-limit fleet ssl backup-cloud upload-test"
+        local cmds="start stop restart status menu install uninstall secret upstream port ip domain mask-backend mask-relay-bytes tg-urls adtag traffic connections metrics logs health doctor info maintenance ban unban bans migrate changelog backup restore backups config uptime notify port-check profile auto-rotate template sweep tune verify history completion speedtest telegram replication rebuild update engine geoblock sni-policy digest ping-dc shield stealth clamp-mss domain-pool dpi-inspect cover-watchdog lockdown port-pool qos happy-hours notify-expiry abuse-watch broadcast export-lb ddns diag-dump snapshot daily-report ssh-shield net-grade onboard tcp-boost leak-scan cert-check clone-link bootstrap heal auto-heal tcp-clean socket-boost tls-pad honeypot tcp-fastpath ram-tune port-hop cpu-tune top export-client export-report qr-sheet tag guest pool calendar geofence decoy auto-sni dc-optimize ip-score webhook failover eco-mode chaos-test evacuate speed-limit fleet ssl backup-cloud upload-test resources"
         COMPREPLY=( $(compgen -W "${cmds}" -- "${cur}") )
         return 0
     fi
 
     # Subcommands
+    [ "$cmd" = "resources" ] && [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "status clear set" -- "${cur}") )
     case "$cmd" in
         secret)
             if [ "$COMP_CWORD" -eq 2 ]; then
@@ -7731,11 +7732,17 @@ run_heal() {
     local ram_before sockets_before
     ram_before=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' | head -1 | tr -cd '0-9' || echo "0")
     [ -z "$ram_before" ] && ram_before=0
-    sockets_before=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
-    [ -z "$sockets_before" ] && sockets_before=0
+
+    local s_cnt_before=0
+    if command -v ss &>/dev/null; then
+        s_cnt_before=$(ss -ant 2>/dev/null | grep -c 'TIME-WAIT' || true)
+    elif command -v netstat &>/dev/null; then
+        s_cnt_before=$(netstat -ant 2>/dev/null | grep -c 'TIME_WAIT' || true)
+    fi
+    sockets_before="${s_cnt_before:-0}"
 
     log_info "Reclaiming OS pagecache & unassigned buffer memory..."
-    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
 
     log_info "Recycling orphaned TIME_WAIT TCP sockets..."
     sysctl -w net.ipv4.tcp_tw_reuse=1 >/dev/null 2>&1 || true
@@ -7749,8 +7756,15 @@ run_heal() {
     local ram_after sockets_after freed_ram
     ram_after=$(free -m 2>/dev/null | awk '/^Mem:/{print $4}' | head -1 | tr -cd '0-9' || echo "0")
     [ -z "$ram_after" ] && ram_after=0
-    sockets_after=$(netstat -an 2>/dev/null | grep -c 'TIME_WAIT' || ss -an 2>/dev/null | grep -c 'TIME-WAIT' || echo "0")
-    [ -z "$sockets_after" ] && sockets_after=0
+
+    local s_cnt_after=0
+    if command -v ss &>/dev/null; then
+        s_cnt_after=$(ss -ant 2>/dev/null | grep -c 'TIME-WAIT' || true)
+    elif command -v netstat &>/dev/null; then
+        s_cnt_after=$(netstat -ant 2>/dev/null | grep -c 'TIME_WAIT' || true)
+    fi
+    sockets_after="${s_cnt_after:-0}"
+
     freed_ram=$((ram_after - ram_before))
     if [ "$freed_ram" -lt 0 ]; then freed_ram=0; fi
 
@@ -7759,6 +7773,12 @@ run_heal() {
     echo -e "  │  Purged Dead Sockets:    $(printf "%-26s" "${sockets_before} -> ${sockets_after}") │"
     echo -e "  │  Active Users Impacted:  $(printf "%-26s" "0 (Zero Disruption)") │"
     echo -e "  └────────────────────────────────────────────────────────┘\n"
+
+    if ! is_proxy_running; then
+        log_warn "Proxy container is not running — attempting recovery start..."
+        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+        start_proxy_container 2>/dev/null || true
+    fi
 }
 
 run_auto_heal() {
@@ -8094,57 +8114,113 @@ SYSCTL
 
 # ── Dynamic RAM Auto-Tuning ──
 detect_system_ram_mb() {
-    local host_mb=0
-    host_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-    if [ -z "$host_mb" ] || [ "$host_mb" -le 0 ] 2>/dev/null; then
-        if [ -f /proc/meminfo ]; then
-            local total_kb
-            total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-            host_mb=$(( total_kb / 1024 ))
+    local -a _candidates=()
+
+    # 1. LXCFS virtualized /proc/meminfo (Proxmox LXC, Kubernetes, Docker)
+    if [ -f /var/lib/lxcfs/proc/meminfo ]; then
+        local lxcfs_kb
+        lxcfs_kb=$(awk '/^MemTotal:/{print $2}' /var/lib/lxcfs/proc/meminfo 2>/dev/null || echo 0)
+        if [[ "$lxcfs_kb" =~ ^[0-9]+$ ]] && [ "$lxcfs_kb" -gt 0 ] 2>/dev/null; then
+            _candidates+=( $(( lxcfs_kb / 1024 )) )
         fi
     fi
-    [ -z "$host_mb" ] || [ "$host_mb" -le 0 ] 2>/dev/null && host_mb=0
 
-    local cg_mb=0
-    if [ -f /sys/fs/cgroup/memory.max ]; then
-        local cg_max
-        cg_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "max")
-        if [[ "$cg_max" =~ ^[0-9]+$ ]] && [ "$cg_max" -gt 0 ] 2>/dev/null; then
-            cg_mb=$(( cg_max / 1048576 ))
+    if [ -f /proc/meminfo ]; then
+        local total_kb
+        total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+        if [[ "$total_kb" =~ ^[0-9]+$ ]] && [ "$total_kb" -gt 0 ] 2>/dev/null; then
+            _candidates+=( $(( total_kb / 1024 )) )
         fi
-    elif [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+    fi
+
+    # 2. Cgroups v2 hierarchical walk (/proc/self/cgroup)
+    local cg_rel=""
+    if [ -f /proc/self/cgroup ]; then
+        cg_rel=$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup 2>/dev/null | head -1)
+    fi
+
+    local cur_cg="$cg_rel"
+    while [ -n "$cur_cg" ] && [ "$cur_cg" != "/" ]; do
+        if [ -f "/sys/fs/cgroup${cur_cg}/memory.max" ]; then
+            local cg_val
+            cg_val=$(cat "/sys/fs/cgroup${cur_cg}/memory.max" 2>/dev/null || echo "max")
+            if [[ "$cg_val" =~ ^[0-9]+$ ]] && [ "$cg_val" -gt 0 ] && [ "$cg_val" -lt 9223372036854771712 ] 2>/dev/null; then
+                _candidates+=( $(( cg_val / 1048576 )) )
+            fi
+        fi
+        if [ -f "/sys/fs/cgroup${cur_cg}/memory.high" ]; then
+            local cg_high
+            cg_high=$(cat "/sys/fs/cgroup${cur_cg}/memory.high" 2>/dev/null || echo "max")
+            if [[ "$cg_high" =~ ^[0-9]+$ ]] && [ "$cg_high" -gt 0 ] && [ "$cg_high" -lt 9223372036854771712 ] 2>/dev/null; then
+                _candidates+=( $(( cg_high / 1048576 )) )
+            fi
+        fi
+        cur_cg=$(dirname "$cur_cg" 2>/dev/null || echo "")
+        [ "$cur_cg" = "." ] && cur_cg=""
+    done
+
+    if [ -f /sys/fs/cgroup/memory.max ]; then
+        local root_max
+        root_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "max")
+        if [[ "$root_max" =~ ^[0-9]+$ ]] && [ "$root_max" -gt 0 ] && [ "$root_max" -lt 9223372036854771712 ] 2>/dev/null; then
+            _candidates+=( $(( root_max / 1048576 )) )
+        fi
+    fi
+
+    # 3. Cgroups v1 hierarchical walk
+    local cg_v1=""
+    if [ -f /proc/self/cgroup ]; then
+        cg_v1=$(awk -F: '$2 == "memory" {print $3}' /proc/self/cgroup 2>/dev/null | head -1)
+    fi
+
+    if [ -n "$cg_v1" ] && [ -f "/sys/fs/cgroup/memory${cg_v1}/memory.limit_in_bytes" ]; then
+        local v1_lim
+        v1_lim=$(cat "/sys/fs/cgroup/memory${cg_v1}/memory.limit_in_bytes" 2>/dev/null || echo 0)
+        if [[ "$v1_lim" =~ ^[0-9]+$ ]] && [ "$v1_lim" -gt 0 ] && [ "$v1_lim" -lt 100000000000000 ] 2>/dev/null; then
+            _candidates+=( $(( v1_lim / 1048576 )) )
+        fi
+    fi
+
+    if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
         local cg_lim
         cg_lim=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)
         if [[ "$cg_lim" =~ ^[0-9]+$ ]] && [ "$cg_lim" -gt 0 ] && [ "$cg_lim" -lt 100000000000000 ] 2>/dev/null; then
-            cg_mb=$(( cg_lim / 1048576 ))
+            _candidates+=( $(( cg_lim / 1048576 )) )
         fi
     elif [ -f /sys/fs/cgroup/memory.limit_in_bytes ]; then
         local cg_lim
         cg_lim=$(cat /sys/fs/cgroup/memory.limit_in_bytes 2>/dev/null || echo 0)
         if [[ "$cg_lim" =~ ^[0-9]+$ ]] && [ "$cg_lim" -gt 0 ] && [ "$cg_lim" -lt 100000000000000 ] 2>/dev/null; then
-            cg_mb=$(( cg_lim / 1048576 ))
-        fi
-    elif [ -f /proc/user_beancounters ]; then
-        local bc_pages
-        bc_pages=$(awk '/physpages/ {print $4}' /proc/user_beancounters 2>/dev/null || echo 0)
-        if [[ "$bc_pages" =~ ^[0-9]+$ ]] && [ "$bc_pages" -gt 0 ] && [ "$bc_pages" -lt 2147483647 ] 2>/dev/null; then
-            cg_mb=$(( bc_pages / 256 ))
+            _candidates+=( $(( cg_lim / 1048576 )) )
         fi
     fi
 
-    if [ "$cg_mb" -gt 0 ] && [ "$host_mb" -gt 0 ]; then
-        if [ "$cg_mb" -lt "$host_mb" ]; then
-            echo "$cg_mb"
-        else
-            echo "$host_mb"
+    # 4. OpenVZ / Virtuozzo
+    if [ -f /proc/user_beancounters ]; then
+        local bc_pages
+        bc_pages=$(awk '/physpages/ {print $4}' /proc/user_beancounters 2>/dev/null || echo 0)
+        if [[ "$bc_pages" =~ ^[0-9]+$ ]] && [ "$bc_pages" -gt 0 ] && [ "$bc_pages" -lt 2147483647 ] 2>/dev/null; then
+            _candidates+=( $(( bc_pages / 256 )) )
         fi
-    elif [ "$cg_mb" -gt 0 ]; then
-        echo "$cg_mb"
-    elif [ "$host_mb" -gt 0 ]; then
-        echo "$host_mb"
-    else
-        echo 0
     fi
+
+    # 5. Fallback: free -m (host physical RAM via sysinfo() syscall)
+    local free_mb
+    free_mb=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' | tr -cd '0-9')
+    if [[ "$free_mb" =~ ^[0-9]+$ ]] && [ "$free_mb" -gt 0 ] 2>/dev/null; then
+        _candidates+=( "$free_mb" )
+    fi
+
+    # Resolve to the minimum valid positive RAM detected across all layers
+    local min_mb=0
+    for val in "${_candidates[@]}"; do
+        if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -gt 0 ] 2>/dev/null; then
+            if [ "$min_mb" -eq 0 ] || [ "$val" -lt "$min_mb" ]; then
+                min_mb="$val"
+            fi
+        fi
+    done
+    echo "$min_mb"
 }
 
 run_ram_tune() {
@@ -8233,6 +8309,77 @@ SYSCTL
             ;;
         *)
             log_error "Usage: mtproxymax ram-tune [auto|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# ── Container Resource Limits (CPU / Memory) ──
+run_resources() {
+    load_settings
+    local action="${1:-status}"
+    case "$action" in
+        status|"")
+            echo -e "\n  🖥️  ${BOLD}Container Resource Limits:${NC}"
+            echo -e "     CPU Cores:  ${CYAN}${PROXY_CPUS:-unlimited}${NC}"
+            echo -e "     Memory:     ${CYAN}${PROXY_MEMORY:-unlimited}${NC}"
+            echo -e "\n  Usage: mtproxymax resources [status|clear|set <cpus|none> <memory|none>]\n"
+            ;;
+        clear|reset|none|off)
+            check_root
+            if ! confirm_settings_restart "reset resources to unlimited"; then
+                return 0
+            fi
+            PROXY_CPUS=""
+            PROXY_MEMORY=""
+            save_settings
+            log_success "Resource limits cleared (CPU: unlimited, Memory: unlimited)"
+            if is_proxy_running; then
+                load_secrets
+                restart_proxy_container || true
+            fi
+            ;;
+        set)
+            check_root
+            local new_c="${2:-}" new_m="${3:-}"
+            if [ -z "$new_c" ] || [ -z "$new_m" ]; then
+                log_error "Usage: mtproxymax resources set <cpus|none> <memory|none>  (e.g. mtproxymax resources set 1 512m)"
+                return 1
+            fi
+            local parsed_c="" parsed_m=""
+            if [[ "$new_c" =~ ^(none|unlimited|clear|0|off)$ ]]; then
+                parsed_c=""
+            elif [[ "$new_c" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit ($new_c < 0.1)}" 2>/dev/null; then
+                parsed_c="$new_c"
+            else
+                log_error "Invalid CPU value (must be >= 0.1 or 'none')"
+                return 1
+            fi
+
+            if [[ "$new_m" =~ ^(none|unlimited|clear|0|off)$ ]]; then
+                parsed_m=""
+            elif [[ "$new_m" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
+                [[ "$new_m" =~ ^[0-9]+$ ]] && new_m="${new_m}m"
+                parsed_m="$new_m"
+            else
+                log_error "Invalid memory value (e.g. 256m, 1g, or 'none')"
+                return 1
+            fi
+
+            if ! confirm_settings_restart "resources (CPU: ${parsed_c:-unlimited}, Memory: ${parsed_m:-unlimited})"; then
+                return 0
+            fi
+            PROXY_CPUS="$parsed_c"
+            PROXY_MEMORY="$parsed_m"
+            save_settings
+            log_success "Resources updated (CPU: ${PROXY_CPUS:-unlimited}, Memory: ${PROXY_MEMORY:-unlimited})"
+            if is_proxy_running; then
+                load_secrets
+                restart_proxy_container || true
+            fi
+            ;;
+        *)
+            log_error "Usage: mtproxymax resources [status|clear|set <cpus|none> <memory|none>]"
             return 1
             ;;
     esac
@@ -9086,43 +9233,67 @@ run_proxy_container() {
         --log-opt max-file=3
     )
     [ -n "${PROXY_CPUS}" ] && _docker_args+=(--cpus "${PROXY_CPUS}")
-    [ -n "${PROXY_MEMORY}" ] && _docker_args+=(--memory "${PROXY_MEMORY}" --memory-swap "${PROXY_MEMORY}")
+    [ -n "${PROXY_MEMORY}" ] && _docker_args+=(--memory "${PROXY_MEMORY}")
 
     local _run_out
     _run_out=$(docker run -d "${_docker_args[@]}" \
         --ulimit nofile=65535:65535 \
         -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
         "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
-            if echo "$_run_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
-                log_warn "Docker cgroup/D-Bus timeout detected on minimal/low-RAM VPS. Attempting auto-recovery..."
-                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-                if command -v systemctl &>/dev/null; then
-                    systemctl daemon-reload 2>/dev/null || true
-                    systemctl restart dbus 2>/dev/null || true
-                    sleep 1
-                    systemctl restart docker 2>/dev/null || true
-                    sleep 2
+            # Check if failure was caused by resource limits (CPU/Memory cgroup rejection in unprivileged LXC/containers)
+            if [ -n "${PROXY_MEMORY}" ] || [ -n "${PROXY_CPUS}" ]; then
+                if echo "$_run_out" | grep -E -iq "(cgroup|permission denied|OCI runtime create failed|memory|swap|cpus)"; then
+                    log_warn "Host cgroup rejected container CPU/memory constraints (e.g. unprivileged LXC). Retrying without resource limits..."
+                    _docker_args=(
+                        --name "$CONTAINER_NAME"
+                        --restart unless-stopped
+                        --network host
+                        --log-opt max-size=10m
+                        --log-opt max-file=3
+                    )
+                    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                    _run_out=$(docker run -d "${_docker_args[@]}" \
+                        --ulimit nofile=65535:65535 \
+                        -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
+                        "$(get_docker_image)" /etc/telemt.toml 2>&1) || true
                 fi
-                docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-                log_info "Retrying container launch after D-Bus & memory cache recovery..."
-                _run_out=$(docker run -d "${_docker_args[@]}" \
-                    --ulimit nofile=65535:65535 \
-                    -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-                    "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
-                        # If standard retry still fails, attempt fallback with explicit host cgroup namespace
-                        _run_out=$(docker run -d "${_docker_args[@]}" \
-                            --cgroupns host \
-                            -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-                            "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
-                                log_error "Failed to start container after recovery attempts"
-                                echo -e "  ${DIM}${_run_out}${NC}"
-                                return 1
-                            }
-                    }
-            else
-                log_error "Failed to start container"
-                echo -e "  ${DIM}${_run_out}${NC}"
-                return 1
+            fi
+
+            if ! is_proxy_running; then
+                if echo "$_run_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
+                    log_warn "Docker cgroup/D-Bus timeout detected on minimal/low-RAM VPS. Attempting auto-recovery..."
+                    [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
+                    if command -v systemctl &>/dev/null; then
+                        systemctl daemon-reload 2>/dev/null || true
+                        systemctl restart dbus 2>/dev/null || true
+                        sleep 1
+                        systemctl restart docker 2>/dev/null || true
+                        sleep 2
+                    fi
+                    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                    log_info "Retrying container launch after D-Bus & memory cache recovery..."
+                    _run_out=$(docker run -d "${_docker_args[@]}" \
+                        --ulimit nofile=65535:65535 \
+                        -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
+                        "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                            # If standard retry still fails, attempt fallback with explicit host cgroup namespace
+                            docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                            _run_out=$(docker run -d "${_docker_args[@]}" \
+                                --cgroupns host \
+                                -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
+                                "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                                    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                                    log_error "Failed to start container after recovery attempts"
+                                    echo -e "  ${DIM}${_run_out}${NC}"
+                                    return 1
+                                }
+                        }
+                else
+                    docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
+                    log_error "Failed to start container"
+                    echo -e "  ${DIM}${_run_out}${NC}"
+                    return 1
+                fi
             fi
         }
 
@@ -9217,7 +9388,7 @@ _start_all_instances() {
             -v "${inst_config}:/etc/telemt.toml:ro" \
             "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
                 if echo "$_inst_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
-                    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+                    [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
                     systemctl daemon-reload 2>/dev/null || true
                     systemctl restart dbus docker 2>/dev/null || true
                     sleep 2
@@ -12949,7 +13120,9 @@ run_installer() {
     local cpu_input
     read -r cpu_input
     if [ -n "$cpu_input" ]; then
-        if [[ "$cpu_input" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        if [[ "$cpu_input" =~ ^(0|none|unlimited|clear|off)$ ]]; then
+            PROXY_CPUS=""
+        elif [[ "$cpu_input" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
             # Ensure minimum 0.1 CPU
             if awk "BEGIN{exit ($cpu_input < 0.1)}" 2>/dev/null; then
                 PROXY_CPUS="$cpu_input"
@@ -12957,7 +13130,7 @@ run_installer() {
                 log_warn "CPU must be at least 0.1, keeping ${PROXY_CPUS:-unlimited}"
             fi
         else
-            log_warn "Invalid CPU value (must be a number, e.g. 1, 2, 0.5), keeping ${PROXY_CPUS:-unlimited}"
+            log_warn "Invalid CPU value (must be a number, e.g. 1, 2, 0.5, or 'none'), keeping ${PROXY_CPUS:-unlimited}"
         fi
     fi
 
@@ -12965,12 +13138,14 @@ run_installer() {
     local mem_input
     read -r mem_input
     if [ -n "$mem_input" ]; then
-        if [[ "$mem_input" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
+        if [[ "$mem_input" =~ ^(0|none|unlimited|clear|off)$ ]]; then
+            PROXY_MEMORY=""
+        elif [[ "$mem_input" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
             # Default bare numbers to megabytes
             [[ "$mem_input" =~ ^[0-9]+$ ]] && mem_input="${mem_input}m"
             PROXY_MEMORY="$mem_input"
         else
-            log_warn "Invalid memory value (e.g. 256m, 1g), keeping ${PROXY_MEMORY:-unlimited}"
+            log_warn "Invalid memory value (e.g. 256m, 1g, or 'none'), keeping ${PROXY_MEMORY:-unlimited}"
         fi
     fi
 
@@ -13318,7 +13493,7 @@ instance_add() {
         -v "${inst_config}:/etc/telemt.toml:ro" \
         "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
             if echo "$_inst_add_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
-                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+                [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
                 systemctl daemon-reload 2>/dev/null || true
                 systemctl restart dbus docker 2>/dev/null || true
                 sleep 2
@@ -13557,6 +13732,7 @@ show_cli_help() {
     echo -e "    ${GREEN}stealth${NC} [ultra|normal|status]  Switch stealth defense preset (anti-replay tuning)"
     echo -e "    ${GREEN}clamp-mss${NC} [on|off|status] Toggle TCP MSS Clamping (--clamp-mss-to-pmtu)"
     echo -e "    ${GREEN}client-mss${NC} [status|off|tspu]  Configure Telemt client-side MSS (off=normal TCP, tspu=DPI evasion)"
+    echo -e "    ${GREEN}resources${NC} [status|clear|set <cpus|none> <mem|none>] Container CPU/memory limits"
     echo -e "    ${GREEN}mask-backend${NC} [host:port]  Show or set mask backend for non-proxy traffic"
     echo -e "    ${GREEN}mask-relay-bytes${NC} [N|0|clear]  Max bytes per direction on mask relay (0=unlimited)"
     echo -e "    ${GREEN}tg-urls${NC} [get|set <field> <url>|clear]  Custom Telegram infrastructure URLs (restricted regions)"
@@ -14722,6 +14898,10 @@ cli_main() {
 
         client-mss)
             run_client_mss "$@"
+            ;;
+
+        resources)
+            run_resources "$@"
             ;;
 
         domain-pool)
@@ -17281,37 +17461,45 @@ show_settings_menu() {
                 press_any_key
                 ;;
             4)
-                echo -en "  ${BOLD}CPU cores [${PROXY_CPUS:-unlimited}]:${NC} "
+                echo -en "  ${BOLD}CPU cores [${PROXY_CPUS:-unlimited}] (or 'none' to reset):${NC} "
                 local c; read -r c
                 local _res_changed=false
                 local _new_cpus="$PROXY_CPUS"
                 local _new_memory="$PROXY_MEMORY"
                 if [ -n "$c" ]; then
-                    if [[ "$c" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit ($c < 0.1)}" 2>/dev/null; then
-                        _new_cpus="$c"; _res_changed=true
+                    if [[ "$c" =~ ^(0|none|unlimited|clear|off|reset)$ ]]; then
+                        _new_cpus=""
+                        _res_changed=true
+                    elif [[ "$c" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit ($c < 0.1)}" 2>/dev/null; then
+                        _new_cpus="$c"
+                        _res_changed=true
                     else
-                        log_error "Invalid CPU value (must be a number >= 0.1, e.g. 1, 2, 0.5)"
+                        log_error "Invalid CPU value (must be >= 0.1, e.g. 1, 2, 0.5, or 'none' to reset)"
                     fi
                 fi
-                echo -en "  ${BOLD}Memory, e.g. 256m, 1g [${PROXY_MEMORY:-unlimited}]:${NC} "
+                echo -en "  ${BOLD}Memory, e.g. 256m, 1g [${PROXY_MEMORY:-unlimited}] (or 'none' to reset):${NC} "
                 local m; read -r m
                 if [ -n "$m" ]; then
-                    if [[ "$m" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
+                    if [[ "$m" =~ ^(0|none|unlimited|clear|off|reset)$ ]]; then
+                        _new_memory=""
+                        _res_changed=true
+                    elif [[ "$m" =~ ^[0-9]+[bBkKmMgG]?$ ]]; then
                         [[ "$m" =~ ^[0-9]+$ ]] && m="${m}m"
-                        _new_memory="$m"; _res_changed=true
+                        _new_memory="$m"
+                        _res_changed=true
                     else
-                        log_error "Invalid memory value (e.g. 256m, 1g)"
+                        log_error "Invalid memory value (e.g. 256m, 1g, or 'none' to reset)"
                     fi
                 fi
                 if $_res_changed; then
-                    if ! confirm_settings_restart "resource changes"; then
+                    if ! confirm_settings_restart "resource changes (CPU: ${_new_cpus:-unlimited}, Memory: ${_new_memory:-unlimited})"; then
                         press_any_key
                         continue
                     fi
                     PROXY_CPUS="$_new_cpus"
                     PROXY_MEMORY="$_new_memory"
                     save_settings
-                    log_success "Resources updated"
+                    log_success "Resources updated (CPU: ${PROXY_CPUS:-unlimited}, Memory: ${PROXY_MEMORY:-unlimited})"
                     if is_proxy_running; then
                         load_secrets
                         restart_proxy_container || true

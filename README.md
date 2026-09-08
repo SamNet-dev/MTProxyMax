@@ -1376,6 +1376,7 @@ mtproxymax heal                         # Run emergency RAM & dead socket cleanu
 mtproxymax auto-heal [on|off|status]    # Enable background automated RAM/socket self-healer
 mtproxymax tcp-fastpath [on|off]        # TCP window scaling, SACK & path MTU probing optimizer
 mtproxymax ram-tune [auto|off]          # Auto-detect RAM & apply optimal TCP memory buffers
+mtproxymax resources [status|clear|set] # Configure or reset container CPU/memory limits
 mtproxymax port-hop [add|remove|list]   # Dynamic multi-port NAT range redirection
 mtproxymax cpu-tune [on|off|status]     # Multi-core IRQ packet spreading (RPS/RFS)
 mtproxymax eco-mode [on|off|status]     # Lightweight RAM & TCP kernel tuning for micro-servers
