@@ -1036,7 +1036,7 @@ Master-Slave Replication (optional):
 |-----------|------|
 | **mtproxymax.sh** | Single bash script: CLI, TUI, config manager |
 | **telemt** | Rust MTProto engine running inside Docker |
-| **Telegram bot service** | Independent systemd service polling Bot API |
+| **Telegram bot service** | Independent service polling Bot API (systemd or OpenRC) |
 | **Replication sync service** | systemd timer pushing config to slave servers |
 | **Prometheus endpoint** | `/metrics` on port 9090 (localhost only) |
 
