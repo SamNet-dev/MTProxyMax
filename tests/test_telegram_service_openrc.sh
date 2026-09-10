@@ -115,10 +115,13 @@ assert_eq "openrc setup succeeds" "0" "$?"
 assert_file_contains "init script declares supervise-daemon" "supervisor=supervise-daemon" "$TELEGRAM_INIT"
 assert_file_contains "init script respawns after 10s" "respawn_delay=10" "$TELEGRAM_INIT"
 assert_file_contains "init script respawns indefinitely" "respawn_max=0" "$TELEGRAM_INIT"
-assert_file_contains "init script needs net" "need net" "$TELEGRAM_INIT"
-assert_file_contains "init script uses docker softly" "use docker" "$TELEGRAM_INIT"
+assert_file_contains "init script needs net and docker" "need net docker" "$TELEGRAM_INIT"
 assert_file_contains "init script points at generated daemon" \
     "command_args=\"${INSTALL_DIR}/mtproxymax-telegram.sh\"" "$TELEGRAM_INIT"
+assert_file_contains "init script separates stderr" \
+    "error_log=\"/var/log/mtproxymax-telegram.err\"" "$TELEGRAM_INIT"
+assert_file_contains "start_pre guards on the generated daemon" \
+    "if [ ! -f \"\${command_args}\" ]; then" "$TELEGRAM_INIT"
 
 if [ -x "$TELEGRAM_INIT" ]; then
     assert_eq "init script is executable" "yes" "yes"
