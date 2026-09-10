@@ -37,6 +37,7 @@ SSL_DIR="${SSL_DIR:-${INSTALL_DIR}/ssl}"
 CLOUD_BACKUP_FILE="${CLOUD_BACKUP_FILE:-${INSTALL_DIR}/cloud_backup.conf}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 INITD_DIR="${INITD_DIR:-/etc/init.d}"
+RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
@@ -533,6 +534,18 @@ detect_init_system() {
     else
         echo "none"
     fi
+}
+
+# Register an OpenRC service in a runlevel, returning 0 only if it really landed
+# there. `rc-update add` is not trusted on its own: its exit status is swallowed
+# and, more importantly, a failure must never be reported to the user as success.
+# Tested with -e rather than -L: rc-update creates a symlink to the init script we
+# just wrote, so -e is true exactly when the service is genuinely runnable, and it
+# stays verifiable on hosts that cannot create symlinks.
+openrc_enable_service() {
+    local svc="$1" runlevel="${2:-default}"
+    rc-update add "$svc" "$runlevel" 2>/dev/null || true
+    [ -e "${RUNLEVELS_DIR}/${runlevel}/${svc}" ]
 }
 
 # Check dependencies
@@ -12232,6 +12245,11 @@ SERVICE_EOF
         # `need docker` is deliberate: the daemon drives the proxy container, so
         # starting it without docker would only emit bogus "proxy down" alerts.
         # `use` is soft — it orders dns/logger only when those services exist.
+        #
+        # respawn_max=0 means "always respawn", which is slightly broader than the
+        # systemd unit's Restart=on-failure: supervise-daemon restarts even after a
+        # clean exit. The daemon only exits on error or a signal, so this is the
+        # behaviour we want, but it is a real difference between the two backends.
         cat > "${INITD_DIR}/mtproxymax-telegram" << OPENRC_EOF
 #!/sbin/openrc-run
 # MTProxyMax Telegram Bot Service
@@ -12246,6 +12264,10 @@ command_args="${INSTALL_DIR}/mtproxymax-telegram.sh"
 respawn_delay=10
 respawn_max=0
 
+# NOTE: two pid files exist and they are NOT interchangeable. This one belongs to
+# the supervision layer; the bot daemon separately writes its own PID to
+# ${INSTALL_DIR}/mtproxymax-telegram.pid. Killing the PID in this file stops the
+# supervisor, not the bot.
 pidfile="/run/\${RC_SVCNAME}.pid"
 output_log="/var/log/mtproxymax-telegram.log"
 error_log="/var/log/mtproxymax-telegram.err"
@@ -12266,7 +12288,9 @@ start_pre() {
 OPENRC_EOF
 
         chmod +x "${INITD_DIR}/mtproxymax-telegram"
-        rc-update add mtproxymax-telegram default 2>/dev/null || true
+        if ! openrc_enable_service mtproxymax-telegram default; then
+            log_warn "Could not enable the bot service for boot — run: rc-update add mtproxymax-telegram default"
+        fi
         if rc-service mtproxymax-telegram restart 2>/dev/null; then
             log_success "Telegram bot service started (OpenRC)"
         else
@@ -13437,8 +13461,12 @@ status() {
 OPENRC_EOF
 
         chmod +x "${INITD_DIR}/mtproxymax"
-        rc-update add mtproxymax default 2>/dev/null || true
-        log_success "Auto-start enabled (OpenRC)"
+        if openrc_enable_service mtproxymax default; then
+            log_success "Auto-start enabled (OpenRC)"
+        else
+            log_warn "Could not enable auto-start — run: rc-update add mtproxymax default"
+            return 1
+        fi
         ;;
     *)
         log_warn "No supported init system found (systemd or OpenRC)."

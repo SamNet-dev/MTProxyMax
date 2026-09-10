@@ -16,7 +16,8 @@ INSTALL_DIR="$TEST_TMPDIR/install"
 SETTINGS_FILE="$INSTALL_DIR/settings.conf"
 INITD_DIR="$TEST_TMPDIR/etc/init.d"
 SYSTEMD_DIR="$TEST_TMPDIR/etc/systemd/system"
-mkdir -p "$INSTALL_DIR" "$INITD_DIR" "$SYSTEMD_DIR"
+RUNLEVELS_DIR="$TEST_TMPDIR/etc/runlevels"
+mkdir -p "$INSTALL_DIR" "$INITD_DIR" "$SYSTEMD_DIR" "$RUNLEVELS_DIR"
 
 MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "${BASH_SOURCE[0]}")/../mtproxymax.sh"
 set +e
@@ -27,11 +28,13 @@ TESTS_FAILED=0
 
 CMD_LOG="$TEST_TMPDIR/cmd.log"
 WARN_LOG="$TEST_TMPDIR/warn.log"
+SUCCESS_LOG="$TEST_TMPDIR/success.log"
 : > "$CMD_LOG"
 : > "$WARN_LOG"
+: > "$SUCCESS_LOG"
 
 check_root() { :; }
-log_success() { :; }
+log_success() { echo "$*" >> "$SUCCESS_LOG"; }
 log_info() { :; }
 log_warn() { echo "$*" >> "$WARN_LOG"; }
 log_error() { echo "$*" >> "$WARN_LOG"; }
@@ -39,8 +42,18 @@ log_error() { echo "$*" >> "$WARN_LOG"; }
 # Shadow the init-system binaries so nothing touches the host.
 RC_SERVICE_STATUS=0
 SYSTEMCTL_STATUS=0
+# When 0, `rc-update add` silently fails to create the runlevel symlink, which is
+# how a genuine boot-enable failure presents. Success must not be reported then.
+RC_UPDATE_LINKS=1
 systemctl() { echo "systemctl $*" >> "$CMD_LOG"; return "$SYSTEMCTL_STATUS"; }
-rc-update() { echo "rc-update $*" >> "$CMD_LOG"; return 0; }
+rc-update() {
+    echo "rc-update $*" >> "$CMD_LOG"
+    if [ "$1" = "add" ] && [ "$RC_UPDATE_LINKS" = "1" ]; then
+        mkdir -p "$RUNLEVELS_DIR/$3"
+        ln -sfn "$INITD_DIR/$2" "$RUNLEVELS_DIR/$3/$2"
+    fi
+    return 0
+}
 rc-service() { echo "rc-service $*" >> "$CMD_LOG"; return "$RC_SERVICE_STATUS"; }
 
 FAKE_INIT="openrc"
@@ -90,14 +103,28 @@ assert_warn_contains() {
     fi
 }
 
+assert_success_contains() {
+    local name="$1" needle="$2"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if grep -qF -- "$needle" "$SUCCESS_LOG" 2>/dev/null; then
+        printf '  PASS  %s\n' "$name"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        printf '  FAIL  %s (missing %q in success log)\n' "$name" "$needle"
+    fi
+}
+
 reset_state() {
     FAKE_INIT="${1:-openrc}"
     RC_SERVICE_STATUS=0
     SYSTEMCTL_STATUS=0
+    RC_UPDATE_LINKS=1
     : > "$CMD_LOG"
     : > "$WARN_LOG"
+    : > "$SUCCESS_LOG"
     rm -f "$INITD_DIR/mtproxymax" "$INITD_DIR/mtproxymax-telegram"
     rm -f "$SYSTEMD_DIR/mtproxymax.service" "$SYSTEMD_DIR/mtproxymax-telegram.service"
+    rm -rf "$RUNLEVELS_DIR"
 }
 
 TELEGRAM_INIT="$INITD_DIR/mtproxymax-telegram"
@@ -187,6 +214,22 @@ setup_telegram_service
 assert_eq "openrc start failure returns nonzero" "1" "$?"
 assert_warn_contains "openrc start failure warns" "rc-service mtproxymax-telegram status"
 
+# ── OpenRC: boot-enable failure must not be reported as success ──
+reset_state openrc
+setup_telegram_service
+assert_success_contains "setup reports the bot as started" "Telegram bot service started (OpenRC)"
+if [ -e "$RUNLEVELS_DIR/default/mtproxymax-telegram" ]; then
+    assert_eq "boot-enable registers the service in the runlevel" "yes" "yes"
+else
+    assert_eq "boot-enable registers the service in the runlevel" "yes" "no"
+fi
+
+reset_state openrc
+RC_UPDATE_LINKS=0
+setup_telegram_service
+assert_eq "boot-enable failure still starts the bot" "0" "$?"
+assert_warn_contains "boot-enable failure warns" "Could not enable the bot service for boot"
+
 # ── No init system: loud failure, no silent no-op ────────────
 reset_state none
 setup_telegram_service
@@ -238,6 +281,12 @@ if [ -x "$MAIN_INIT" ]; then
 else
     assert_eq "autostart script is executable" "yes" "no"
 fi
+
+reset_state openrc
+RC_UPDATE_LINKS=0
+setup_autostart
+assert_eq "autostart boot-enable failure returns nonzero" "1" "$?"
+assert_warn_contains "autostart boot-enable failure warns" "Could not enable auto-start"
 
 reset_state none
 setup_autostart
