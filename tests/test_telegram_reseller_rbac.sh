@@ -140,11 +140,33 @@ run superadmin 111 "/mp_status"
 assert_not_contains "superadmin is not denied /mp_status" "Permission denied" "$(cat "$REPLIES")"
 assert_eq "superadmin action is not logged as a violation" "" "$(audit_now)"
 
-# ── Unknown users still get nothing ──────────────────────────────────────────
+# ── Unauthenticated users still get nothing ──────────────────────────────────
 reset_audit
 run none 999 "/mp_status"
-assert_eq "unknown role gets no admin reply" "" "$(cat "$REPLIES")"
-assert_eq "unknown role is not logged as a violation" "" "$(audit_now)"
+assert_eq "unauthenticated user gets no admin reply" "" "$(cat "$REPLIES")"
+assert_eq "unauthenticated user is not logged as a violation" "" "$(audit_now)"
+
+# ── Unrecognised roles fail closed ───────────────────────────────────────────
+# _check_tg_role returns whatever admins.conf holds, and admins.conf is a plain
+# file an operator can hand-edit. Anything that is not exactly 'superadmin' or
+# 'reseller' must be refused rather than granted the admin control plane.
+for _role in operator administrator root SUPERADMIN superadmin2; do
+    reset_audit
+    run "$_role" 444 "/mp_status"
+    assert_contains "role '$_role' is denied the control plane" "Permission denied" "$(cat "$REPLIES")"
+    assert_contains "role '$_role' denial is logged" "SECURITY" "$(audit_now)"
+    assert_contains "role '$_role' denial names the role" "$_role" "$(audit_now)"
+done
+
+reset_audit
+run operator 444 "/mp_voucher list"
+assert_contains "unrecognised role cannot reach the voucher engine" "Permission denied" "$(cat "$REPLIES")"
+
+reset_audit
+run operator 444 "/start"
+assert_not_contains "unrecognised role still gets public commands" "Permission denied" "$(cat "$REPLIES")"
+assert_contains "unrecognised role gets the self-service welcome" "Welcome to MTProxyMax" "$(cat "$REPLIES")"
+assert_eq "a public command is not logged as a violation" "" "$(audit_now)"
 
 printf '\n%d tests, %d failures\n' "$TESTS_RUN" "$TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]

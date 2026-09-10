@@ -11653,21 +11653,31 @@ _process_cmd() {
         return
     fi
 
-    # Resellers are limited to vouchers (see README: Role-Based Access Control).
-    # Everything else in the control plane is a privilege violation, so it is
-    # refused and recorded before it can reach any handler below.
-    if [ "$role" = "reseller" ]; then
-        case "$text" in
-            /mp_voucher|/mp_voucher@*|/mp_voucher\ *|/mp_voucher@*\ *) ;;
-            *)
-                tg_send_to "$chat_id" "⛔ Permission denied: the reseller role is limited to voucher commands."
-                _tg_security_log "$chat_id" "$text"
-                return
-                ;;
-        esac
-    fi
+    # The control plane is an allowlist. A reseller is limited to vouchers (see
+    # README: Role-Based Access Control). Any other role value is a
+    # misconfiguration — admins.conf is a plain file an operator can hand-edit —
+    # and is refused rather than silently granted administrative rights.
+    case "$role" in
+        superadmin)
+            ;;
+        reseller)
+            case "$text" in
+                /mp_voucher|/mp_voucher@*|/mp_voucher\ *|/mp_voucher@*\ *) ;;
+                *)
+                    tg_send_to "$chat_id" "⛔ Permission denied: the reseller role is limited to voucher commands."
+                    _tg_security_log "$chat_id" "$text"
+                    return
+                    ;;
+            esac
+            ;;
+        *)
+            tg_send_to "$chat_id" "⛔ Permission denied: this account has an unrecognised role."
+            _tg_security_log "$chat_id" "unrecognised role '${role}': ${text}"
+            return
+            ;;
+    esac
 
-    # Administrative commands (resellers only ever reach /mp_voucher above)
+    # Administrative commands (only superadmins reach this point)
     case "$text" in
         /mp_voucher\ *|/mp_voucher@*\ *)
             local sub=$(echo "$text" | awk '{print $2}')
