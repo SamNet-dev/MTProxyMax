@@ -2,11 +2,12 @@
 # Regression tests for the hot-reload path.
 #
 # The engine container reads its config through a bind mount. A single-file mount
-# pins one inode, so replacing that file leaves the engine reading an unlinked
-# one — every reload silently becomes a no-op until the container is recreated.
-# These tests lock in that we mount the directory, that instance configs are
-# written straight to their own file instead of being routed through config.toml,
-# and that a reload which cannot take effect says so instead of claiming success.
+# pins one inode, and `cp` onto a file that is itself a mount point replaces that
+# inode rather than truncating it, so the engine is left reading an unlinked file
+# — every reload silently becomes a no-op until the container is recreated.
+# These tests lock in that we mount the directory, write the config in place,
+# write instance configs straight to their own file instead of routing them
+# through config.toml, and report a reload honestly when it cannot take effect.
 set -o pipefail
 
 if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
@@ -93,9 +94,14 @@ PROXY_METRICS_PORT=9090
 
 echo "Hot-reload bind-mount tests"
 
-# ── 1. Source guard: never bind-mount the config as a single file ────────────
+# ── 1. Source guards: the two things that made reloads a silent no-op ───────
 SINGLE_FILE_MOUNTS=$(grep -c 'config\.toml:/etc/telemt' "${SCRIPT_DIR}/../mtproxymax.sh")
 assert_eq "no single-file config bind mount remains" 0 "$SINGLE_FILE_MOUNTS"
+
+# `cp` onto a mount point replaces the inode (busybox cp does this), which
+# detaches the container. The config must be written through a redirect.
+COPY_OVER=$(grep -c 'cp "$tmp" "$dest"' "${SCRIPT_DIR}/../mtproxymax.sh")
+assert_eq "config is never copied over itself" 0 "$COPY_OVER"
 
 # ── 2. Instance configs are written directly, and instances mount the dir ────
 cat > "$INSTANCES_FILE" <<'EOF'
@@ -119,8 +125,17 @@ assert_eq "instance container mounts the config directory" 1 \
 assert_eq "instance container is pointed at its own config" 1 \
     "$(grep -c '/etc/telemt/config-8443.toml' "$DOCKER_RUN_LOG")"
 
-# ── 3. Reloading never replaces the primary config file ─────────────────────
+# ── 3. Regenerating writes in place and produces a complete config ──────────
 INSTANCE_UP=true
+generate_telemt_config 2>/dev/null
+GEN_INODE=$(stat -c %i "${CONFIG_DIR}/config.toml" 2>/dev/null)
+generate_telemt_config 2>/dev/null
+assert_eq "regeneration keeps the config inode" "$GEN_INODE" \
+    "$(stat -c %i "${CONFIG_DIR}/config.toml" 2>/dev/null)"
+assert_eq "in-place write produces a complete config" 1 \
+    "$(grep -c '^\[access.users\]$' "${CONFIG_DIR}/config.toml" 2>/dev/null)"
+
+# ── 4. Reloading never replaces the primary config file ─────────────────────
 generate_telemt_config 2>/dev/null
 BEFORE_INODE=$(stat -c %i "${CONFIG_DIR}/config.toml" 2>/dev/null)
 cp "${CONFIG_DIR}/config.toml" "${TEST_ROOT}/before.toml" 2>/dev/null
@@ -135,7 +150,7 @@ else
     assert_eq "primary config is not overwritten by instance content" "yes" "no"
 fi
 
-# ── 4. Reload outcome is reported honestly ──────────────────────────────────
+# ── 5. Reload outcome is reported honestly ──────────────────────────────────
 LOG_INFO=""
 LOG_WARN=""
 KILL_FAILS=true
@@ -154,7 +169,7 @@ reload_proxy_config 2>/dev/null
 assert_eq "successful signal reports the hot reload" \
     "Config reloaded (hot-reload, no restart)" "$LOG_INFO"
 
-# ── 5. A detached config triggers a restart instead of a silent no-op ───────
+# ── 6. A detached config triggers a restart instead of a silent no-op ───────
 LOG_INFO=""
 LOG_WARN=""
 RESTARTS=0
@@ -171,7 +186,7 @@ reload_proxy_config 2>/dev/null
 assert_eq "detached instance config falls back to a restart" 1 "$RESTARTS"
 INSTANCE_IN_SYNC=true
 
-# ── 6. A stopped container is never mistaken for an out-of-sync one ─────────
+# ── 7. A stopped container is never mistaken for an out-of-sync one ─────────
 LOG_INFO=""
 LOG_WARN=""
 RESTARTS=0

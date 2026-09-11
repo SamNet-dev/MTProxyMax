@@ -1474,7 +1474,16 @@ TOML_EOF
     fi
 
     chmod 644 "$tmp"
-    cp "$tmp" "$dest" && rm -f "$tmp"
+    # Write in place. `cp` onto a file that is itself the source of a bind mount
+    # (i.e. the file is a mount point) unlinks and recreates it instead of
+    # truncating it, so the inode changes and every container mounting that file
+    # keeps reading the unlinked original -- each reload then silently does
+    # nothing until the container is recreated. A shell redirect can only
+    # truncate. The guard stops a failed generation from clobbering a good
+    # config with an empty file, and the mode is set explicitly because `>`
+    # creates with the umask when the destination does not exist yet.
+    [ -f "$tmp" ] || { log_error "Config generation produced no output"; return 1; }
+    cat "$tmp" > "$dest" && chmod 644 "$dest" && rm -f "$tmp"
 }
 
 # Get comma-separated quoted list of enabled labels for config
