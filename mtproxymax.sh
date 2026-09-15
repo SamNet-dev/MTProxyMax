@@ -1254,25 +1254,39 @@ generate_telemt_config() {
     local domain="${raw_domain%%,*}"
     domain="${domain// /}"
     local mask_enabled="${MASKING_ENABLED:-true}"
-    local mask_host="${MASKING_HOST:-$domain}"
+    local mask_host="${MASKING_HOST:-}"
     local mask_port="${MASKING_PORT:-443}"
-    if [ "${COVER_SHIELD_ENABLED:-false}" = "true" ] && [ -n "${COVER_FALLBACK_TARGET:-}" ]; then
-        local _t="${COVER_FALLBACK_TARGET#*://}" # strip https:// or http://
-        _t="${_t%%/*}"                           # strip path
-        if [[ "$_t" == *":"* ]]; then
-            mask_host="${_t%%:*}"
-            mask_port="${_t#*:}"
-        else
-            mask_host="$_t"
-            mask_port="443"
-        fi
+    if [ "${COVER_SHIELD_ENABLED:-false}" = "true" ]; then
         mask_enabled="true"
         UNKNOWN_SNI_ACTION="mask"
+        # Fallback to COVER_FALLBACK_TARGET only if no explicit MASKING_HOST is set
+        if [ -z "$mask_host" ] && [ -n "${COVER_FALLBACK_TARGET:-}" ]; then
+            local _t="${COVER_FALLBACK_TARGET#*://}" # strip https:// or http://
+            _t="${_t%%/*}"                           # strip path
+            if [[ "$_t" == *":"* ]]; then
+                mask_host="${_t%%:*}"
+                mask_port="${_t#*:}"
+            else
+                mask_host="$_t"
+                mask_port="443"
+            fi
+        fi
     fi
+    mask_host="${mask_host:-$domain}"
     local ad_tag="${AD_TAG:-}"
     ad_tag=$(echo "$ad_tag" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
     [[ "$ad_tag" =~ ^[0-9a-f]{32}$ ]] || ad_tag=""
     local port="${PROXY_PORT:-443}"
+
+    # Warn if mask backend points back to proxy's own listen port (routing loop)
+    if [ "$mask_enabled" = "true" ] && [ -n "$mask_host" ]; then
+        if [ "${mask_port:-443}" -eq "${port:-443}" ] 2>/dev/null; then
+            if [ "$mask_host" = "127.0.0.1" ] || [ "$mask_host" = "localhost" ] || [ "$mask_host" = "::1" ] || \
+               ([ -n "${CUSTOM_IP:-}" ] && [ "$mask_host" = "$CUSTOM_IP" ]); then
+                log_warn "Mask backend (${mask_host}:${mask_port}) matches proxy listen port (${port}) — non-proxy TLS probes may loop!"
+            fi
+        fi
+    fi
     local metrics_port="${PROXY_METRICS_PORT:-9090}"
     local stats_port=$((metrics_port + 1))
 
@@ -8822,6 +8836,14 @@ run_cover_shield() {
             if [ -n "$target" ]; then
                 [[ "$target" =~ ^https?:// ]] || target="https://${target}"
                 COVER_FALLBACK_TARGET="$target"
+                local _ct="${target#*://}"; _ct="${_ct%%/*}"
+                if [[ "$_ct" == *":"* ]]; then
+                    MASKING_HOST="${_ct%%:*}"
+                    MASKING_PORT="${_ct#*:}"
+                else
+                    MASKING_HOST="$_ct"
+                    MASKING_PORT="443"
+                fi
             fi
             log_info "Activating Reverse-Proxy Cover Shield (Active Probe Defense)..."
             log_info "Fallback Target configured to: ${COVER_FALLBACK_TARGET:-https://cloudflare.com}"
@@ -8849,6 +8871,14 @@ run_cover_shield() {
             target="${target// /}"  # strip whitespace
             [[ "$target" =~ ^https?:// ]] || target="https://${target}"
             COVER_FALLBACK_TARGET="$target"
+            local _ct="${target#*://}"; _ct="${_ct%%/*}"
+            if [[ "$_ct" == *":"* ]]; then
+                MASKING_HOST="${_ct%%:*}"
+                MASKING_PORT="${_ct#*:}"
+            else
+                MASKING_HOST="$_ct"
+                MASKING_PORT="443"
+            fi
             save_settings
             if [ "${COVER_SHIELD_ENABLED:-false}" = "true" ] && is_proxy_running; then
                 log_info "Restarting telemt engine to apply updated Cover Shield target..."
@@ -14885,14 +14915,17 @@ cli_main() {
                         log_success "Domain changed to ${new_domain}"
                         audit_log "domain change → ${new_domain}"
                         log_warn "Existing proxy links still encode the old domain"
-                        local _rot="y"
+                        local _rot="n"
                         if [ -t 0 ]; then
-                            echo -en "  ${BOLD}Rotate all secrets for new domain? [Y/n]:${NC} "
-                            read -r _rot || _rot="y"
+                            echo -en "  ${BOLD}Rotate all secrets for new domain? [y/N]:${NC} "
+                            read -r _rot || _rot="n"
+                        elif [ "${2:-}" = "--rotate" ] || [ "${2:-}" = "-r" ]; then
+                            _rot="y"
+                            log_info "Rotating secrets per --rotate flag"
                         else
-                            log_info "Non-interactive mode: rotating secrets and restarting automatically"
+                            log_info "Raw secrets preserved for new domain (pass --rotate to regenerate)"
                         fi
-                        if [[ ! "$_rot" =~ ^[nN] ]]; then
+                        if [[ "$_rot" =~ ^[yY] ]]; then
                             local _ri
                             for _ri in "${!SECRETS_LABELS[@]}"; do
                                 SECRETS_KEYS[$_ri]=$(generate_secret)
@@ -14928,7 +14961,11 @@ cli_main() {
             [ -n "$_mp" ] && { [[ "$_mp" =~ ^[0-9]+$ ]] && [ "$_mp" -ge 1 ] && [ "$_mp" -le 65535 ] || { log_error "Invalid port"; return 1; }; }
             MASKING_HOST="$_mh"
             [ -n "$_mp" ] && MASKING_PORT="$_mp"
+            COVER_FALLBACK_TARGET="https://${MASKING_HOST}:${MASKING_PORT:-443}"
             save_settings
+            if ([ "$MASKING_HOST" = "127.0.0.1" ] || [ "$MASKING_HOST" = "localhost" ] || [ "$MASKING_HOST" = "::1" ] || [ "$MASKING_HOST" = "${CUSTOM_IP:-}" ]) && [ "${MASKING_PORT:-443}" -eq "${PROXY_PORT:-443}" ] 2>/dev/null; then
+                log_warn "Mask backend points to the proxy's own listen port (${PROXY_PORT:-443}). Non-proxy TLS probes may loop!"
+            fi
             log_success "Mask backend set to ${MASKING_HOST}:${MASKING_PORT:-443}"
             if is_proxy_running; then
                 load_secrets
@@ -17770,9 +17807,9 @@ show_settings_menu() {
                     save_settings
                     log_success "Domain set to ${PROXY_DOMAIN}"
                     log_warn "Existing proxy links still encode the old domain"
-                    echo -en "  ${BOLD}Rotate all secrets for new domain? [Y/n]:${NC} "
+                    echo -en "  ${BOLD}Rotate all secrets for new domain? [y/N]:${NC} "
                     local _rot; read -r _rot
-                    if [[ ! "$_rot" =~ ^[nN] ]]; then
+                    if [[ "$_rot" =~ ^[yY] ]]; then
                         local _ri
                         for _ri in "${!SECRETS_LABELS[@]}"; do
                             SECRETS_KEYS[$_ri]=$(generate_secret)
@@ -17932,7 +17969,11 @@ show_settings_menu() {
                     fi
                     MASKING_HOST="$_new_mask_host"
                     MASKING_PORT="$_new_mask_port"
+                    COVER_FALLBACK_TARGET="https://${MASKING_HOST}:${MASKING_PORT:-443}"
                     save_settings
+                    if ([ "$MASKING_HOST" = "127.0.0.1" ] || [ "$MASKING_HOST" = "localhost" ] || [ "$MASKING_HOST" = "::1" ] || [ "$MASKING_HOST" = "${CUSTOM_IP:-}" ]) && [ "${MASKING_PORT:-443}" -eq "${PROXY_PORT:-443}" ] 2>/dev/null; then
+                        log_warn "Mask backend points to the proxy's own listen port (${PROXY_PORT:-443}). Non-proxy TLS probes may loop!"
+                    fi
                     log_success "Mask backend set to ${MASKING_HOST:-${PROXY_DOMAIN}}:${MASKING_PORT:-443}"
                     if is_proxy_running; then
                         load_secrets
