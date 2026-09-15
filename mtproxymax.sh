@@ -13782,21 +13782,39 @@ save_instances() {
 }
 
 _next_free_metrics_port() {
+    local prim_m="${PROXY_METRICS_PORT:-9090}"
+    local prim_s=$((prim_m + 1))
     local p=9091
     while [ "${p:-0}" -lt 9200 ]; do
+        local cand_s=$((p + 1))
         local used=false
-        # Check against primary metrics port
-        [ "$p" = "${PROXY_METRICS_PORT:-9090}" ] && used=true
-        # Check against existing instance metrics ports
+
+        # Check against primary proxy ports (metrics and stats)
+        if [ "$p" = "$prim_m" ] || [ "$p" = "$prim_s" ] || \
+           [ "$cand_s" = "$prim_m" ] || [ "$cand_s" = "$prim_s" ]; then
+            used=true
+        fi
+
+        # Check against existing instance ports (metrics and stats)
         if [ "$used" = "false" ]; then
             for mp in "${INSTANCE_METRICS_PORTS[@]}"; do
-                [ "$mp" = "$p" ] && used=true && break
+                [ -z "$mp" ] && continue
+                local ms=$((mp + 1))
+                if [ "$p" = "$mp" ] || [ "$p" = "$ms" ] || \
+                   [ "$cand_s" = "$mp" ] || [ "$cand_s" = "$ms" ]; then
+                    used=true
+                    break
+                fi
             done
         fi
-        [ "$used" = "false" ] && { echo "$p"; return; }
+
+        if [ "$used" = "false" ]; then
+            echo "$p"
+            return 0
+        fi
         ((p++))
     done
-    echo "9091"
+    return 1
 }
 
 instance_add() {
@@ -13812,7 +13830,15 @@ instance_add() {
         [ "${INSTANCE_PORTS[$i]}" = "$port" ] && { log_error "Instance on port ${port} already exists"; return 1; }
     done
 
-    local mport; mport=$(_next_free_metrics_port)
+    local mport
+    mport=$(_next_free_metrics_port) || {
+        log_error "No free metrics ports available in range 9091-9199"
+        return 1
+    }
+    if [ -z "$mport" ]; then
+        log_error "No free metrics ports available in range 9091-9199"
+        return 1
+    fi
 
     INSTANCE_PORTS+=("$port")
     INSTANCE_METRICS_PORTS+=("$mport")
