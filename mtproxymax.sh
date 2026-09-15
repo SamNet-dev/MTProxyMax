@@ -41,8 +41,8 @@ RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.5.6"
-TELEMT_COMMIT="3693d1e"  # Pinned: v3.5.6 — Machtprobe: bounded bridge recovery & overload controls
+TELEMT_MIN_VERSION="3.5.7"
+TELEMT_COMMIT="4ca7418"  # Pinned: v3.5.7 — Wirtschaftsvertreter: TCP probe validation & websocket recovery
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
