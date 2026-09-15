@@ -35,6 +35,9 @@ FLEET_DATA_DIR="${FLEET_DATA_DIR:-${INSTALL_DIR}/fleet_data}"
 SSL_CONF_FILE="${SSL_CONF_FILE:-${INSTALL_DIR}/ssl.conf}"
 SSL_DIR="${SSL_DIR:-${INSTALL_DIR}/ssl}"
 CLOUD_BACKUP_FILE="${CLOUD_BACKUP_FILE:-${INSTALL_DIR}/cloud_backup.conf}"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+INITD_DIR="${INITD_DIR:-/etc/init.d}"
+RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
@@ -520,6 +523,29 @@ detect_os() {
     else
         echo "unknown"
     fi
+}
+
+# Detect the host init system: systemd | openrc | none
+detect_init_system() {
+    if command -v systemctl &>/dev/null; then
+        echo "systemd"
+    elif [ -x /sbin/openrc-run ] || command -v rc-service &>/dev/null; then
+        echo "openrc"
+    else
+        echo "none"
+    fi
+}
+
+# Register an OpenRC service in a runlevel, returning 0 only if it really landed
+# there. `rc-update add` is not trusted on its own: its exit status is swallowed
+# and, more importantly, a failure must never be reported to the user as success.
+# Tested with -e rather than -L: rc-update creates a symlink to the init script we
+# just wrote, so -e is true exactly when the service is genuinely runnable, and it
+# stays verifiable on hosts that cannot create symlinks.
+openrc_enable_service() {
+    local svc="$1" runlevel="${2:-default}"
+    rc-update add "$svc" "$runlevel" 2>/dev/null || true
+    [ -e "${RUNLEVELS_DIR}/${runlevel}/${svc}" ]
 }
 
 # Check dependencies
@@ -10039,11 +10065,10 @@ self_update() {
     # Always regenerate and restart Telegram bot service to apply latest daemon code
     if [ "${TELEGRAM_ENABLED:-}" = "true" ]; then
         telegram_generate_service_script
-        if command -v systemctl &>/dev/null && [ -f /etc/systemd/system/mtproxymax-telegram.service ]; then
-            log_info "Restarting Telegram bot service..."
-            systemctl restart mtproxymax-telegram.service 2>/dev/null \
-                && log_success "Telegram bot service restarted" \
-                || log_warn "Telegram restart failed — run: systemctl restart mtproxymax-telegram.service"
+        if telegram_restart_service; then
+            log_success "Telegram bot service restarted"
+        else
+            log_warn "Telegram bot service is not installed — run: mtproxymax telegram setup"
         fi
     fi
 
@@ -11097,8 +11122,12 @@ telegram_setup_wizard() {
     # Send proxy links
     telegram_notify_proxy_started &>/dev/null &
 
-    # Setup systemd service for bot polling
-    setup_telegram_service
+    # Setup the bot polling service (systemd or OpenRC)
+    if ! setup_telegram_service; then
+        echo ""
+        log_warn "The bot is configured, but its background service is NOT running."
+        log_warn "Bot commands and alerts will not work until it is started (see the hint above)."
+    fi
 
     press_any_key
 }
@@ -12120,12 +12149,66 @@ TELEGRAM_SCRIPT
     chmod +x "$script_path"
 }
 
+# Stop the Telegram bot service on whichever init system is present
+telegram_stop_service() {
+    case "$(detect_init_system)" in
+        systemd) systemctl stop mtproxymax-telegram.service 2>/dev/null || true ;;
+        openrc)  rc-service mtproxymax-telegram stop 2>/dev/null || true ;;
+    esac
+    return 0
+}
+
+# Restart the Telegram bot service; nonzero when it is not installed or fails
+telegram_restart_service() {
+    case "$(detect_init_system)" in
+    systemd)
+        [ -f "${SYSTEMD_DIR}/mtproxymax-telegram.service" ] || return 1
+        systemctl restart mtproxymax-telegram.service 2>/dev/null
+        ;;
+    openrc)
+        [ -f "${INITD_DIR}/mtproxymax-telegram" ] || return 1
+        rc-service mtproxymax-telegram restart 2>/dev/null
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+# Remove the Telegram bot service definition from the host init system
+telegram_remove_service() {
+    case "$(detect_init_system)" in
+    systemd)
+        systemctl stop mtproxymax-telegram.service 2>/dev/null || true
+        systemctl disable mtproxymax-telegram.service 2>/dev/null || true
+        rm -f "${SYSTEMD_DIR}/mtproxymax-telegram.service"
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+    openrc)
+        rc-service mtproxymax-telegram stop 2>/dev/null || true
+        rc-update del mtproxymax-telegram default 2>/dev/null || true
+        rm -f "${INITD_DIR}/mtproxymax-telegram"
+        ;;
+    esac
+    return 0
+}
+
+# True when the Telegram bot service is actually running (not merely enabled)
+telegram_service_running() {
+    case "$(detect_init_system)" in
+        systemd) systemctl is-active --quiet mtproxymax-telegram.service 2>/dev/null ;;
+        openrc)  rc-service mtproxymax-telegram status >/dev/null 2>&1 ;;
+        *)       return 1 ;;
+    esac
+}
+
 setup_telegram_service() {
     telegram_generate_service_script
 
-    # Create systemd service
-    if command -v systemctl &>/dev/null; then
-        cat > /etc/systemd/system/mtproxymax-telegram.service << 'SERVICE_EOF'
+    local init_system
+    init_system=$(detect_init_system)
+
+    case "$init_system" in
+    systemd)
+        cat > "${SYSTEMD_DIR}/mtproxymax-telegram.service" << 'SERVICE_EOF'
 [Unit]
 Description=MTProxyMax Telegram Bot Service
 After=network-online.target docker.service
@@ -12145,9 +12228,83 @@ SERVICE_EOF
 
         systemctl daemon-reload
         systemctl enable mtproxymax-telegram.service 2>/dev/null
-        systemctl restart mtproxymax-telegram.service 2>/dev/null
-        log_success "Telegram bot service started"
+        if systemctl restart mtproxymax-telegram.service 2>/dev/null; then
+            log_success "Telegram bot service started (systemd)"
+        else
+            log_warn "Telegram bot service failed to start — check: journalctl -u mtproxymax-telegram.service"
+            return 1
+        fi
+        ;;
+    openrc)
+        # supervise-daemon keeps the bot alive across crashes, mirroring the
+        # systemd unit's Restart=on-failure / RestartSec=10. The daemon runs its
+        # own foreground poll loop — and is the only scheduler for the periodic
+        # tasks (quota/expiry enforcement, sweep, proxy auto-restart) — so it can
+        # be supervised directly instead of backgrounding itself.
+        #
+        # `need docker` is deliberate: the daemon drives the proxy container, so
+        # starting it without docker would only emit bogus "proxy down" alerts.
+        # `use` is soft — it orders dns/logger only when those services exist.
+        #
+        # respawn_max=0 means "always respawn", which is slightly broader than the
+        # systemd unit's Restart=on-failure: supervise-daemon restarts even after a
+        # clean exit. The daemon only exits on error or a signal, so this is the
+        # behaviour we want, but it is a real difference between the two backends.
+        cat > "${INITD_DIR}/mtproxymax-telegram" << OPENRC_EOF
+#!/sbin/openrc-run
+# MTProxyMax Telegram Bot Service
+# Auto-generated — do not edit manually
+
+name="mtproxymax-telegram"
+description="MTProxyMax Telegram Bot Service"
+
+supervisor=supervise-daemon
+command="/bin/bash"
+command_args="${INSTALL_DIR}/mtproxymax-telegram.sh"
+respawn_delay=10
+respawn_max=0
+
+# NOTE: two pid files exist and they are NOT interchangeable. This one belongs to
+# the supervision layer; the bot daemon separately writes its own PID to
+# ${INSTALL_DIR}/mtproxymax-telegram.pid. Killing the PID in this file stops the
+# supervisor, not the bot.
+pidfile="/run/\${RC_SVCNAME}.pid"
+output_log="/var/log/mtproxymax-telegram.log"
+error_log="/var/log/mtproxymax-telegram.err"
+
+depend() {
+    need net docker
+    use dns logger
+}
+
+start_pre() {
+    # Generated by 'mtproxymax telegram setup'; absent until that wizard runs.
+    if [ ! -f "\${command_args}" ]; then
+        eerror "\${command_args} not found."
+        eerror "Run: ${INSTALL_DIR}/mtproxymax telegram setup"
+        return 1
     fi
+}
+OPENRC_EOF
+
+        chmod +x "${INITD_DIR}/mtproxymax-telegram"
+        if ! openrc_enable_service mtproxymax-telegram default; then
+            log_warn "Could not enable the bot service for boot — run: rc-update add mtproxymax-telegram default"
+        fi
+        if rc-service mtproxymax-telegram restart 2>/dev/null; then
+            log_success "Telegram bot service started (OpenRC)"
+        else
+            log_warn "Telegram bot service failed to start — check: rc-service mtproxymax-telegram status"
+            return 1
+        fi
+        ;;
+    *)
+        log_warn "No supported init system found (systemd or OpenRC)."
+        log_warn "The bot daemon was generated at ${INSTALL_DIR}/mtproxymax-telegram.sh but is NOT running."
+        echo -e "  ${DIM}Start it manually: nohup ${INSTALL_DIR}/mtproxymax-telegram.sh >/var/log/mtproxymax-telegram.log 2>&1 &${NC}"
+        return 1
+        ;;
+    esac
 }
 
 
@@ -12558,7 +12715,7 @@ setup_replication_service() {
         return 1
     fi
 
-    cat > /etc/systemd/system/mtproxymax-sync.service << 'REPL_SERVICE_EOF'
+    cat > "${SYSTEMD_DIR}/mtproxymax-sync.service" << 'REPL_SERVICE_EOF'
 [Unit]
 Description=MTProxyMax Replication Sync
 After=network-online.target docker.service
@@ -12571,7 +12728,7 @@ StandardOutput=journal
 StandardError=journal
 REPL_SERVICE_EOF
 
-    cat > /etc/systemd/system/mtproxymax-sync.timer << REPL_TIMER_EOF
+    cat > "${SYSTEMD_DIR}/mtproxymax-sync.timer" << REPL_TIMER_EOF
 [Unit]
 Description=MTProxyMax Replication Sync Timer
 
@@ -12600,8 +12757,8 @@ stop_replication_service() {
 
 remove_replication_service() {
     stop_replication_service
-    rm -f /etc/systemd/system/mtproxymax-sync.service
-    rm -f /etc/systemd/system/mtproxymax-sync.timer
+    rm -f "${SYSTEMD_DIR}/mtproxymax-sync.service"
+    rm -f "${SYSTEMD_DIR}/mtproxymax-sync.timer"
     rm -f "${INSTALL_DIR}/mtproxymax-sync.sh"
     command -v systemctl &>/dev/null && systemctl daemon-reload 2>/dev/null || true
 }
@@ -13203,7 +13360,7 @@ run_installer() {
     }
 
     # Setup autostart
-    setup_autostart
+    setup_autostart || true
 
     # Telegram setup offer
     echo ""
@@ -13228,9 +13385,28 @@ run_installer() {
     show_main_menu
 }
 
+# Remove the main autostart service definition from the host init system
+main_service_remove() {
+    case "$(detect_init_system)" in
+    systemd)
+        systemctl stop mtproxymax.service 2>/dev/null || true
+        systemctl disable mtproxymax.service 2>/dev/null || true
+        rm -f "${SYSTEMD_DIR}/mtproxymax.service"
+        systemctl daemon-reload 2>/dev/null || true
+        ;;
+    openrc)
+        rc-service mtproxymax stop 2>/dev/null || true
+        rc-update del mtproxymax default 2>/dev/null || true
+        rm -f "${INITD_DIR}/mtproxymax"
+        ;;
+    esac
+    return 0
+}
+
 setup_autostart() {
-    if command -v systemctl &>/dev/null; then
-        cat > /etc/systemd/system/mtproxymax.service << 'AUTOSTART_EOF'
+    case "$(detect_init_system)" in
+    systemd)
+        cat > "${SYSTEMD_DIR}/mtproxymax.service" << 'AUTOSTART_EOF'
 [Unit]
 Description=MTProxyMax Telegram Proxy
 After=network-online.target docker.service
@@ -13250,7 +13426,55 @@ AUTOSTART_EOF
         systemctl daemon-reload
         systemctl enable mtproxymax.service 2>/dev/null
         log_success "Auto-start enabled (systemd)"
-    fi
+        ;;
+    openrc)
+        # Type=oneshot + RemainAfterExit=yes wraps the manager's own start/stop,
+        # so a plain start/stop script is the faithful equivalent (no supervisor).
+        cat > "${INITD_DIR}/mtproxymax" << OPENRC_EOF
+#!/sbin/openrc-run
+# MTProxyMax Telegram Proxy
+# Auto-generated — do not edit manually
+
+name="mtproxymax"
+description="MTProxyMax Telegram Proxy"
+
+depend() {
+    need net
+    need docker
+}
+
+start() {
+    ebegin "Starting MTProxyMax"
+    /usr/local/bin/mtproxymax start
+    eend \$?
+}
+
+stop() {
+    ebegin "Stopping MTProxyMax"
+    /usr/local/bin/mtproxymax stop
+    eend \$?
+}
+
+status() {
+    /usr/local/bin/mtproxymax status
+}
+OPENRC_EOF
+
+        chmod +x "${INITD_DIR}/mtproxymax"
+        if openrc_enable_service mtproxymax default; then
+            log_success "Auto-start enabled (OpenRC)"
+        else
+            log_warn "Could not enable auto-start — run: rc-update add mtproxymax default"
+            return 1
+        fi
+        ;;
+    *)
+        log_warn "No supported init system found (systemd or OpenRC)."
+        log_warn "Auto-start on boot is NOT enabled."
+        echo -e "  ${DIM}Add it to your init system manually, or start at boot with: ${INSTALL_DIR}/mtproxymax start${NC}"
+        return 1
+        ;;
+    esac
 }
 
 show_install_summary() {
@@ -13352,15 +13576,8 @@ uninstall() {
 
     echo ""
     log_info "Removing services..."
-    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
-    systemctl disable mtproxymax-telegram.service 2>/dev/null || true
-    rm -f /etc/systemd/system/mtproxymax-telegram.service
-
-    systemctl stop mtproxymax.service 2>/dev/null || true
-    systemctl disable mtproxymax.service 2>/dev/null || true
-    rm -f /etc/systemd/system/mtproxymax.service
-
-    systemctl daemon-reload 2>/dev/null || true
+    telegram_remove_service
+    main_service_remove
 
     log_info "Removing geo-blocking rules..."
     geoblock_remove_all
@@ -15478,11 +15695,15 @@ cli_main() {
                 setup)   check_root; telegram_setup_wizard ;;
                 test)    telegram_test_message ;;
                 status|"")
-                    if [ "$TELEGRAM_ENABLED" = "true" ]; then
+                    if [ "$TELEGRAM_ENABLED" != "true" ]; then
+                        echo -e "  ${BOLD}Telegram:${NC} $(draw_status disabled 'Disabled')"
+                    elif telegram_service_running; then
                         echo -e "  ${BOLD}Telegram:${NC} $(draw_status running 'Enabled')"
                         echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED} | Label: ${TELEGRAM_SERVER_LABEL}${NC}"
                     else
-                        echo -e "  ${BOLD}Telegram:${NC} $(draw_status disabled 'Disabled')"
+                        echo -e "  ${BOLD}Telegram:${NC} $(draw_status warning 'Enabled (service not running)')"
+                        echo -e "  ${DIM}Interval: every ${TELEGRAM_INTERVAL}h | Alerts: ${TELEGRAM_ALERTS_ENABLED} | Label: ${TELEGRAM_SERVER_LABEL}${NC}"
+                        echo -e "  ${DIM}The bot service is configured but not running — run: mtproxymax telegram setup${NC}"
                     fi
                     ;;
                 interval)
@@ -15550,7 +15771,7 @@ cli_main() {
                     check_root
                     TELEGRAM_ENABLED="false"
                     save_settings
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
+                    telegram_stop_service
                     log_success "Telegram disabled"
                     ;;
                 remove)
@@ -15559,8 +15780,7 @@ cli_main() {
                     TELEGRAM_BOT_TOKEN=""
                     TELEGRAM_CHAT_ID=""
                     save_settings
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
-                    systemctl disable mtproxymax-telegram.service 2>/dev/null || true
+                    telegram_remove_service
                     log_success "Telegram bot removed"
                     ;;
                 *) log_error "Usage: mtproxymax telegram [setup|test|status|interval|label|alerts|disable|remove]"; return 1 ;;
@@ -17236,13 +17456,16 @@ show_telegram_menu() {
             4)
                 if [ "$TELEGRAM_ENABLED" = "true" ]; then
                     TELEGRAM_ENABLED="false"
-                    systemctl stop mtproxymax-telegram.service 2>/dev/null || true
+                    telegram_stop_service
                     log_success "Telegram disabled"
                 else
                     if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
                         TELEGRAM_ENABLED="true"
-                        setup_telegram_service
-                        log_success "Telegram enabled"
+                        if setup_telegram_service; then
+                            log_success "Telegram enabled"
+                        else
+                            log_warn "Telegram bot service could not be started"
+                        fi
                     else
                         log_warn "Run setup wizard first"
                     fi
@@ -18055,7 +18278,8 @@ show_info_telegram() {
     echo ""
     echo -e "  ${BOLD}What does the bot do?${NC}"
     echo -e "  Control your proxy from your phone via Telegram. The bot runs"
-    echo -e "  as a separate systemd service and responds to commands."
+    echo -e "  as a separate background service (systemd or OpenRC) and responds"
+    echo -e "  to commands."
     echo ""
     echo -e "  ${BOLD}Available commands:${NC}"
     echo -e "  /mp_status         Check proxy status, uptime, traffic"
