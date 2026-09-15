@@ -1242,8 +1242,11 @@ build_faketls_secret() {
     fi
 }
 
-# Generate telemt config.toml
+# Generate telemt config. Optional arg is the destination file (defaults to the
+# primary config.toml). Instance configs are written straight to their own file
+# instead of being routed through config.toml, which the running engine watches.
 generate_telemt_config() {
+    local dest="${1:-${CONFIG_DIR}/config.toml}"
     mkdir -p "$CONFIG_DIR"
     chmod 700 "$CONFIG_DIR"
 
@@ -1497,7 +1500,16 @@ TOML_EOF
     fi
 
     chmod 644 "$tmp"
-    cp "$tmp" "${CONFIG_DIR}/config.toml" && rm -f "$tmp"
+    # Write in place. `cp` onto a file that is itself the source of a bind mount
+    # (i.e. the file is a mount point) unlinks and recreates it instead of
+    # truncating it, so the inode changes and every container mounting that file
+    # keeps reading the unlinked original -- each reload then silently does
+    # nothing until the container is recreated. A shell redirect can only
+    # truncate. The guard stops a failed generation from clobbering a good
+    # config with an empty file, and the mode is set explicitly because `>`
+    # creates with the umask when the destination does not exist yet.
+    [ -f "$tmp" ] || { log_error "Config generation produced no output"; return 1; }
+    cat "$tmp" > "$dest" && chmod 644 "$dest" && rm -f "$tmp"
 }
 
 # Get comma-separated quoted list of enabled labels for config
@@ -9264,8 +9276,8 @@ run_proxy_container() {
     local _run_out
     _run_out=$(docker run -d "${_docker_args[@]}" \
         --ulimit nofile=65535:65535 \
-        -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-        "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+        -v "${CONFIG_DIR}:/etc/telemt:ro" \
+        "$(get_docker_image)" /etc/telemt/config.toml 2>&1) || {
             # Check if failure was caused by resource limits (CPU/Memory cgroup rejection in unprivileged LXC/containers)
             if [ -n "${PROXY_MEMORY}" ] || [ -n "${PROXY_CPUS}" ]; then
                 if echo "$_run_out" | grep -E -iq "(cgroup|permission denied|OCI runtime create failed|memory|swap|cpus)"; then
@@ -9280,8 +9292,8 @@ run_proxy_container() {
                     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
                     _run_out=$(docker run -d "${_docker_args[@]}" \
                         --ulimit nofile=65535:65535 \
-                        -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-                        "$(get_docker_image)" /etc/telemt.toml 2>&1) || true
+                        -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                        "$(get_docker_image)" /etc/telemt/config.toml 2>&1) || true
                 fi
             fi
 
@@ -9300,14 +9312,14 @@ run_proxy_container() {
                     log_info "Retrying container launch after D-Bus & memory cache recovery..."
                     _run_out=$(docker run -d "${_docker_args[@]}" \
                         --ulimit nofile=65535:65535 \
-                        -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-                        "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                        -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                        "$(get_docker_image)" /etc/telemt/config.toml 2>&1) || {
                             # If standard retry still fails, attempt fallback with explicit host cgroup namespace
                             docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
                             _run_out=$(docker run -d "${_docker_args[@]}" \
                                 --cgroupns host \
-                                -v "${CONFIG_DIR}/config.toml:/etc/telemt.toml:ro" \
-                                "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+                                -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                                "$(get_docker_image)" /etc/telemt/config.toml 2>&1) || {
                                     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
                                     log_error "Failed to start container after recovery attempts"
                                     echo -e "  ${DIM}${_run_out}${NC}"
@@ -9401,18 +9413,17 @@ _start_all_instances() {
         [ "${INSTANCE_ENABLED[$i]}" = "true" ] || continue
         local cname="mtproxymax-${INSTANCE_PORTS[$i]}"
         docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cname}$" && continue
-        # Regenerate instance config dynamically
+        # Regenerate instance config dynamically (straight to its own file — never via config.toml)
         local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
         PROXY_PORT="${INSTANCE_PORTS[$i]}"
         PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
-        generate_telemt_config
-        mv "${CONFIG_DIR}/config.toml" "$inst_config" 2>/dev/null
+        generate_telemt_config "$inst_config"
         docker rm -f "$cname" &>/dev/null || true
         local _inst_out
         _inst_out=$(docker run -d --name "$cname" --restart unless-stopped --network host \
             --ulimit nofile=65535:65535 --log-opt max-size=10m --log-opt max-file=3 \
-            -v "${inst_config}:/etc/telemt.toml:ro" \
-            "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+            -v "${CONFIG_DIR}:/etc/telemt:ro" \
+            "$(get_docker_image)" "/etc/telemt/$(basename "$inst_config")" 2>&1) || {
                 if echo "$_inst_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
                     [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
                     systemctl daemon-reload 2>/dev/null || true
@@ -9421,14 +9432,13 @@ _start_all_instances() {
                     docker rm -f "$cname" &>/dev/null || true
                     docker run -d --name "$cname" --restart unless-stopped --network host \
                         --cgroupns host --log-opt max-size=10m --log-opt max-file=3 \
-                        -v "${inst_config}:/etc/telemt.toml:ro" \
-                        "$(get_docker_image)" /etc/telemt.toml &>/dev/null || true
+                        -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                        "$(get_docker_image)" "/etc/telemt/$(basename "$inst_config")" &>/dev/null || true
                 fi
             }
     done
     PROXY_PORT="$_orig_port"
     PROXY_METRICS_PORT="$_orig_mport"
-    generate_telemt_config
 }
 
 start_proxy_container() {
@@ -9458,6 +9468,33 @@ restart_proxy_container() {
     speed_limit_apply 2>/dev/null || true
 }
 
+# Does the engine container actually see the config file we just wrote?
+#
+# The container gets a bind mount of CONFIG_DIR. A single-file mount pins one
+# inode, so replacing the file leaves the engine reading an unlinked one (the
+# mount source shows up as "...//deleted" in `mount`) and no reload signal can
+# ever deliver the new bytes. Reading through /proc/<pid>/root gives us the
+# container's view without needing any binary inside the image.
+_engine_config_in_sync() {
+    local cfg="$1" cname="$2" pid
+    [ -f "$cfg" ] || return 0
+    pid=$(docker inspect -f '{{.State.Pid}}' "$cname" 2>/dev/null) || return 1
+    [ -n "$pid" ] && [ "$pid" != "0" ] || return 1
+    local rel="/etc/telemt/$(basename "$cfg")"
+    if [ -r "/proc/${pid}/root${rel}" ]; then
+        cmp -s "$cfg" "/proc/${pid}/root${rel}" 2>/dev/null
+    else
+        # Fallback for hosts where the container root is not readable
+        docker exec "$cname" cat "$rel" 2>/dev/null | cmp -s - "$cfg"
+    fi
+}
+
+# Is a secondary instance container currently up? A stopped instance has no
+# engine to reload and must never be treated as an out-of-sync one.
+_instance_container_running() {
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^$1$"
+}
+
 # Hot-reload: rewrite config.toml and let the engine pick it up (no restart, no dropped connections)
 # Use this for secret/limit changes. Falls back to restart if container is not running.
 reload_proxy_config() {
@@ -9467,7 +9504,16 @@ reload_proxy_config() {
     flush_traffic_to_disk 2>/dev/null || true
 
     # Signal primary container to reload config (inotify may miss bind-mount changes)
-    is_proxy_running && docker kill -s SIGHUP "$CONTAINER_NAME" 2>/dev/null || true
+    local _reload_ok=false
+    if is_proxy_running; then
+        if docker kill -s SIGHUP "$CONTAINER_NAME" 2>/dev/null; then
+            _reload_ok=true
+        else
+            log_warn "Could not signal the engine to reload; restart the proxy to apply this change"
+        fi
+    else
+        log_warn "Proxy is not running; this change applies on next start"
+    fi
 
     # Also reload secondary instances if any
     if [ -f "$INSTANCES_FILE" ]; then
@@ -9478,18 +9524,42 @@ reload_proxy_config() {
             local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
             PROXY_PORT="${INSTANCE_PORTS[$i]}"
             PROXY_METRICS_PORT="${INSTANCE_METRICS_PORTS[$i]}"
-            generate_telemt_config
-            mv "${CONFIG_DIR}/config.toml" "$inst_config" 2>/dev/null
-            docker kill -s SIGHUP "mtproxymax-${INSTANCE_PORTS[$i]}" 2>/dev/null || true
+            generate_telemt_config "$inst_config"
+            _instance_container_running "mtproxymax-${INSTANCE_PORTS[$i]}" || continue
+            docker kill -s SIGHUP "mtproxymax-${INSTANCE_PORTS[$i]}" 2>/dev/null \
+                || log_warn "Instance ${INSTANCE_PORTS[$i]}: could not signal the engine to reload"
         done
         PROXY_PORT="$_orig_port"
         PROXY_METRICS_PORT="$_orig_mport"
-        # Regenerate primary config (was overwritten by last instance)
-        generate_telemt_config
     fi
 
     speed_limit_apply 2>/dev/null || true
-    log_info "Config reloaded (hot-reload, no restart)"
+
+    # Verify the running engine can actually see the bytes we wrote. Without this a
+    # detached mount shows up as a silent no-op: secrets that were removed keep
+    # working and new ones never connect.
+    local _stale=false
+    if is_proxy_running && ! _engine_config_in_sync "${CONFIG_DIR}/config.toml" "$CONTAINER_NAME"; then
+        _stale=true
+    fi
+    if [ -f "$INSTANCES_FILE" ]; then
+        local _j
+        for _j in "${!INSTANCE_PORTS[@]}"; do
+            [ "${INSTANCE_ENABLED[$_j]}" = "true" ] || continue
+            _instance_container_running "mtproxymax-${INSTANCE_PORTS[$_j]}" || continue
+            _engine_config_in_sync "${CONFIG_DIR}/config-${INSTANCE_PORTS[$_j]}.toml" "mtproxymax-${INSTANCE_PORTS[$_j]}" \
+                || _stale=true
+        done
+    fi
+
+    if [ "$_stale" = "true" ]; then
+        log_warn "Engine cannot see the updated config (stale bind mount); restarting the proxy to apply the change"
+        restart_proxy_container 2>/dev/null || true
+        return 0
+    fi
+
+    [ "$_reload_ok" = "true" ] && log_info "Config reloaded (hot-reload, no restart)"
+    return 0
 }
 
 # Parse ISO 8601 timestamp to epoch (portable: GNU date, busybox date, Python fallback)
@@ -13725,12 +13795,9 @@ instance_add() {
     local _orig_port="$PROXY_PORT" _orig_mport="$PROXY_METRICS_PORT"
     PROXY_PORT="$port"
     PROXY_METRICS_PORT="$mport"
-    generate_telemt_config
-    mv "${CONFIG_DIR}/config.toml" "$inst_config" 2>/dev/null
+    generate_telemt_config "$inst_config"
     PROXY_PORT="$_orig_port"
     PROXY_METRICS_PORT="$_orig_mport"
-    # Regenerate primary config
-    generate_telemt_config
 
     # Start container
     local cname="mtproxymax-${port}"
@@ -13744,8 +13811,8 @@ instance_add() {
     )
     local _inst_add_out
     _inst_add_out=$(docker run -d "${_docker_args[@]}" \
-        -v "${inst_config}:/etc/telemt.toml:ro" \
-        "$(get_docker_image)" /etc/telemt.toml 2>&1) || {
+        -v "${CONFIG_DIR}:/etc/telemt:ro" \
+        "$(get_docker_image)" "/etc/telemt/$(basename "$inst_config")" 2>&1) || {
             if echo "$_inst_add_out" | grep -E -q "(cgroup|Message recipient disconnected|systemd|dbus|EOF|timeout|system\.slice|runc|OCI runtime create failed)"; then
                 [ -w /proc/sys/vm/drop_caches ] && { sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
                 systemctl daemon-reload 2>/dev/null || true
@@ -13753,12 +13820,12 @@ instance_add() {
                 sleep 2
                 docker rm -f "$cname" &>/dev/null || true
                 docker run -d "${_docker_args[@]}" \
-                    -v "${inst_config}:/etc/telemt.toml:ro" \
-                    "$(get_docker_image)" /etc/telemt.toml &>/dev/null || {
+                    -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                    "$(get_docker_image)" "/etc/telemt/$(basename "$inst_config")" &>/dev/null || {
                         docker run -d --name "$cname" --restart unless-stopped --network host \
                             --cgroupns host --log-opt max-size=10m --log-opt max-file=3 \
-                            -v "${inst_config}:/etc/telemt.toml:ro" \
-                            "$(get_docker_image)" /etc/telemt.toml &>/dev/null || true
+                            -v "${CONFIG_DIR}:/etc/telemt:ro" \
+                            "$(get_docker_image)" "/etc/telemt/$(basename "$inst_config")" &>/dev/null || true
                     }
             fi
         }
