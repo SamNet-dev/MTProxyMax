@@ -228,6 +228,7 @@ Activating lockdown instantly engages the **Kernel SYN Shield**, activates **Ult
   - Configures role hierarchies stored in `${INSTALL_DIR}/admins.conf`:
     - **`superadmin`**: Full access to all 21 administrative commands, including destructive engine restarts (`/mp_restart`), emergency lockdowns (`/mp_lockdown`), bot removals (`/mp_remove`), and self-updates (`/mp_update`).
     - **`reseller`**: Delegated commercial management rights restricted to voucher redemption (`/redeem`), voucher batch generation (`/mp_voucher create <cnt> <qta> <dys>`), and voucher inventory auditing (`/mp_voucher list`). Destructive engine commands are automatically blocked with security violation logging.
+    - **Any other value** is treated as a misconfiguration and refused rather than granted access, so a typo in `admins.conf` fails closed.
 - **Decoupled Self-Service Status Portal (`mtproxymax portal [enable|disable|port|generate|serve|status]`):** Lightweight, zero-dependency static web dashboard designed for client self-service and transparent uptime reporting.
   - Generates an ultra-responsive, modern dark-mode glassmorphism HTML page (`index.html`) stored in `${INSTALL_DIR}/portal/`.
   - During periodic engine sweeps (`sweep()`), MTProxyMax automatically exports real-time system metrics (`status.json`) and anonymized user leaderboard statistics (`users.json`).

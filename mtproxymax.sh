@@ -11583,6 +11583,19 @@ _check_tg_role() {
     echo "${r:-none}"
 }
 
+# Record a security event in the shared audit log. The bot daemon is
+# self-contained and never sources the manager, so it cannot call the manager's
+# audit_log() and writes the same line format itself.
+_tg_security_log() {
+    local cid="$1" action="$2"
+    local _log="${INSTALL_DIR}/audit.log"
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    printf '%s UTC | telegram:%s | SECURITY: denied %q\n' \
+        "$(date -u '+%Y-%m-%d %H:%M:%S')" "$cid" "$action" >> "$_log" 2>/dev/null || true
+    chmod 600 "$_log" 2>/dev/null || true
+    return 0
+}
+
 _process_cmd() {
     local update_id="$1" chat_id="$2" text="$3"
     echo "$((update_id + 1))" > "$OFFSET_FILE"
@@ -11669,7 +11682,31 @@ _process_cmd() {
         return
     fi
 
-    # Superadmin & Reseller administrative commands
+    # The control plane is an allowlist. A reseller is limited to vouchers (see
+    # README: Role-Based Access Control). Any other role value is a
+    # misconfiguration — admins.conf is a plain file an operator can hand-edit —
+    # and is refused rather than silently granted administrative rights.
+    case "$role" in
+        superadmin)
+            ;;
+        reseller)
+            case "$text" in
+                /mp_voucher|/mp_voucher@*|/mp_voucher\ *|/mp_voucher@*\ *) ;;
+                *)
+                    tg_send_to "$chat_id" "⛔ Permission denied: the reseller role is limited to voucher commands."
+                    _tg_security_log "$chat_id" "$text"
+                    return
+                    ;;
+            esac
+            ;;
+        *)
+            tg_send_to "$chat_id" "⛔ Permission denied: this account has an unrecognised role."
+            _tg_security_log "$chat_id" "unrecognised role '${role}': ${text}"
+            return
+            ;;
+    esac
+
+    # Administrative commands (only superadmins reach this point)
     case "$text" in
         /mp_voucher\ *|/mp_voucher@*\ *)
             local sub=$(echo "$text" | awk '{print $2}')
