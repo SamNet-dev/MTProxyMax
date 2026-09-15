@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.4.0--LTS-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.4.1--LTS-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -1483,6 +1483,18 @@ mtproxymax update                       # Check for script + engine updates
 ---
 
 ## 📋 Changelog
+
+### v1.4.1-LTS — Enterprise Hardening, Multi-Instance Isolation & Telemt 3.5.7
+
+- **Telemt Engine 3.5.7 (`4ca7418`):** Updated core Rust proxy engine with TCP-only probe validation (#919) and automatic stale websocket lane recovery after restart (#923).
+- **Multi-Instance Port Pair Isolation (`instance`):** Resolved `AddrInUse` crash loops (#135) by treating telemt metrics and stats listeners as atomic pairs `[p, p+1]`, ensuring secondary instances never collide with primary or sibling stats listeners.
+- **Masking Backend Priority & Loop Defense (`mask-backend`):** Guaranteed `MASKING_HOST/PORT` precedence over Cover Shield (#128), synchronized fallback targets bidirectionally, added routing loop detection for TLS probes, and protected user secrets during FakeTLS domain updates.
+- **In-Place Hot-Reload & Inode Preservation:** Rewrote live config generation to write in-place and mount the config directory (#134), eliminating silent container config desync and adding `/proc/<pid>/root` sync verification.
+- **Telegram Bot Reseller RBAC Hardening:** Enforced strict RBAC for reseller accounts (#132), isolating them to voucher operations and logging security violations to `audit.log`.
+- **Alpine Linux & OpenRC Service Support:** Added native init scripts and supervision under OpenRC (#130) for non-systemd and lightweight container hosts.
+- **LXC Container RAM Auto-Detection & Limits (`resources`):** Multi-tier memory discovery honoring container ceilings over host physical RAM (#127), paired with dynamic CPU/memory quota management.
+- **Upload Diagnostics Utility (`upload-test`):** Integrated diagnostic pipeline (#126) for troubleshooting Telegram file upload speeds, auditing socket write buffers, TCP window sizes, and QoS queues.
+- **Atomic Restart Confirmation:** Grouped restart-requiring network settings into atomic transactional confirmations (#125).
 
 ### v1.4.0-LTS — Enterprise Federation & Self-Service Suite (Absolute Maximum Features)
 

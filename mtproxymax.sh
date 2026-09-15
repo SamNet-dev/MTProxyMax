@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.4.0-LTS"
+VERSION="1.4.1-LTS"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="${INSTALL_DIR:-/opt/mtproxymax}"
 CONFIG_DIR="${CONFIG_DIR:-${INSTALL_DIR}/mtproxy}"
