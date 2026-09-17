@@ -9598,14 +9598,20 @@ _iso_to_epoch() {
     [ -z "$ts" ] && { echo "0"; return; }
     # Strip sub-second precision only, keep Z for UTC (e.g. 2026-03-03T10:00:00.123456789Z -> 2026-03-03T10:00:00Z)
     local ts_clean="${ts%%.*}"
-    # Restore trailing Z if original had it
-    [[ "$ts" == *Z ]] && ts_clean="${ts_clean}Z"
+    # Restore trailing Z only if stripping the fraction removed it. Doing this
+    # unconditionally produced "...ZZ" for the stored format (which has no fractional
+    # seconds), and no date accepts that: GNU rejected it and then fell through to the
+    # busybox branch, which GNU cannot run either, so the function returned 0 — which
+    # callers read as "no expiry" and skip enforcement entirely.
+    [[ "$ts" == *Z && "$ts_clean" != *Z ]] && ts_clean="${ts_clean}Z"
     local epoch
     # GNU date: handles ISO 8601 with Z correctly
     epoch=$(date -d "${ts_clean}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
-    # Busybox date: strip Z, use explicit format
+    # Busybox date: strip Z, use explicit format, and force UTC. Under `-D` busybox
+    # ignores a trailing Z entirely, so without TZ=UTC the value is parsed as local time
+    # and the epoch is out by the offset that timestamp's own date carries.
     local ts_bb="${ts_clean%Z}"
-    epoch=$(date -D '%Y-%m-%dT%H:%M:%S' -d "${ts_bb}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
+    epoch=$(TZ=UTC date -D '%Y-%m-%dT%H:%M:%S' -d "${ts_bb}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
     echo "0"
 }
 
@@ -11426,11 +11432,11 @@ _iso_to_epoch() {
     local ts="$1"
     [ -z "$ts" ] && { echo "0"; return; }
     local ts_clean="${ts%%.*}"
-    [[ "$ts" == *Z ]] && ts_clean="${ts_clean}Z"
+    [[ "$ts" == *Z && "$ts_clean" != *Z ]] && ts_clean="${ts_clean}Z"
     local epoch
     epoch=$(date -d "${ts_clean}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
     local ts_bb="${ts_clean%Z}"
-    epoch=$(date -D '%Y-%m-%dT%H:%M:%S' -d "${ts_bb}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
+    epoch=$(TZ=UTC date -D '%Y-%m-%dT%H:%M:%S' -d "${ts_bb}" +%s 2>/dev/null) && [ "$epoch" -gt 0 ] 2>/dev/null && { echo "$epoch"; return; }
     echo "0"
 }
 
