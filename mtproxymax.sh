@@ -525,9 +525,21 @@ detect_os() {
     fi
 }
 
+# True only when systemd is actually running as PID 1. Testing for the `systemctl`
+# binary alone is not enough: a chroot, a container that pulled systemd in as a
+# dependency, and a half-booted host all have the binary while every systemctl call
+# fails. `systemctl --version` is no better — it exits 0 with no bus at all.
+_systemd_is_running() {
+    [ -d /run/systemd/system ] || return 1
+    local _state
+    _state=$(systemctl is-system-running 2>/dev/null) || true
+    # "degraded" still means booted, so this compares the value rather than the status.
+    [ -n "$_state" ] && [ "$_state" != "offline" ]
+}
+
 # Detect the host init system: systemd | openrc | none
 detect_init_system() {
-    if command -v systemctl &>/dev/null; then
+    if _systemd_is_running; then
         echo "systemd"
     elif [ -x /sbin/openrc-run ] || command -v rc-service &>/dev/null; then
         echo "openrc"
@@ -13560,9 +13572,16 @@ ExecStop=/usr/local/bin/mtproxymax stop
 WantedBy=multi-user.target
 AUTOSTART_EOF
 
-        systemctl daemon-reload
-        systemctl enable mtproxymax.service 2>/dev/null
-        log_success "Auto-start enabled (systemd)"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        # Check the result instead of discarding it. `systemctl enable` exits non-zero when
+        # there is no systemd to talk to (the not-booted case), so the old unconditional
+        # log_success told users autostart was on when nothing had been enabled.
+        if systemctl enable mtproxymax.service >/dev/null 2>&1; then
+            log_success "Auto-start enabled (systemd)"
+        else
+            log_warn "Could not enable auto-start — run: systemctl enable mtproxymax"
+            return 1
+        fi
         ;;
     openrc)
         # Type=oneshot + RemainAfterExit=yes wraps the manager's own start/stop,
