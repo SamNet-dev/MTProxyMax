@@ -1777,6 +1777,38 @@ _load_all_cumulative_user_stats() {
     done
 }
 
+# util-linux flock takes `-w SECS` to wait for a lock; busybox's flock applet does not,
+# and `command -v flock` cannot tell the two apart because busybox installs a `flock`
+# symlink to /bin/busybox. Testing for the binary therefore succeeds on Alpine while the
+# lock call itself fails. Probe the capability once instead of assuming it.
+_FLOCK_WAIT_SUPPORTED=""
+_flock_supports_wait() {
+    if [ -z "$_FLOCK_WAIT_SUPPORTED" ]; then
+        if command -v flock >/dev/null 2>&1 &&
+            (exec 9>/dev/null; flock -w 0 9) 2>/dev/null; then
+            _FLOCK_WAIT_SUPPORTED="yes"
+        else
+            _FLOCK_WAIT_SUPPORTED="no"
+        fi
+    fi
+    [ "$_FLOCK_WAIT_SUPPORTED" = "yes" ]
+}
+
+# Take an exclusive lock on the already-open file descriptor $1.
+# Returns 0 when the lock is held, non-zero when it could not be taken. A host with no
+# flock at all proceeds unlocked, which is the long-standing behaviour in that case.
+_lock_fd() {
+    local _fd="${1:?file descriptor required}"
+    command -v flock >/dev/null 2>&1 || return 0
+    if _flock_supports_wait; then
+        flock -w 5 "$_fd" 2>/dev/null
+    else
+        # busybox: -w is unavailable, so take the lock without waiting rather than not
+        # locking at all. Losing the 5s grace period is far better than skipping the lock.
+        flock -n "$_fd" 2>/dev/null
+    fi
+}
+
 # One-shot flush of traffic counters to disk (for use before stop/restart)
 # Works standalone — loads cumulative from disk, computes delta from live metrics, saves back
 flush_traffic_to_disk() {
@@ -1787,7 +1819,14 @@ flush_traffic_to_disk() {
     mkdir -p "$_stats_dir" 2>/dev/null
     # Acquire lock to prevent race with daemon's save_traffic
     exec 9>"${_stats_dir}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || { exec 9>&- 2>/dev/null; return 0; }
+    # Report failure rather than returning 0: this used to claim success while writing
+    # nothing, which silently discarded counters. Plain stderr, not log_error(), because
+    # this also runs from the daemon, which has no logging helpers of its own.
+    if ! _lock_fd 9; then
+        echo "mtproxymax: could not acquire traffic lock — counters not flushed" >&2
+        exec 9>&-
+        return 1
+    fi
 
     # Load existing cumulative totals
     local cum_in=0 cum_out=0
@@ -2608,12 +2647,10 @@ secret_reset_traffic() {
     # disk update with save_traffic() and leave it a reset command to consume
     # before its next write, otherwise it would restore the pre-reset values.
     exec 9>"${STATS_DIR}/.traffic.lock"
-    if command -v flock &>/dev/null; then
-        flock -w 5 9 2>/dev/null || {
-            log_error "Could not acquire traffic lock. Telegram daemon may be busy."
-            exec 9>&-
-            return 1
-        }
+    if ! _lock_fd 9; then
+        log_error "Could not acquire traffic lock. Telegram daemon may be busy."
+        exec 9>&-
+        return 1
     fi
 
     if [ "$label" = "all" ]; then
@@ -6627,8 +6664,10 @@ run_traffic_reset_global() {
     
     log_info "Resetting cumulative counters..."
     exec 9>"${_stats_dir}/.traffic.lock"
-    if command -v flock &>/dev/null; then
-        flock -w 5 9 2>/dev/null || { log_error "Could not acquire traffic lock. Daemon may be busy."; exec 9>&-; return 1; }
+    if ! _lock_fd 9; then
+        log_error "Could not acquire traffic lock. Daemon may be busy."
+        exec 9>&-
+        return 1
     fi
     
     local _tmp
@@ -11545,12 +11584,52 @@ load_traffic() {
     fi
 }
 
+# Duplicated from the manager script: this heredoc has a quoted delimiter, so it is
+# written out literally and the daemon never sources the manager. Without these two
+# definitions save_traffic() below calls an undefined _lock_fd, gets 127 back, and
+# returns before writing any counters — which is exactly the accounting loss this
+# change set out to fix. Keep identical to _flock_supports_wait/_lock_fd above.
+_FLOCK_WAIT_SUPPORTED=""
+_flock_supports_wait() {
+    if [ -z "$_FLOCK_WAIT_SUPPORTED" ]; then
+        if command -v flock >/dev/null 2>&1 &&
+            (exec 9>/dev/null; flock -w 0 9) 2>/dev/null; then
+            _FLOCK_WAIT_SUPPORTED="yes"
+        else
+            _FLOCK_WAIT_SUPPORTED="no"
+        fi
+    fi
+    [ "$_FLOCK_WAIT_SUPPORTED" = "yes" ]
+}
+
+# Take an exclusive lock on the already-open file descriptor $1.
+# Returns 0 when the lock is held, non-zero when it could not be taken. A host with no
+# flock at all proceeds unlocked, which is the long-standing behaviour in that case.
+_lock_fd() {
+    local _fd="${1:?file descriptor required}"
+    command -v flock >/dev/null 2>&1 || return 0
+    if _flock_supports_wait; then
+        flock -w 5 "$_fd" 2>/dev/null
+    else
+        # busybox: -w is unavailable, so take the lock without waiting rather than not
+        # locking at all. Losing the 5s grace period is far better than skipping the lock.
+        flock -n "$_fd" 2>/dev/null
+    fi
+}
+
 save_traffic() {
     local _tdir="${INSTALL_DIR}/relay_stats"
     mkdir -p "$_tdir" 2>/dev/null
     # Acquire lock to prevent race with flush_traffic_to_disk
     exec 9>"${_tdir}/.traffic.lock"
-    flock -w 5 9 2>/dev/null || { exec 9>&- 2>/dev/null; return 0; }
+    # Fail loudly rather than returning 0: this used to report success while writing
+    # nothing, so on a host whose flock lacked -w the daemon never persisted counters and
+    # no error was ever surfaced. stderr rather than log_error() — see _lock_fd callers.
+    if ! _lock_fd 9; then
+        echo "mtproxymax: could not acquire traffic lock — traffic not saved" >&2
+        exec 9>&-
+        return 1
+    fi
     apply_pending_traffic_resets
     local _tmp=$(mktemp "${_tdir}/.traffic.XXXXXX" 2>/dev/null) || { exec 9>&-; return; }
     chmod 600 "$_tmp"
@@ -12162,7 +12241,9 @@ while true; do
     _now=$(date +%s)
     if [ $((_now - _last_traffic_update)) -ge 60 ] && is_running; then
         _last_traffic_update=$_now
-        update_traffic 2>/dev/null
+        # Deliberately not silenced: save_traffic() reports a failed lock on stderr, and
+        # discarding that is what let unpersisted counters go unnoticed in production.
+        update_traffic
         [ "${PORTAL_ENABLED:-false}" = "true" ] && "${INSTALL_DIR}/mtproxymax" portal generate &>/dev/null
 
         # Connection log: append per-user activity (delta = current cumulative - previous cumulative)
@@ -12473,12 +12554,18 @@ save_replication() {
 
     chmod 600 "$tmp"
     # Serialise with sync-timer flock to prevent lost-update races with save_sync_status()
-    exec 201>"${INSTALL_DIR:-/opt/mtproxymax}/.mtproxymax-sync.lock" 2>/dev/null || true
-    if command -v flock &>/dev/null; then
-        flock -w 5 201 2>/dev/null || { log_error "Could not acquire lock for replication config"; rm -f "$tmp"; exec 201>&- 2>/dev/null; return 1; }
+    # No 2>/dev/null here: `exec` with only redirections applies to the whole shell, so it
+    # would silence stderr for the rest of the process — including the log_error below,
+    # which is exactly the failure this function is supposed to report.
+    exec 201>"${INSTALL_DIR:-/opt/mtproxymax}/.mtproxymax-sync.lock" || true
+    if ! _lock_fd 201; then
+        log_error "Could not acquire lock for replication config"
+        rm -f "$tmp"
+        exec 201>&-
+        return 1
     fi
     mv "$tmp" "$REPLICATION_FILE"
-    exec 201>&- 2>/dev/null || true
+    exec 201>&- || true
 }
 
 # Load replication.conf
@@ -12800,7 +12887,7 @@ do_sync() {
 
 main() {
     # Prevent overlapping sync runs
-    exec 200>"${LOCK_FILE}" 2>/dev/null || true
+    exec 200>"${LOCK_FILE}" || true
     if command -v flock &>/dev/null; then
         flock -n 200 || {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: Another sync already running" >> "${REPLICATION_LOG}"
