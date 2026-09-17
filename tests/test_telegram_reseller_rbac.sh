@@ -66,6 +66,10 @@ ROLE_TO_RETURN="reseller"
 _check_tg_role() { echo "$ROLE_TO_RETURN"; }
 tg_send() { printf 'admin|%s\n' "$*" >> "$REPLIES"; }
 tg_send_to() { printf 'to:%s|%s\n' "$1" "$2" >> "$REPLIES"; }
+# The replies that carry an inline keyboard go through these instead, so they
+# must be captured too or those assertions silently see an empty log.
+tg_send_kb() { printf 'admin|%s\n' "$*" >> "$REPLIES"; }
+tg_send_to_kb() { printf 'to:%s|%s\n' "$1" "$2" >> "$REPLIES"; }
 load_tg_settings() { :; }
 is_running() { return 1; }
 log_warn() { :; }
@@ -87,6 +91,10 @@ telegram_generate_service_script
 DAEMON="$INSTALL_DIR/mtproxymax-telegram.sh"
 awk '/^_tg_security_log\(\)/,/^}$/' "$DAEMON" > "$TEST_TMPDIR/daemon-fns.sh"
 awk '/^_process_cmd\(\)/,/^}$/' "$DAEMON" >> "$TEST_TMPDIR/daemon-fns.sh"
+# Reply handlers build their button bar via _tg_button_bar, so the menu block
+# has to resolve too. It does not define _check_tg_role, so the role stub above
+# survives.
+awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$TEST_TMPDIR/daemon-fns.sh"
 assert_eq "daemon helper extraction is valid bash" 0 \
     "$(bash -n "$TEST_TMPDIR/daemon-fns.sh" 2>/dev/null; echo $?)"
 source "$TEST_TMPDIR/daemon-fns.sh"
