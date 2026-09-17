@@ -1824,7 +1824,7 @@ flush_traffic_to_disk() {
     # this also runs from the daemon, which has no logging helpers of its own.
     if ! _lock_fd 9; then
         echo "mtproxymax: could not acquire traffic lock — counters not flushed" >&2
-        exec 9>&- 2>/dev/null
+        exec 9>&-
         return 1
     fi
 
@@ -11594,7 +11594,7 @@ save_traffic() {
     # no error was ever surfaced. stderr rather than log_error() — see _lock_fd callers.
     if ! _lock_fd 9; then
         echo "mtproxymax: could not acquire traffic lock — traffic not saved" >&2
-        exec 9>&- 2>/dev/null
+        exec 9>&-
         return 1
     fi
     apply_pending_traffic_resets
@@ -12519,15 +12519,18 @@ save_replication() {
 
     chmod 600 "$tmp"
     # Serialise with sync-timer flock to prevent lost-update races with save_sync_status()
-    exec 201>"${INSTALL_DIR:-/opt/mtproxymax}/.mtproxymax-sync.lock" 2>/dev/null || true
+    # No 2>/dev/null here: `exec` with only redirections applies to the whole shell, so it
+    # would silence stderr for the rest of the process — including the log_error below,
+    # which is exactly the failure this function is supposed to report.
+    exec 201>"${INSTALL_DIR:-/opt/mtproxymax}/.mtproxymax-sync.lock" || true
     if ! _lock_fd 201; then
         log_error "Could not acquire lock for replication config"
         rm -f "$tmp"
-        exec 201>&- 2>/dev/null
+        exec 201>&-
         return 1
     fi
     mv "$tmp" "$REPLICATION_FILE"
-    exec 201>&- 2>/dev/null || true
+    exec 201>&- || true
 }
 
 # Load replication.conf
@@ -12849,7 +12852,7 @@ do_sync() {
 
 main() {
     # Prevent overlapping sync runs
-    exec 200>"${LOCK_FILE}" 2>/dev/null || true
+    exec 200>"${LOCK_FILE}" || true
     if command -v flock &>/dev/null; then
         flock -n 200 || {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] SKIP: Another sync already running" >> "${REPLICATION_LOG}"
