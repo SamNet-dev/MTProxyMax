@@ -1622,8 +1622,8 @@ get_proxy_stats() {
     local m
     if m=$(_fetch_metrics); then
         local bi bo conns
-        bi=$(echo "$m" | awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-        bo=$(echo "$m" | awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+        bi=$(echo "$m" | awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
+        bo=$(echo "$m" | awk '/^telemt_user_octets_to_client_total\{/{s+=$NF}END{printf "%.0f",s}')
         conns=$(echo "$m" | awk '/^telemt_user_connections_current\{/{s+=$NF}END{printf "%.0f",s}')
         echo "${bi:-0} ${bo:-0} ${conns:-0}"
         return
@@ -1685,8 +1685,8 @@ get_user_stats() {
     local m
     if m=$(_fetch_metrics); then
         local i o c
-        i=$(echo "$m" | awk -v u="$user" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {print $NF}')
-        o=$(echo "$m" | awk -v u="$user" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {print $NF}')
+        i=$(echo "$m" | awk -v u="$user" '$0 ~ "^telemt_user_octets_from_client_total\\{.*user=\"" u "\"" {print $NF}')
+        o=$(echo "$m" | awk -v u="$user" '$0 ~ "^telemt_user_octets_to_client_total\\{.*user=\"" u "\"" {print $NF}')
         c=$(echo "$m" | awk -v u="$user" '$0 ~ "^telemt_user_connections_current\\{.*user=\"" u "\"" {print $NF}')
         echo "${i:-0} ${o:-0} ${c:-0}"
         return
@@ -1747,10 +1747,10 @@ _load_all_cumulative_user_stats() {
                 q = index(s, "\"")
                 return q ? substr(s, 1, q - 1) : ""
             }
-            /^telemt_user_octets_from_client\{/ {
+            /^telemt_user_octets_from_client_total\{/ {
                 u = get_user($0); if (u) users_in[u] += $NF
             }
-            /^telemt_user_octets_to_client\{/ {
+            /^telemt_user_octets_to_client_total\{/ {
                 u = get_user($0); if (u) users_out[u] += $NF
             }
             /^telemt_user_connections_current\{/ {
@@ -1834,8 +1834,8 @@ flush_traffic_to_disk() {
     if $_have_metrics; then
         # Global traffic delta
         local cur_gin cur_gout
-        cur_gin=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-        cur_gout=$(echo "$_metrics" | awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+        cur_gin=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
+        cur_gout=$(echo "$_metrics" | awk '/^telemt_user_octets_to_client_total\{/{s+=$NF}END{printf "%.0f",s}')
         cur_gin=${cur_gin:-0}; cur_gout=${cur_gout:-0}
         local gd_in=$((cur_gin - snap_gin)) gd_out=$((cur_gout - snap_gout))
         [ "$gd_in" -lt 0 ] 2>/dev/null && gd_in=$cur_gin
@@ -1868,8 +1868,8 @@ flush_traffic_to_disk() {
             [[ "$label" =~ ^# ]] && continue; [ -z "$secret" ] && continue
             [ "$enabled" != "true" ] && continue
             local ui uo
-            ui=$(echo "$_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {print $NF}')
-            uo=$(echo "$_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {print $NF}')
+            ui=$(echo "$_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_from_client_total\\{.*user=\"" u "\"" {print $NF}')
+            uo=$(echo "$_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_to_client_total\\{.*user=\"" u "\"" {print $NF}')
             ui=${ui:-0}; uo=${uo:-0}
             local si=${_fu_snap_in["$label"]:-0} so=${_fu_snap_out["$label"]:-0}
             local di=$((ui - si)) doo=$((uo - so))
@@ -2630,8 +2630,8 @@ secret_reset_traffic() {
                     q = index(s, "\"")
                     return q ? substr(s, 1, q - 1) : ""
                 }
-                /^telemt_user_octets_from_client\{/ { u = get_user($0); if (u) in_oct[u] += $NF }
-                /^telemt_user_octets_to_client\{/ { u = get_user($0); if (u) out_oct[u] += $NF }
+                /^telemt_user_octets_from_client_total\{/ { u = get_user($0); if (u) in_oct[u] += $NF }
+                /^telemt_user_octets_to_client_total\{/ { u = get_user($0); if (u) out_oct[u] += $NF }
                 END {
                     for (u in in_oct) {
                         printf "%s|%.0f|%.0f\n", u, in_oct[u], out_oct[u]
@@ -2663,8 +2663,8 @@ secret_reset_traffic() {
 
         # Update user_traffic_snapshot to exact current live Prometheus values so delta becomes 0 right now
         local live_in=0 live_out=0
-        live_in=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_from_client\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
-        live_out=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_to_client\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
+        live_in=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_from_client_total\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
+        live_out=$(echo "$_reset_metrics" | awk -v u="$label" '$0 ~ "^telemt_user_octets_to_client_total\\{.*user=\"" u "\"" {s+=$NF} END {printf "%.0f",s}')
         [[ "${live_in:-0}" =~ ^[0-9]+$ ]] || live_in=0
         [[ "${live_out:-0}" =~ ^[0-9]+$ ]] || live_out=0
         if [ -f "$_snap" ]; then
@@ -2949,8 +2949,8 @@ show_connections() {
         /^telemt_user_connections_current\{/  { u=lbl($0,"user"); if(u) uc[u]+=$NF }
         /^telemt_user_connections_total\{/    { u=lbl($0,"user"); if(u) ut[u]+=$NF }
         /^telemt_user_unique_ips_current\{/   { u=lbl($0,"user"); if(u) ui[u]+=$NF }
-        /^telemt_user_octets_from_client\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
-        /^telemt_user_octets_to_client\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+        /^telemt_user_octets_from_client_total\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+        /^telemt_user_octets_to_client_total\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
         /^telemt_connections_current /         { total=$NF }
         END {
             for (u in uc) users[u]=1
@@ -3079,8 +3079,8 @@ secret_stats() {
                 q = index(s, "\""); return q ? substr(s, 1, q-1) : ""
             }
             /^telemt_user_connections_current\{/  { u=lbl($0,"user"); if(u) uc[u]+=$NF }
-            /^telemt_user_octets_from_client\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
-            /^telemt_user_octets_to_client\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+            /^telemt_user_octets_from_client_total\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+            /^telemt_user_octets_to_client_total\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
             /^telemt_user_unique_ips_current\{/   { u=lbl($0,"user"); if(u) ip[u]+=$NF }
             END { for (u in uc) printf "%s|%.0f|%.0f|%.0f|%.0f\n", u, uc[u]+0, rx[u]+0, tx[u]+0, ip[u]+0 }
         ')
@@ -3426,8 +3426,8 @@ secret_info() {
         local live; live=$(echo "$m" | awk -v u="$label" '
             function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
             /^telemt_user_connections_current\{/ { if(lbl($0,"user")==u) c+=$NF }
-            /^telemt_user_octets_from_client\{/  { if(lbl($0,"user")==u) rx+=$NF }
-            /^telemt_user_octets_to_client\{/    { if(lbl($0,"user")==u) tx+=$NF }
+            /^telemt_user_octets_from_client_total\{/  { if(lbl($0,"user")==u) rx+=$NF }
+            /^telemt_user_octets_to_client_total\{/    { if(lbl($0,"user")==u) tx+=$NF }
             /^telemt_user_unique_ips_current\{/  { if(lbl($0,"user")==u) ip+=$NF }
             END { printf "%.0f|%.0f|%.0f|%.0f", c+0, rx+0, tx+0, ip+0 }
         ')
@@ -3623,8 +3623,8 @@ secret_top() {
     parsed=$(echo "$m" | awk '
         function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
         /^telemt_user_connections_current\{/  { u=lbl($0,"user"); if(u) uc[u]+=$NF }
-        /^telemt_user_octets_from_client\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
-        /^telemt_user_octets_to_client\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+        /^telemt_user_octets_from_client_total\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+        /^telemt_user_octets_to_client_total\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
         END { for(u in uc) printf "%s|%.0f|%.0f|%.0f\n", u, uc[u]+0, rx[u]+0, tx[u]+0 }
     ')
 
@@ -5138,8 +5138,8 @@ run_upload_test() {
     _metrics=$(fetch_metrics 2>/dev/null || true)
     if [ -n "$_metrics" ]; then
         local up_bytes down_bytes
-        up_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-        down_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+        up_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
+        down_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_to_client_total\{/{s+=$NF}END{printf "%.0f",s}')
 
         local up_fmt; up_fmt=$(format_bytes "${up_bytes:-0}")
         local down_fmt; down_fmt=$(format_bytes "${down_bytes:-0}")
@@ -6621,8 +6621,8 @@ run_traffic_reset_global() {
         return 1
     fi
     local cur_in=0 cur_out=0
-    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client_total\{/{s+=$NF}END{printf "%.0f",s}')
     cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
     
     log_info "Resetting cumulative counters..."
@@ -11415,8 +11415,8 @@ get_stats() {
     local m=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null)
     [ -z "$m" ] && echo "0 0 0" && return
     echo "$m" | awk '
-        /^telemt_user_octets_from_client\{/ {i+=$NF}
-        /^telemt_user_octets_to_client\{/   {o+=$NF}
+        /^telemt_user_octets_from_client_total\{/ {i+=$NF}
+        /^telemt_user_octets_to_client_total\{/   {o+=$NF}
         /^telemt_user_connections_current\{/ {c+=$NF}
         END {printf "%.0f %.0f %.0f\n",i+0,o+0,c+0}
     '
@@ -11583,8 +11583,8 @@ update_traffic() {
     _metrics=$(curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null) || true
     [ -z "$_metrics" ] && return 0
     local cur_in cur_out
-    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client\{/{s+=$NF}END{printf "%.0f",s}')
-    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_in=$(echo "$_metrics"|awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
+    cur_out=$(echo "$_metrics"|awk '/^telemt_user_octets_to_client_total\{/{s+=$NF}END{printf "%.0f",s}')
     cur_in=${cur_in:-0}; cur_out=${cur_out:-0}
 
     # Compute deltas (torware pattern: detect container restart by negative delta)
@@ -11604,8 +11604,8 @@ update_traffic() {
             [ -n "$_pu" ] && { _parsed_ui["$_pu"]=${_pi:-0}; _parsed_uo["$_pu"]=${_po:-0}; }
         done < <(echo "$_metrics" | awk '
             function lbl(s, k,    p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
-            /^telemt_user_octets_from_client\{/ { u=lbl($0,"user"); if(u) rx[u]+=$NF }
-            /^telemt_user_octets_to_client\{/   { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+            /^telemt_user_octets_from_client_total\{/ { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+            /^telemt_user_octets_to_client_total\{/   { u=lbl($0,"user"); if(u) tx[u]+=$NF }
             END { for(u in rx) printf "%s|%.0f|%.0f\n",u,rx[u]+0,tx[u]+0 }
         ')
     fi
@@ -14379,8 +14379,8 @@ show_metrics() {
         /^telemt_upstream_connect_duration_fail_total\{/    { b=lbl($0,"bucket"); if(b) df[b]+=$NF }
         /^telemt_user_connections_current\{/ { u=lbl($0,"user"); if(u) uc[u]+=$NF }
         /^telemt_user_connections_total\{/   { u=lbl($0,"user"); if(u) ut[u]+=$NF }
-        /^telemt_user_octets_from_client\{/  { u=lbl($0,"user"); if(u) rx[u]+=$NF }
-        /^telemt_user_octets_to_client\{/    { u=lbl($0,"user"); if(u) tx[u]+=$NF }
+        /^telemt_user_octets_from_client_total\{/  { u=lbl($0,"user"); if(u) rx[u]+=$NF }
+        /^telemt_user_octets_to_client_total\{/    { u=lbl($0,"user"); if(u) tx[u]+=$NF }
         /^telemt_user_unique_ips_current\{/  { u=lbl($0,"user"); if(u) ui[u]+=$NF }
         END {
             printf "S|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
