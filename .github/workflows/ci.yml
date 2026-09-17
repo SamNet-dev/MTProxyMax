@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Pure parser check — reports the file and line of any syntax error without
       # executing anything. This cannot false-positive, so it is a hard gate.
@@ -107,7 +107,7 @@ jobs:
             install: 'dnf install -y -q bash diffutils'
             quarantine: 'test_client_mss.sh'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Each distro runs the same suite in a container. Alpine is the row that earns its
       # keep: its busybox userland (sed, grep, mktemp, date) differs from GNU, and Alpine
@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Confirm the runner really is systemd
         # If this ever prints something other than "systemd", the job below would be
@@ -154,7 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # OpenRC in a container needs the softlevel marker (its verify_boot() otherwise
       # refuses to run any service) and a bash since the image ships only busybox ash;
