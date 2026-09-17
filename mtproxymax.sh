@@ -2951,9 +2951,12 @@ show_connections() {
         /^telemt_user_unique_ips_current\{/   { u=lbl($0,"user"); if(u) ui[u]+=$NF }
         /^telemt_user_octets_from_client_total\{/   { u=lbl($0,"user"); if(u) rx[u]+=$NF }
         /^telemt_user_octets_to_client_total\{/     { u=lbl($0,"user"); if(u) tx[u]+=$NF }
-        /^telemt_connections_current /         { total=$NF }
         END {
-            for (u in uc) users[u]=1
+            # Global active connections are the sum of the per-user gauge. The aggregate
+            # telemt_connections_current was deleted in telemt c07b600, so reading it here
+            # left "Total active" at 0 for every 3.5.x release.
+            # See tests/test_metric_names.sh for the upstream history.
+            for (u in uc) { users[u]=1; total+=uc[u] }
             for (u in ut) users[u]=1
             for (u in ui) users[u]=1
             for (u in rx) users[u]=1
@@ -14360,9 +14363,9 @@ show_metrics() {
         /^telemt_uptime_seconds /                           { uptime = $NF }
         /^telemt_connections_total /                        { c_tot  = $NF }
         /^telemt_connections_bad_total /                    { c_bad  = $NF }
-        /^telemt_connections_current /                      { c_cur  = $NF }
-        /^telemt_connections_me_current /                   { c_me   = $NF }
-        /^telemt_connections_direct_current /               { c_dir  = $NF }
+        # telemt_connections_current, ..._me_current and ..._direct_current were deleted
+        # in telemt c07b600; the aggregate is now derived from the per-user gauge below.
+        # See tests/test_metric_names.sh for the upstream history.
         /^telemt_upstream_connect_attempt_total /           { up_att = $NF }
         /^telemt_upstream_connect_success_total /           { up_ok  = $NF }
         /^telemt_upstream_connect_fail_total /              { up_fail= $NF }
@@ -14383,8 +14386,9 @@ show_metrics() {
         /^telemt_user_octets_to_client_total\{/    { u=lbl($0,"user"); if(u) tx[u]+=$NF }
         /^telemt_user_unique_ips_current\{/  { u=lbl($0,"user"); if(u) ui[u]+=$NF }
         END {
-            printf "S|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
-                uptime+0,c_tot+0,c_bad+0,c_cur+0,c_me+0,c_dir+0,
+            for (u in uc) c_cur += uc[u]
+            printf "S|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
+                uptime+0,c_tot+0,c_bad+0,c_cur+0,
                 up_att+0,up_ok+0,up_fail+0,me_att+0,me_ok+0,
                 me_wa+0,me_ww+0,me_quar+0,me_crc+0,pool+0,desync+0,padinv+0
             bkeys[1]="le_100ms";   bnames[1]="<=100ms"
@@ -14405,8 +14409,8 @@ show_metrics() {
     ')
 
     # Parse scalar line
-    local uptime c_tot c_bad c_cur c_me c_dir up_att up_ok up_fail me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv
-    IFS='|' read -r _ uptime c_tot c_bad c_cur c_me c_dir up_att up_ok up_fail \
+    local uptime c_tot c_bad c_cur up_att up_ok up_fail me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv
+    IFS='|' read -r _ uptime c_tot c_bad c_cur up_att up_ok up_fail \
                        me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv \
         <<< "$(echo "$parsed" | grep '^S|')"
 
@@ -14435,7 +14439,10 @@ show_metrics() {
 
     echo -e "  ${BOLD}Connections${NC}"
     echo -e "  ${DIM}total:${NC} ${c_tot:-0}   ${DIM}authorized:${NC} ${BRIGHT_GREEN}${c_good}${NC}   ${DIM}rejected:${NC} ${BRIGHT_RED}${c_bad:-0}${NC}"
-    echo -e "  ${DIM}active:${NC} ${c_cur:-0}  (ME: ${c_me:-0}  direct: ${c_dir:-0})"
+    # The ME / direct breakdown is gone: telemt removed those gauges in c07b600 and
+    # exposes no per-transport current-connection metric any more, so printing
+    # "(ME: 0 direct: 0)" forever would just assert a number that was never measured.
+    echo -e "  ${DIM}active:${NC} ${c_cur:-0}"
     echo ""
 
     echo -e "  ${BOLD}Upstream${NC}"
