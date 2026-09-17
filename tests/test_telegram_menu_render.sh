@@ -59,6 +59,8 @@ for _fn in _tg_security_log _cb_label_ok _cb_enc _cb_dec _esc _iso_to_epoch; do
     awk "/^${_fn}\\(\\)/,/^}\$/" "$DAEMON" >> "$FNS"
 done
 awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$FNS"
+# The traffic view renders windowed analytics, so it needs the history block too.
+awk '/^# >>> TG_HISTORY_BEGIN$/,/^# <<< TG_HISTORY_END$/' "$DAEMON" >> "$FNS"
 assert_eq "menu render extraction is valid bash" 0 \
     "$(bash -n "$FNS" 2>/dev/null; echo $?)"
 

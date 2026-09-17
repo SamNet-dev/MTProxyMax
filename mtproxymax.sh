@@ -147,6 +147,12 @@ TELEGRAM_CHAT_ID=""
 TELEGRAM_INTERVAL=6
 TELEGRAM_ALERTS_ENABLED="true"
 TELEGRAM_SERVER_LABEL="MTProxyMax"
+# Rolling traffic history. Disabling it stops new samples; existing ones stay.
+TELEGRAM_HISTORY_ENABLED="true"
+TELEGRAM_HISTORY_INTERVAL_MIN="5"
+TELEGRAM_HISTORY_RETENTION_DAYS="7"
+# auto = send a full report only when there was traffic, else a heartbeat.
+TELEGRAM_REPORT_DETAIL="auto"
 AUTO_UPDATE_ENABLED="true"
 
 # Anti-DPI & Stealth Defenses
@@ -718,6 +724,10 @@ TELEGRAM_CHAT_ID='${TELEGRAM_CHAT_ID}'
 TELEGRAM_INTERVAL='${TELEGRAM_INTERVAL}'
 TELEGRAM_ALERTS_ENABLED='${TELEGRAM_ALERTS_ENABLED}'
 TELEGRAM_SERVER_LABEL='${TELEGRAM_SERVER_LABEL}'
+TELEGRAM_HISTORY_ENABLED='${TELEGRAM_HISTORY_ENABLED}'
+TELEGRAM_HISTORY_INTERVAL_MIN='${TELEGRAM_HISTORY_INTERVAL_MIN}'
+TELEGRAM_HISTORY_RETENTION_DAYS='${TELEGRAM_HISTORY_RETENTION_DAYS}'
+TELEGRAM_REPORT_DETAIL='${TELEGRAM_REPORT_DETAIL}'
 
 # Auto-Update
 AUTO_UPDATE_ENABLED='${AUTO_UPDATE_ENABLED}'
@@ -803,6 +813,7 @@ load_settings() {
             PROXY_SECRET_URL|PROXY_CONFIG_V4_URL|PROXY_CONFIG_V6_URL|\
             TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
             TELEGRAM_INTERVAL|TELEGRAM_ALERTS_ENABLED|TELEGRAM_SERVER_LABEL|\
+            TELEGRAM_HISTORY_ENABLED|TELEGRAM_HISTORY_INTERVAL_MIN|TELEGRAM_HISTORY_RETENTION_DAYS|TELEGRAM_REPORT_DETAIL|\
             AUTO_UPDATE_ENABLED|SECRET_AUTO_ROTATE_DAYS|BACKUP_RETENTION_DAYS|QUOTA_ENFORCEMENT_MODE|\
             STEALTH_SHIELD|STEALTH_PRESET|STEALTH_MSS_CLAMP|LOCKDOWN_MODE|PORT_POOL_PORTS|QOS_LIMIT_MBPS|HAPPY_HOURS_WINDOW|\
             REPLICATION_ENABLED|REPLICATION_ROLE|REPLICATION_SYNC_INTERVAL|\
@@ -11219,6 +11230,78 @@ telegram_clear_commands() {
     return 0
 }
 
+# Inspect and maintain the rolling traffic history written by the bot daemon.
+#
+# The daemon owns the format; the manager only counts rows and prunes, so the
+# analytics live in exactly one place. The field order is duplicated here for
+# readability, which matches how format_bytes is already duplicated between the
+# two — keep this comment and the daemon's in step:
+#
+#   global.tsv   epoch|in_delta|out_delta|conns|marker
+#   users.tsv    epoch|label|in_delta|out_delta
+telegram_history_cmd() {
+    local sub="${1:-status}"
+    local dir="${STATS_DIR}/history"
+    case "$sub" in
+        status)
+            echo -e "  ${BOLD}Traffic history:${NC} ${dir}"
+            if [ ! -d "$dir" ]; then
+                echo -e "  ${DIM}No history recorded yet.${NC}"
+                return 0
+            fi
+            local gn=0 un=0
+            [ -f "$dir/global.tsv" ] && gn=$(wc -l < "$dir/global.tsv" 2>/dev/null || echo 0)
+            [ -f "$dir/users.tsv" ]  && un=$(wc -l < "$dir/users.tsv" 2>/dev/null || echo 0)
+            echo -e "  ${DIM}Global samples: ${gn} | Per-user rows: ${un}${NC}"
+            if [ -f "$dir/global.tsv" ] && [ "$gn" -gt 0 ]; then
+                local first last
+                first=$(head -1 "$dir/global.tsv" | cut -d'|' -f1)
+                last=$(tail -1 "$dir/global.tsv" | cut -d'|' -f1)
+                echo -e "  ${DIM}Oldest: $(date -d "@${first}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$first")${NC}"
+                echo -e "  ${DIM}Newest: $(date -d "@${last}" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$last")${NC}"
+            fi
+            echo -e "  ${DIM}Retention: ${TELEGRAM_HISTORY_RETENTION_DAYS:-7} day(s) | Sample interval: ${TELEGRAM_HISTORY_INTERVAL_MIN:-5} min${NC}"
+            ;;
+        prune)
+            check_root
+            if [ ! -d "$dir" ]; then
+                echo -e "  ${DIM}No history to prune.${NC}"
+                return 0
+            fi
+            local cutoff=$(( $(date +%s) - ${TELEGRAM_HISTORY_RETENTION_DAYS:-7} * 86400 ))
+            local f tmp
+            for f in "$dir/global.tsv" "$dir/users.tsv"; do
+                [ -f "$f" ] || continue
+                tmp=$(mktemp "$dir/.prune.XXXXXX") || continue
+                chmod 600 "$tmp"
+                if awk -F'|' -v c="$cutoff" '$1 + 0 >= c' "$f" > "$tmp"; then
+                    mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+                else
+                    rm -f "$tmp"
+                fi
+            done
+            echo -e "  ${GREEN}✓${NC} Pruned history to the last ${TELEGRAM_HISTORY_RETENTION_DAYS:-7} day(s)."
+            ;;
+        reset)
+            check_root
+            [ -d "$dir" ] || return 0
+            echo -e "  ${YELLOW}This deletes all recorded traffic history. Reports and the${NC}"
+            echo -e "  ${YELLOW}traffic view will start from empty; secret quotas are unaffected.${NC}"
+            local _c=""
+            read -r -p "  Type 'yes' to confirm: " _c
+            if [ "$_c" != "yes" ]; then
+                echo -e "  ${DIM}Cancelled.${NC}"
+                return 0
+            fi
+            rm -f "$dir/global.tsv" "$dir/users.tsv"
+            echo -e "  ${GREEN}✓${NC} History cleared."
+            ;;
+        *)
+            echo -e "  Usage: mtproxymax telegram history [status|prune|reset]"
+            ;;
+    esac
+}
+
 # Upload a photo from a file on this host. The Bot API only fetches a URL
 # itself, so a locally rendered image has to be sent as multipart — and it is
 # the reason the QR no longer has to be posted to a third party first.
@@ -11533,6 +11616,7 @@ load_tg_settings() {
                 AD_TAG|GEOBLOCK_MODE|BLOCKLIST_COUNTRIES|AUTO_UPDATE_ENABLED|\
                 TELEGRAM_ENABLED|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|\
                 TELEGRAM_INTERVAL|TELEGRAM_SERVER_LABEL|TELEGRAM_ALERTS_ENABLED|\
+                TELEGRAM_HISTORY_ENABLED|TELEGRAM_HISTORY_INTERVAL_MIN|TELEGRAM_HISTORY_RETENTION_DAYS|TELEGRAM_REPORT_DETAIL|\
                 LOCKDOWN_MODE|QOS_LIMIT_MBPS|HAPPY_HOURS_WINDOW|PORT_POOL_PORTS|STEALTH_PRESET|COVER_WATCHDOG_ENABLED|DDNS_ENABLED|DDNS_RECORD_NAME)
                     printf -v "$key" '%s' "$val" ;;
             esac
@@ -12064,8 +12148,29 @@ update_traffic() {
     [ "$delta_out" -lt 0 ] 2>/dev/null && delta_out=$cur_out
     _cum_in=$((_cum_in + delta_in))
     _cum_out=$((_cum_out + delta_out))
+    # Accumulate the same corrected delta into the history bucket. Doing it
+    # here rather than re-deriving it later means the restart handling above is
+    # inherited by construction instead of duplicated.
+    _bucket_in=$(( ${_bucket_in:-0} + delta_in ))
+    _bucket_out=$(( ${_bucket_out:-0} + delta_out ))
     _prev_total_in=$cur_in
     _prev_total_out=$cur_out
+
+    # Connections and engine uptime for the sample row. A DECREASE in uptime
+    # means the engine restarted, which is recorded as a marker so a later
+    # window spanning the gap can explain itself.
+    local _extra _conns _up
+    _extra=$(printf '%s' "$_metrics" | awk '
+        /^telemt_user_connections_current\{/ { c+=$NF }
+        /^telemt_uptime_seconds /             { u=$NF }
+        END { printf "%.0f %.0f", c+0, u+0 }')
+    read -r _conns _up <<< "$_extra"
+    _bucket_conns="${_conns:-0}"
+    if [ "${_prev_uptime:-0}" -gt 0 ] 2>/dev/null && [ "${_up:-0}" -gt 0 ] 2>/dev/null && \
+       [ "${_up:-0}" -lt "${_prev_uptime:-0}" ] 2>/dev/null; then
+        _bucket_marker="R"
+    fi
+    _prev_uptime="${_up:-0}"
 
     # Per-user delta tracking — single awk pass for all users into associative array
     declare -A _parsed_ui=() _parsed_uo=()
@@ -12091,6 +12196,8 @@ update_traffic() {
         [ "$dou" -lt 0 ] 2>/dev/null && dou=$uo
         _cum_user_in["$label"]=$(( ${_cum_user_in["$label"]:-0} + du ))
         _cum_user_out["$label"]=$(( ${_cum_user_out["$label"]:-0} + dou ))
+        _bucket_user_in["$label"]=$(( ${_bucket_user_in["$label"]:-0} + du ))
+        _bucket_user_out["$label"]=$(( ${_bucket_user_out["$label"]:-0} + dou ))
         _prev_user_in["$label"]=$ui
         _prev_user_out["$label"]=$uo
     done < "$SECRETS_FILE"
@@ -14049,30 +14156,44 @@ _cb_exec_action() {
 
 _cb_render_traffic() {
     local win="${1:-24h}"
-    [ -z "$win" ] && win="24h"
-    local _msg="📈 *Traffic*\n\n"
-    _msg+="Lifetime: ↓ $(format_bytes "${_cum_out:-0}") ↑ $(format_bytes "${_cum_in:-0}")\n"
-    _msg+="👥 $(get_active_connections) live connections\n\n"
-    _msg+="*Per user (since reset)*\n"
-    local label secret created enabled rest _rows=""
-    if [ -f "$SECRETS_FILE" ]; then
-        while IFS='|' read -r label secret created enabled rest || [ -n "$label" ]; do
-            [[ "$label" =~ ^# ]] && continue
-            _cb_label_ok "$label" || continue
-            [ "$enabled" != "true" ] && continue
-            _rows+="$(printf '%s\n' "$(( ${_cum_user_in[$label]:-0} + ${_cum_user_out[$label]:-0} ))|$label")"$'\n'
-        done < "$SECRETS_FILE"
-    fi
-    if [ -n "$_rows" ]; then
-        while IFS='|' read -r _b _l; do
-            [ -z "$_l" ] && continue
-            _msg+="👤 $(_esc "$_l"): ↓ $(format_bytes "${_cum_user_out[$_l]:-0}") ↑ $(format_bytes "${_cum_user_in[$_l]:-0}")\n"
-        done < <(printf '%s' "$_rows" | sort -t'|' -k1 -rn | head -8)
+    case "$win" in
+        7d)  _win_s=604800 ;;
+        30d) _win_s=2592000 ;;
+        *)   win="24h"; _win_s=86400 ;;
+    esac
+    local _now; _now=$(date +%s)
+    local _ci _co _pi _po _pct _peak _avg _n _span
+    IFS='|' read -r _ci _co _pi _po _pct _peak _avg _n _span <<< "$(history_summary "$_win_s" "$_now")"
+
+    local _msg="📈 *Traffic — last ${win}*\n\n"
+    _msg+="↓ $(format_bytes "${_co:-0}")  ↑ $(format_bytes "${_ci:-0}")$(_tg_pct_str "$_pct")\n"
+    _msg+="⚡ Peak $(format_bytes "${_peak:-0}")/s · Avg $(format_bytes "${_avg:-0}")/s\n"
+    _msg+="👥 $(get_active_connections) live now\n"
+    if [ "${_n:-0}" -gt 0 ]; then
+        _msg+="\n_from ${_n} sample(s) over $(format_duration "${_span:-0}")_\n"
     else
-        _msg+="No active users.\n"
+        _msg+="\n_No history recorded yet._\n"
     fi
+
+    local _spark
+    _spark=$(_tg_spark "$(history_hourly "$_win_s" "$_now")")
+    [ -n "$_spark" ] && _msg+="\n\`\`\`\n${_spark}\n\`\`\`\n"
+
+    local _top _l _b
+    _top=$(history_top "$_win_s" "$_now" 5)
+    if [ -n "$_top" ]; then
+        _msg+="\n🏆 *Top talkers*\n"
+        while IFS='|' read -r _l _b; do
+            [ -z "$_l" ] && continue
+            _msg+="👤 $(_esc "$_l"): $(format_bytes "${_b:-0}")\n"
+        done <<< "$_top"
+    fi
+
     _kb_reset
-    _kb_row "🔄 Refresh|t" "🏠 Menu|m"
+    _kb_row "$([ "$win" = "24h" ] && printf '24h ✓|t:w:24h' || printf '24h|t:w:24h')" \
+            "$([ "$win" = "7d" ] && printf '7d ✓|t:w:7d' || printf '7d|t:w:7d')" \
+            "$([ "$win" = "30d" ] && printf '30d ✓|t:w:30d' || printf '30d|t:w:30d')"
+    _kb_row "🔄 Refresh|t:w:${win}" "🏠 Menu|m"
     _cb_edit "$_msg" "$(_kb_json)"
 }
 
@@ -14492,6 +14613,306 @@ _tg_voucher_count() {
 
 # <<< TG_MENU_END
 
+# >>> TG_HISTORY_BEGIN
+# ── Rolling traffic history ─────────────────────────────────────────────────
+#
+# Two append-only files under relay_stats/history/:
+#
+#   global.tsv   epoch|in_delta|out_delta|conns|marker
+#   users.tsv    epoch|label|in_delta|out_delta   (sparse: only non-zero rows)
+#
+# DELTAS, not cumulative counters. A cumulative record goes stale the moment
+# the engine restarts or a traffic reset rewinds the counters, forcing every
+# reader to re-implement restart detection. With deltas a reset just yields a
+# smaller bucket, and a windowed sum is `t >= start { s += $2 }`.
+#
+# Only ONE writer (this daemon) appends, so appends need no lock; only the
+# read-modify-write in _history_prune does.
+#
+# Marker column: "-" normal, "R" engine restart, "X" traffic reset.
+HISTORY_DIR="${INSTALL_DIR}/relay_stats/history"
+
+_bucket_in=0
+_bucket_out=0
+_bucket_conns=0
+_bucket_marker="-"
+_prev_uptime=0
+declare -A _bucket_user_in _bucket_user_out
+
+_history_init() {
+    mkdir -p "$HISTORY_DIR" 2>/dev/null || true
+    [ -f "$HISTORY_DIR/global.tsv" ] || : > "$HISTORY_DIR/global.tsv" 2>/dev/null || true
+    [ -f "$HISTORY_DIR/users.tsv" ] || : > "$HISTORY_DIR/users.tsv" 2>/dev/null || true
+}
+
+_history_zero_buckets() {
+    _bucket_in=0; _bucket_out=0; _bucket_conns=0; _bucket_marker="-"
+    local _k
+    for _k in "${!_bucket_user_in[@]}";  do _bucket_user_in["$_k"]=0; done
+    for _k in "${!_bucket_user_out[@]}"; do _bucket_user_out["$_k"]=0; done
+}
+
+# Flush the accumulated buckets as one sample and reset them. Called on its own
+# timer, so the bucket window matches the sample interval rather than the 60s
+# traffic tick.
+history_sample() {
+    local epoch="${1:-$(date +%s)}"
+    _history_init
+    printf '%s|%s|%s|%s|%s\n' "$epoch" "${_bucket_in:-0}" "${_bucket_out:-0}" \
+        "${_bucket_conns:-0}" "${_bucket_marker:--}" >> "$HISTORY_DIR/global.tsv" 2>/dev/null
+    local _l _di _do
+    for _l in "${!_bucket_user_in[@]}"; do
+        _di="${_bucket_user_in[$_l]:-0}"; _do="${_bucket_user_out[$_l]:-0}"
+        [ "${_di:-0}" -eq 0 ] 2>/dev/null && [ "${_do:-0}" -eq 0 ] 2>/dev/null && continue
+        printf '%s|%s|%s|%s\n' "$epoch" "$_l" "$_di" "$_do" >> "$HISTORY_DIR/users.tsv" 2>/dev/null
+    done
+    _history_zero_buckets
+}
+
+# "cur_in|cur_out|prev_in|prev_out|pct|peak_bps|avg_bps|samples|span_s"
+#
+# pct is -1 when the previous window holds nothing, never inf/nan — a formatter
+# downstream would choke on those. peak uses the ACTUAL gap between samples,
+# not the nominal interval, so a daemon outage shows as a real gap rather than
+# a phantom spike; avg divides by the span actually covered, so a 7-day query
+# against 3 hours of history reports honestly instead of inflating.
+history_summary() {
+    local win="$1" now="$2"
+    local f="$HISTORY_DIR/global.tsv"
+    [ -f "$f" ] || { printf '0|0|0|0|n/a|0|0|0|0'; return 0; }
+    awk -F'|' -v win="$win" -v now="$now" '
+        {
+            t = $1 + 0
+            if (t > now) next
+            if (t >= now - win) {
+                ci += $2; co += $3; cn++
+                if (fs == "" || t < fs) fs = t
+                if (t > ls) ls = t
+            } else if (t >= now - 2 * win) { pi += $2; po += $3 }
+            if (pt != "" && t > pt) {
+                d = ($2 + $3) / (t - pt)
+                if (t >= now - win && d > peak) peak = d
+            }
+            pt = t
+        }
+        END {
+            # "n/a" rather than a numeric sentinel: -1 would be indistinguishable
+            # from a genuine 1%% decrease, and inf/nan would break the formatter.
+            pct = "n/a"
+            if (pi + po > 0) pct = int(((ci + co) - (pi + po)) * 100 / (pi + po)) ""
+            span = (ls > fs) ? (ls - fs) : 0
+            avg = (span > 0) ? int((ci + co) / span) : 0
+            printf "%d|%d|%d|%d|%s|%d|%d|%d|%d\n", ci, co, pi, po, pct, peak, avg, cn, span
+        }
+    ' "$f" 2>/dev/null || printf '0|0|0|0|n/a|0|0|0|0'
+}
+
+# A single-line sparkline for the hourly series. The bar glyphs are passed as a
+# SPACE-separated string and split on that, never on "" — splitting a multibyte
+# string into characters is locale-dependent, and under a C locale `substr`
+# would slice a 3-byte bar glyph in half and emit mojibake.
+_tg_spark() {
+    local vals="$1"
+    [ -n "$vals" ] || return 0
+    awk -v v="$vals" -v b="▁ ▂ ▃ ▄ ▅ ▆ ▇ █" '
+        BEGIN {
+            n = split(v, a, " "); nb = split(b, BAR, " ")
+            max = 0
+            for (i = 1; i <= n; i++) if (a[i] + 0 > max) max = a[i] + 0
+            out = ""
+            for (i = 1; i <= n; i++) {
+                if (max <= 0) { out = out BAR[1]; continue }
+                idx = int(a[i] * (nb - 1) / max) + 1
+                if (idx < 1) idx = 1
+                if (idx > nb) idx = nb
+                out = out BAR[idx]
+            }
+            printf "%s", out
+        }'
+}
+
+# Format a period-over-period figure. "n/a" means the previous window was empty
+# and prints nothing at all, rather than a misleading ▲0%.
+_tg_pct_str() {
+    local p="$1"
+    [[ "$p" =~ ^-?[0-9]+$ ]] || return 0
+    if   [ "$p" -gt 0 ]; then printf '  ▲%d%%' "$p"
+    elif [ "$p" -lt 0 ]; then printf '  ▼%d%%' "$(( -p ))"
+    else printf '  ▬0%%'
+    fi
+}
+
+# "label|in|out" for every requested label, in the order requested, in ONE awk
+# pass — a page of six users must not cost six scans. A label with no history
+# reports 0|0 rather than going missing.
+history_users() {
+    local win="$1" now="$2"; shift 2
+    [ "$#" -gt 0 ] || return 0
+    local f="$HISTORY_DIR/users.tsv" _l want=""
+    for _l in "$@"; do want="${want}${_l} "; done
+    if [ ! -f "$f" ]; then
+        for _l in "$@"; do printf '%s|0|0\n' "$_l"; done
+        return 0
+    fi
+    # NOTE: the accumulators must not be named i/o — awk forbids one name being
+    # both a scalar and an array, and the BEGIN loop already uses i as a counter.
+    awk -F'|' -v win="$win" -v now="$now" -v want="$want" '
+        BEGIN { n = split(want, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") { W[a[i]] = 1; ord[++m] = a[i] } }
+        { t = $1 + 0; if (t < now - win || t > now) next
+          if ($2 in W) { accI[$2] += $3; accO[$2] += $4 } }
+        END { for (k = 1; k <= m; k++) printf "%s|%d|%d\n", ord[k], accI[ord[k]] + 0, accO[ord[k]] + 0 }
+    ' "$f" 2>/dev/null
+}
+
+# 24 space-separated bucket totals across the window, oldest first.
+history_hourly() {
+    local win="$1" now="$2"
+    local f="$HISTORY_DIR/global.tsv"
+    [ -f "$f" ] || { local _o="0" _i; for (( _i = 1; _i < 24; _i++ )); do _o="${_o} 0"; done; printf '%s' "$_o"; return 0; }
+    awk -F'|' -v win="$win" -v now="$now" '
+        BEGIN { n = 24; w = win / n; for (i = 0; i < n; i++) b[i] = 0 }
+        { s = now - win; t = $1 + 0
+          if (t < s || t > now) next
+          idx = int((t - s) / w)
+          if (idx < 0) idx = 0
+          if (idx > n - 1) idx = n - 1
+          b[idx] += $2 + $3 }
+        END { out = ""; for (i = 0; i < n; i++) out = out (i ? " " : "") b[i] + 0; print out }
+    ' "$f" 2>/dev/null
+}
+
+# "label|bytes", heaviest first. One awk plus one sort, whatever the user count.
+history_top() {
+    local win="$1" now="$2" n="${3:-3}"
+    local f="$HISTORY_DIR/users.tsv"
+    [ -f "$f" ] || return 0
+    awk -F'|' -v win="$win" -v now="$now" '
+        { t = $1 + 0; if (t < now - win || t > now) next; s[$2] += $3 + $4 }
+        END { for (k in s) printf "%s|%d\n", k, s[k] }
+    ' "$f" 2>/dev/null | sort -t'|' -k2 -rn | head -n "$n"
+}
+
+# Drop samples older than the retention window. This is the only read-modify-
+# write against the store, so it takes a lock — on fd 8, NOT the fd 9 that
+# save_traffic holds, because bash file descriptors are process-global and
+# reusing 9 here would close the traffic lock mid-critical-section. The
+# `command -v flock` guard matters too: on a host without flock (busybox) the
+# unguarded idiom just returns having silently pruned nothing.
+history_prune() {
+    local days="$1" now="${2:-$(date +%s)}"
+    local cutoff=$(( now - days * 86400 ))
+    _history_init
+    local f tmp
+    for f in "$HISTORY_DIR/global.tsv" "$HISTORY_DIR/users.tsv"; do
+        [ -f "$f" ] || continue
+        exec 8>"$HISTORY_DIR/.history.lock" 2>/dev/null || continue
+        if command -v flock &>/dev/null; then
+            flock -w 5 8 2>/dev/null || { exec 8>&- 2>/dev/null; continue; }
+        fi
+        tmp=$(mktemp "$HISTORY_DIR/.prune.XXXXXX" 2>/dev/null)
+        if [ -n "$tmp" ]; then
+            chmod 600 "$tmp" 2>/dev/null
+            awk -F'|' -v c="$cutoff" '$1 + 0 >= c' "$f" > "$tmp" 2>/dev/null
+            mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+        fi
+        exec 8>&- 2>/dev/null
+    done
+}
+# <<< TG_HISTORY_END
+
+# >>> TG_REPORT_BEGIN
+# The periodic report.
+#
+# The previous version sent the same three facts every interval — uptime, live
+# connections, and two LIFETIME cumulative totals — whether or not anything had
+# happened. That is monotonically less informative as uptime grows: the numbers
+# only ever get bigger, and it can never answer "how much moved today, and is
+# that more or less than yesterday?".
+#
+# This reports a WINDOW instead, and adapts: with no traffic at all in the
+# window it collapses to a one-line heartbeat, because a full dashboard of
+# zeroes every six hours is noise. TELEGRAM_REPORT_DETAIL forces either
+# behaviour ('full' or 'summary'); 'auto' decides from the data.
+_tg_periodic_report() {
+    local now="$1" win="${2:-86400}"
+    local _ci _co _pi _po _pct _peak _avg _n _span
+    IFS='|' read -r _ci _co _pi _po _pct _peak _avg _n _span <<< "$(history_summary "$win" "$now")"
+    _ci=${_ci:-0}; _co=${_co:-0}
+
+    local _label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
+    local _up _live
+    _up=$(get_uptime)
+    _live=$(get_active_connections)
+    local _detail="${TELEGRAM_REPORT_DETAIL:-auto}"
+    local _idle=0
+    [ "$_ci" -eq 0 ] && [ "$_co" -eq 0 ] && _idle=1
+
+    if [ "$_detail" = "summary" ] || { [ "$_detail" = "auto" ] && [ "$_idle" -eq 1 ]; }; then
+        if [ "$_idle" -eq 1 ]; then
+            tg_send_kb "🟢 *${_label}* — alive, idle ${_n:-0} sample(s)\n⏱ $(format_duration "${_up:-0}") · 👥 ${_live} live" \
+                "$(_tg_button_bar "${TELEGRAM_CHAT_ID}")"
+        else
+            tg_send_kb "📊 *${_label}*\n\n🟢 Running · ⏱ $(format_duration "${_up:-0}")\n👥 ${_live} live · 📈 24h ↓ $(format_bytes "$_co") ↑ $(format_bytes "$_ci")" \
+                "$(_tg_button_bar "${TELEGRAM_CHAT_ID}")"
+        fi
+        return 0
+    fi
+
+    local _msg="📊 *Report — $(_esc "$_label")*\n\n"
+    _msg+="🟢 Running · ⏱ $(format_duration "${_up:-0}") · 👥 ${_live} live\n"
+    _msg+="📈 24h ↓ $(format_bytes "$_co") ↑ $(format_bytes "$_ci")$(_tg_pct_str "$_pct")\n"
+    _msg+="⚡ Peak $(format_bytes "$_peak")/s · Avg $(format_bytes "$_avg")/s\n"
+
+    local _spark
+    _spark=$(_tg_spark "$(history_hourly "$win" "$now")")
+    if [ -n "$_spark" ]; then
+        # Fenced for monospace alignment. Deliberately NOT passed through _esc:
+        # inside a fence nothing is escaped, so escaping would render literal
+        # backslashes.
+        _msg+="\n\`\`\`\n${_spark}\n\`\`\`\n"
+    fi
+
+    local _top _l _b _first=1
+    _top=$(history_top "$win" "$now" 3)
+    if [ -n "$_top" ]; then
+        _msg+="🏆 "
+        while IFS='|' read -r _l _b; do
+            [ -z "$_l" ] && continue
+            [ "$_first" -eq 1 ] || _msg+=" · "
+            _first=0
+            _msg+="$(_esc "$_l") $(format_bytes "${_b:-0}")"
+        done <<< "$_top"
+        _msg+="\n"
+    fi
+
+    # Quota pressure and expiry reuse the same 80/100 thresholds and the same
+    # ISO parser as the enforcement loop, so the two cannot disagree.
+    local _q80=0 _exp3=0 _seclabel _secret _created _en _mc _mi _q _ex _notes _adtag
+    if [ -f "$SECRETS_FILE" ]; then
+        while IFS='|' read -r _seclabel _secret _created _en _mc _mi _q _ex _notes _adtag || [ -n "$_seclabel" ]; do
+            [[ "$_seclabel" =~ ^# ]] && continue
+            [ -z "$_seclabel" ] && continue
+            if [ -n "$_q" ] && [ "${_q:-0}" -gt 0 ] 2>/dev/null; then
+                local _used=$(( ${_cum_user_in[$_seclabel]:-0} + ${_cum_user_out[$_seclabel]:-0} ))
+                [ $(( (_used * 100) / _q )) -ge 80 ] && _q80=$(( _q80 + 1 ))
+            fi
+            if [ -n "$_ex" ] && [ "$_ex" != "0" ]; then
+                local _ee
+                _ee=$(_iso_to_epoch "$_ex")
+                if [ "${_ee:-0}" -gt 0 ] 2>/dev/null; then
+                    local _dl=$(( (_ee - now) / 86400 ))
+                    [ "$_dl" -ge 0 ] && [ "$_dl" -le 3 ] && _exp3=$(( _exp3 + 1 ))
+                fi
+            fi
+        done < "$SECRETS_FILE"
+    fi
+    [ "$_q80" -gt 0 ] && _msg+="⚠️ ${_q80} user(s) at ≥80% quota\n"
+    [ "$_exp3" -gt 0 ] && _msg+="⏳ ${_exp3} expiring within 3 days\n"
+
+    tg_send_kb "$_msg" "$(_tg_button_bar "${TELEGRAM_CHAT_ID}")"
+}
+# <<< TG_REPORT_END
+
 # Cleanup trap for temp files
 trap _cleanup EXIT
 
@@ -14511,6 +14932,10 @@ _report_interval=$(( ${TELEGRAM_INTERVAL:-6} * 3600 ))
 _last_health=0
 _last_traffic_update=0
 _last_enforcement=0
+# Seeded to now so the first tick after a restart does not immediately write a
+# near-empty bucket for the seconds since the process started.
+_last_hist_sample=$(date +%s)
+_last_hist_prune=$(date +%s)
 declare -A _prev_log_in=()
 declare -A _prev_log_out=()
 
@@ -14522,6 +14947,22 @@ while true; do
     if [ $((_now - _last_traffic_update)) -ge 60 ] && is_running; then
         _last_traffic_update=$_now
         update_traffic 2>/dev/null
+
+        # Flush a history sample on its own coarser timer, so a bucket spans the
+        # sample interval rather than the 60s tick. This sits before the
+        # TELEGRAM_ENABLED guard below, so history keeps recording even while
+        # the bot is switched off.
+        if [ "${TELEGRAM_HISTORY_ENABLED:-true}" = "true" ] && \
+           [ $(( _now - _last_hist_sample )) -ge $(( ${TELEGRAM_HISTORY_INTERVAL_MIN:-5} * 60 )) ]; then
+            _last_hist_sample=$_now
+            history_sample "$_now"
+        fi
+        if [ "${TELEGRAM_HISTORY_ENABLED:-true}" = "true" ] && \
+           [ $(( _now - _last_hist_prune )) -ge 86400 ]; then
+            _last_hist_prune=$_now
+            history_prune "${TELEGRAM_HISTORY_RETENTION_DAYS:-7}" "$_now" &
+        fi
+
         [ "${PORTAL_ENABLED:-false}" = "true" ] && "${INSTALL_DIR}/mtproxymax" portal generate &>/dev/null
 
         # Connection log: append per-user activity (delta = current cumulative - previous cumulative)
@@ -14631,10 +15072,7 @@ while true; do
     if [ $((_now - _last_report)) -ge $_report_interval ]; then
         _last_report=$_now
         if is_running; then
-            _ri=0 _ro=0 _rc=0
-            read -r _ri _ro _rc <<< "$(get_stats)" || true
-            _up=$(get_uptime)
-            tg_send "📊 *Periodic Report*\n\n🟢 Running | ⏱ $(format_duration ${_up:-0})\n👥 Connections: ${_rc}\n📊 ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})"
+            _tg_periodic_report "$_now" 86400
         fi
     fi
 
@@ -16537,6 +16975,7 @@ show_cli_help() {
     echo -e "    ${GREEN}telegram status${NC}         Show Telegram bot status"
     echo -e "    ${GREEN}telegram test${NC}           Send test message"
     echo -e "    ${GREEN}telegram sync-commands${NC}  Refresh the in-app command menu"
+    echo -e "    ${GREEN}telegram history${NC}        Traffic history: status | prune | reset"
     echo -e "    ${GREEN}broadcast <msg>${NC}         Broadcast announcement via Telegram bot"
     echo -e "    ${GREEN}telegram disable${NC}        Disable Telegram"
     echo -e "    ${GREEN}telegram remove${NC}         Remove Telegram bot"
@@ -18222,6 +18661,7 @@ cli_main() {
                 setup)   check_root; telegram_setup_wizard ;;
                 sync-commands) check_root; telegram_sync_commands ;;
                 commands) telegram_print_commands "${2:-admin}" ;;
+                history) telegram_history_cmd "${2:-status}";;
                 test)    telegram_test_message ;;
                 status|"")
                     if [ "$TELEGRAM_ENABLED" != "true" ]; then
