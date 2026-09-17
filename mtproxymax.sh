@@ -2238,7 +2238,7 @@ secret_list() {
         # Format creation date (use printf builtin when available, fallback to date)
         local created_fmt
         created_fmt=$(printf '%(%Y-%m-%d)T' "$created" 2>/dev/null) || \
-            created_fmt=$(date -d "@${created}" '+%Y-%m-%d' 2>/dev/null || echo "unknown")
+            created_fmt=$(_local_from_epoch "$created" '+%Y-%m-%d') || created_fmt="unknown"
 
         # Get per-user traffic from batch-loaded arrays
         local u_in=${_batch_cum_in["$label"]:-0}
@@ -2836,9 +2836,7 @@ secret_bulk_extend() {
 
         local new_epoch=$((base_epoch + days * 86400))
         local new_date
-        new_date=$(date -u -d "@${new_epoch}" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
-        new_date=$(date -u -r "$new_epoch" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
-        new_date=$(python3 -c "import datetime;print(datetime.datetime.utcfromtimestamp(${new_epoch}).strftime('%Y-%m-%dT23:59:59Z'))" 2>/dev/null)
+        new_date=$(_utc_from_epoch "$new_epoch" '+%Y-%m-%dT23:59:59Z')
         [ -z "$new_date" ] && continue
 
         SECRETS_EXPIRES[$i]="$new_date"
@@ -3050,9 +3048,7 @@ secret_extend() {
 
     local new_epoch=$((base_epoch + days * 86400))
     local new_date
-    new_date=$(date -u -d "@${new_epoch}" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
-    new_date=$(date -u -r "$new_epoch" '+%Y-%m-%dT23:59:59Z' 2>/dev/null) || \
-    new_date=$(python3 -c "import datetime;print(datetime.datetime.utcfromtimestamp(${new_epoch}).strftime('%Y-%m-%dT23:59:59Z'))" 2>/dev/null)
+    new_date=$(_utc_from_epoch "$new_epoch" '+%Y-%m-%dT23:59:59Z')
 
     [ -z "$new_date" ] && { log_error "Failed to compute new expiry date"; return 1; }
 
@@ -3394,7 +3390,7 @@ secret_info() {
     draw_header "SECRET: ${label}"
     echo ""
     echo -e "  ${BOLD}Status:${NC}      $([ "$enabled" = "true" ] && echo "${GREEN}active${NC}" || echo "${RED}disabled${NC}")"
-    echo -e "  ${BOLD}Created:${NC}     $(date -d "@${created}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$created" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$created")"
+    echo -e "  ${BOLD}Created:${NC}     $(_local_from_epoch "$created" '+%Y-%m-%d %H:%M' || echo "$created")"
     [ -n "$notes" ] && echo -e "  ${BOLD}Notes:${NC}       ${notes}"
     local adtag="${SECRETS_AD_TAGS[$idx]:-}"
     if [ -n "$adtag" ]; then
@@ -3608,7 +3604,7 @@ secret_archive_list() {
     echo ""
     while IFS='|' read -r label key created enabled _mc _mi _q _ex notes; do
         [ -z "$label" ] && continue
-        local date_str; date_str=$(date -d "@${created}" '+%Y-%m-%d' 2>/dev/null || echo "$created")
+        local date_str; date_str=$(_local_from_epoch "$created" '+%Y-%m-%d') || date_str="$created"
         echo -e "  ${DIM}${SYM_OK}${NC} ${BOLD}${label}${NC}  created: ${date_str}$([ -n "$notes" ] && echo "  ${DIM}— ${notes}${NC}")"
     done < "$archive_file"
     echo ""
@@ -3874,7 +3870,7 @@ profile_list() {
         [ -z "$name" ] && continue
         local ts="" date_str="unknown"
         [ -f "${PROFILES_DIR}/${name}/.timestamp" ] && ts=$(<"${PROFILES_DIR}/${name}/.timestamp")
-        [ -n "$ts" ] && date_str=$(date -d "@${ts}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$ts" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$ts")
+        [ -n "$ts" ] && { date_str=$(_local_from_epoch "$ts" '+%Y-%m-%d %H:%M') || date_str="$ts"; }
         echo -e "  ${BOLD}${name}${NC}  ${DIM}saved: ${date_str}${NC}"
     done <<< "$dirs"
     echo ""
@@ -4402,9 +4398,8 @@ secret_check_quota_resets() {
     today_day=$(date +%d | sed 's/^0//')
     today_month=$(date +%Y-%m)
     # Last day of current month (GNU date or BSD fallback)
-    last_day=$(date -d "$(date +%Y-%m-01) +1 month -1 day" +%d 2>/dev/null | sed 's/^0//')
-    [ -z "$last_day" ] && last_day=$(date -v1d -v+1m -v-1d +%d 2>/dev/null | sed 's/^0//')
-    [ -z "$last_day" ] && last_day=31
+    # 10# forces base-10, so months 08 and 09 are not read as invalid octal.
+    last_day=$(_last_day_of_month "$(date +%Y)" "$((10#$(date +%m)))")
 
     mkdir -p "$(dirname "$_QUOTA_RESET_LOG")"
     touch "$_QUOTA_RESET_LOG"; chmod 600 "$_QUOTA_RESET_LOG"
@@ -6665,10 +6660,10 @@ run_guest() {
     
     if [[ "${limit_str,,}" =~ ^([0-9]+)h(ours?)?$ ]]; then
         local hours="${BASH_REMATCH[1]}"
-        expires=$(date -u -d "+${hours} hours" "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date -u -r $(( $(date +%s) + hours*3600 )) "+%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+        expires=$(_utc_now_plus "$((hours * 3600))" "+%Y-%m-%dT%H:%M:%SZ")
     elif [[ "${limit_str,,}" =~ ^([0-9]+)d(ays?)?$ ]]; then
         local days="${BASH_REMATCH[1]}"
-        expires=$(date -u -d "+${days} days" "+%Y-%m-%d" 2>/dev/null || date -u -r $(( $(date +%s) + days*86400 )) "+%Y-%m-%d" 2>/dev/null || echo "")
+        expires=$(_utc_now_plus "$((days * 86400))" "+%Y-%m-%d")
     elif [[ "${limit_str,,}" =~ ^([0-9]+)(mb|gb|kb|b)$ ]]; then
         quota=$(parse_human_bytes "$limit_str") || {
             log_error "Invalid quota format: ${limit_str}"
@@ -7605,7 +7600,7 @@ run_onboard_wizard() {
 
     local expires=""
     if [ "$days" -gt 0 ] 2>/dev/null; then
-        expires=$(date -d "+${days} days" "+%Y-%m-%d" 2>/dev/null || date -v+${days}d "+%Y-%m-%d" 2>/dev/null || echo "")
+        expires=$(_utc_now_plus "$((days * 86400))" "+%Y-%m-%d")
     fi
 
     log_info "Creating user '${label}' with limits: conns=${conns}, quota=${quota}, expires=${expires:-none}..."
@@ -9609,6 +9604,62 @@ _iso_to_epoch() {
     echo "0"
 }
 
+# Format an epoch as a UTC string, in-process.
+# The usual `date -d "@epoch" || date -r epoch` chain cannot work on Alpine: GNU takes
+# -d, BSD takes -r, and busybox takes neither (its -r reads the timestamp of a *file*).
+# Both branches therefore failed and callers silently ended up with an empty expiry.
+# bash's printf %()T needs no external command at all; the date branches remain as a
+# fallback for bash builds without it.
+# $3 is "utc" (default) or "local". Callers that deliberately render local time keep
+# doing so — this only changes how the value is obtained, never which timezone it is in.
+_epoch_to_date() {
+    # Callers pass a `date`-style format, where a leading + is a prefix meaning "this is a
+    # format". printf %()T has no such prefix — leaving it in emits a literal '+'. Strip it
+    # for printf and put it back for the date fallbacks.
+    local _epoch="${1:-}" _fmt="${2#+}" _zone="${3:-utc}" _out=""
+    [ -n "$_epoch" ] && [ -n "$_fmt" ] || return 1
+    if [ "$_zone" = "utc" ]; then
+        _out=$(TZ=UTC printf "%(${_fmt})T" "$_epoch" 2>/dev/null) ||
+            _out=$(date -u -d "@${_epoch}" "+${_fmt}" 2>/dev/null) ||
+            _out=$(date -u -r "$_epoch" "+${_fmt}" 2>/dev/null) ||
+            _out=""
+    else
+        _out=$(printf "%(${_fmt})T" "$_epoch" 2>/dev/null) ||
+            _out=$(date -d "@${_epoch}" "+${_fmt}" 2>/dev/null) ||
+            _out=$(date -r "$_epoch" "+${_fmt}" 2>/dev/null) ||
+            _out=""
+    fi
+    [ -n "$_out" ] || return 1
+    printf '%s\n' "$_out"
+}
+
+_utc_from_epoch() { _epoch_to_date "$1" "$2" utc; }
+_local_from_epoch() { _epoch_to_date "$1" "$2" local; }
+
+# Epoch $1 seconds from now, formatted as UTC in $2.
+_utc_now_plus() {
+    _utc_from_epoch "$(($(date +%s) + ${1:-0}))" "${2:-}"
+}
+
+# Number of days in a month. `date -d "$(date +%Y-%m-01) +1 month -1 day"` is GNU-only
+# and the BSD fallback failed as well, so last_day stayed at a hardcoded 31 — meaning the
+# monthly quota reset fired on the wrong day for every month shorter than 31 days.
+_last_day_of_month() {
+    local _year="${1:-}" _month="${2:-}"
+    case "$_month" in
+    1 | 3 | 5 | 7 | 8 | 10 | 12) echo 31 ;;
+    4 | 6 | 9 | 11) echo 30 ;;
+    2)
+        if { [ $((_year % 4)) -eq 0 ] && [ $((_year % 100)) -ne 0 ]; } || [ $((_year % 400)) -eq 0 ]; then
+            echo 29
+        else
+            echo 28
+        fi
+        ;;
+    *) echo 31 ;;
+    esac
+}
+
 # Get container uptime
 get_proxy_uptime() {
     if ! is_proxy_running; then
@@ -10295,7 +10346,12 @@ voucher_redeem() {
     local now_iso; now_iso=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
     local exp_iso="never"
     if [ "${days:-0}" -gt 0 ]; then
-        exp_iso=$(date -u -d "+${days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
+        # Never fall back to "now": that silently produced a voucher which expired the
+        # instant it was redeemed instead of after its stated duration.
+        exp_iso=$(_utc_now_plus "$((days * 86400))" '+%Y-%m-%dT%H:%M:%SZ') || {
+            log_error "Failed to compute voucher expiry"
+            return 1
+        }
     fi
     # Mark voucher redeemed atomically
     awk -F'|' -v c="$target" -v u="$label" -v t="$now_iso" 'BEGIN{OFS="|"} $1==c && $7=="ACTIVE"{$7="REDEEMED"; $9=u; $10=t} {print}' "$VOUCHERS_FILE" > "${VOUCHERS_FILE}.tmp" && mv "${VOUCHERS_FILE}.tmp" "$VOUCHERS_FILE"
