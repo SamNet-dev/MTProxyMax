@@ -78,6 +78,7 @@ PASSED=0
 FAILED=0
 SKIPPED=0
 QUARANTINED=0
+STALE_QUARANTINE=0
 FAILED_TESTS=()
 SUMMARY_ROWS=""
 
@@ -122,6 +123,13 @@ for t in "${SELECTED[@]}"; do
         if [ "$n_pass" -eq 0 ]; then
             printf '      ! no PASS lines reported — did the test actually run?\n'
         fi
+        # A quarantined test that now passes means the entry is stale. That is the way a
+        # quarantine list rots: the upstream fix lands, the entry stays, and the suite
+        # keeps advertising a failure it no longer has. Report it so it gets removed.
+        if is_quarantined "$t"; then
+            STALE_QUARANTINE=$((STALE_QUARANTINE + 1))
+            printf '      ! still listed as quarantined, but passing — the entry can be removed\n'
+        fi
     fi
 
     SUMMARY_ROWS="${SUMMARY_ROWS}| \`${t}\` | ${status} | ${n_pass} | ${n_fail} | ${elapsed}s |
@@ -129,8 +137,8 @@ for t in "${SELECTED[@]}"; do
 done
 
 printf '\n%s\n' "----------------------------------------"
-printf 'total=%d  passed=%d  failed=%d  skipped=%d  quarantined=%d\n' \
-    "${#SELECTED[@]}" "$PASSED" "$FAILED" "$SKIPPED" "$QUARANTINED"
+printf 'total=%d  passed=%d  failed=%d  skipped=%d  quarantined=%d  stale-quarantine=%d\n' \
+    "${#SELECTED[@]}" "$PASSED" "$FAILED" "$SKIPPED" "$QUARANTINED" "$STALE_QUARANTINE"
 
 if [ "${#FAILED_TESTS[@]}" -gt 0 ]; then
     printf '\nfailed:\n'
@@ -142,6 +150,12 @@ if [ "$QUARANTINED" -gt 0 ]; then
     printf '  - %s\n' "${QUARANTINE//,/ }"
 fi
 
+if [ "$STALE_QUARANTINE" -gt 0 ]; then
+    printf '\n%d quarantined test(s) now pass — remove those entries from MTPROXYMAX_QUARANTINE:\n' \
+        "$STALE_QUARANTINE"
+    printf '  see the "! still listed as quarantined" markers above\n'
+fi
+
 # Surface the same summary in the GitHub Actions job page when running under CI.
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
@@ -151,8 +165,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         echo "|---|---|---|---|---|"
         printf '%s' "$SUMMARY_ROWS"
         echo
-        printf '**total=%d passed=%d failed=%d skipped=%d quarantined=%d**\n' \
-            "${#SELECTED[@]}" "$PASSED" "$FAILED" "$SKIPPED" "$QUARANTINED"
+        printf '**total=%d passed=%d failed=%d skipped=%d quarantined=%d stale-quarantine=%d**\n' \
+            "${#SELECTED[@]}" "$PASSED" "$FAILED" "$SKIPPED" "$QUARANTINED" "$STALE_QUARANTINE"
     } >>"$GITHUB_STEP_SUMMARY"
 fi
 

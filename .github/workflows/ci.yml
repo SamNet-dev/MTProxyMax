@@ -81,18 +81,25 @@ jobs:
             install: 'apt-get update -qq && apt-get install -y -qq bash diffutils'
             quarantine: 'test_client_mss.sh'
           # Alpine carries three known failures, all busybox divergences on a platform the
-          # README lists as supported:
-          #   test_client_mss.sh   — broken on every distro (asserts on the stdout of a
-          #                          function that writes to a file); see below.
-          #   test_traffic_reset.sh— busybox `flock` has no -w, so `flock -w 5 9` fails;
-          #                          `command -v flock` succeeds, so the guard never fires.
-          #                          Two call sites fail OPEN and silently write nothing.
-          #   test_guest.sh        — `date -d "+24 hours"` is invalid on busybox and the
-          #                          `date -r <epoch>` fallback also fails (busybox -r means
-          #                          reference file), so expiring guest links get no expiry.
-          # test_client_mss.sh is quarantined everywhere because it is a broken test, not a
-          # platform difference — it asserts on the stdout of generate_telemt_config, which
-          # takes a destination path and writes ${CONFIG_DIR}/config.toml instead.
+          # README lists as supported. Each is fixed by an open PR — remove the entry once
+          # that PR has merged:
+          #   test_client_mss.sh    — broken on every distro, not a platform difference: it
+          #                           asserts on the stdout of generate_telemt_config, which
+          #                           takes a destination path and writes
+          #                           ${CONFIG_DIR}/config.toml instead. Fixed by #145.
+          #   test_traffic_reset.sh — busybox `flock` has no -w, so `flock -w 5 9` fails
+          #                           while `command -v flock` succeeds, so the guard never
+          #                           fires. Two call sites failed OPEN and silently wrote
+          #                           nothing. Fixed by #146.
+          #   test_guest.sh         — `date -d "+24 hours"` is invalid on busybox and the
+          #                           `date -r <epoch>` fallback fails as well (busybox -r
+          #                           means reference file), so expiring guest links got no
+          #                           expiry. Fixed by #148.
+          #
+          # Leaving an entry in place after its fix has landed is harmless — a quarantined
+          # test that passes is reported as PASS — so this list is correct in any merge
+          # order. run-all.sh flags such entries as "! still listed as quarantined" so a
+          # stale one is visible rather than silently ignored.
           - image: alpine:3.20
             install: 'apk add --no-cache bash'
             quarantine: 'test_client_mss.sh,test_traffic_reset.sh,test_guest.sh'
