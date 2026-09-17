@@ -11584,6 +11584,39 @@ load_traffic() {
     fi
 }
 
+# Duplicated from the manager script: this heredoc has a quoted delimiter, so it is
+# written out literally and the daemon never sources the manager. Without these two
+# definitions save_traffic() below calls an undefined _lock_fd, gets 127 back, and
+# returns before writing any counters — which is exactly the accounting loss this
+# change set out to fix. Keep identical to _flock_supports_wait/_lock_fd above.
+_FLOCK_WAIT_SUPPORTED=""
+_flock_supports_wait() {
+    if [ -z "$_FLOCK_WAIT_SUPPORTED" ]; then
+        if command -v flock >/dev/null 2>&1 &&
+            (exec 9>/dev/null; flock -w 0 9) 2>/dev/null; then
+            _FLOCK_WAIT_SUPPORTED="yes"
+        else
+            _FLOCK_WAIT_SUPPORTED="no"
+        fi
+    fi
+    [ "$_FLOCK_WAIT_SUPPORTED" = "yes" ]
+}
+
+# Take an exclusive lock on the already-open file descriptor $1.
+# Returns 0 when the lock is held, non-zero when it could not be taken. A host with no
+# flock at all proceeds unlocked, which is the long-standing behaviour in that case.
+_lock_fd() {
+    local _fd="${1:?file descriptor required}"
+    command -v flock >/dev/null 2>&1 || return 0
+    if _flock_supports_wait; then
+        flock -w 5 "$_fd" 2>/dev/null
+    else
+        # busybox: -w is unavailable, so take the lock without waiting rather than not
+        # locking at all. Losing the 5s grace period is far better than skipping the lock.
+        flock -n "$_fd" 2>/dev/null
+    fi
+}
+
 save_traffic() {
     local _tdir="${INSTALL_DIR}/relay_stats"
     mkdir -p "$_tdir" 2>/dev/null
@@ -12208,7 +12241,9 @@ while true; do
     _now=$(date +%s)
     if [ $((_now - _last_traffic_update)) -ge 60 ] && is_running; then
         _last_traffic_update=$_now
-        update_traffic 2>/dev/null
+        # Deliberately not silenced: save_traffic() reports a failed lock on stderr, and
+        # discarding that is what let unpersisted counters go unnoticed in production.
+        update_traffic
         [ "${PORTAL_ENABLED:-false}" = "true" ] && "${INSTALL_DIR}/mtproxymax" portal generate &>/dev/null
 
         # Connection log: append per-user activity (delta = current cumulative - previous cumulative)
