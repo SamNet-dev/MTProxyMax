@@ -18,6 +18,24 @@ INSTALL_DIR="$TEST_TMPDIR/install"
 mkdir -p "$INSTALL_DIR/relay_stats/history"
 OFFSET_FILE="$INSTALL_DIR/relay_stats/tg_offset"
 
+# busybox ships a flock applet that accepts -n but NOT -w. Putting one on PATH reproduces
+# Alpine's behaviour here, so the history-prune regression is caught on every platform
+# rather than only on busybox hosts.
+FAKEBIN="$TEST_TMPDIR/bin"
+mkdir -p "$FAKEBIN"
+cat >"$FAKEBIN/flock" <<'FLOCK_EOF'
+#!/bin/bash
+for _a in "$@"; do
+    case "$_a" in
+    -w*) echo "flock: unrecognized option: w" >&2; exit 1 ;;
+    esac
+done
+exit 0
+FLOCK_EOF
+chmod +x "$FAKEBIN/flock"
+PATH="$FAKEBIN:$PATH"
+export PATH
+
 MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "${BASH_SOURCE[0]}")/../mtproxymax.sh"
 set +e
 trap 'rm -rf "$TEST_TMPDIR"' EXIT

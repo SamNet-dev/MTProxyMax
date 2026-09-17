@@ -14795,9 +14795,18 @@ history_top() {
 # Drop samples older than the retention window. This is the only read-modify-
 # write against the store, so it takes a lock — on fd 8, NOT the fd 9 that
 # save_traffic holds, because bash file descriptors are process-global and
-# reusing 9 here would close the traffic lock mid-critical-section. The
-# `command -v flock` guard matters too: on a host without flock (busybox) the
-# unguarded idiom just returns having silently pruned nothing.
+# reusing 9 here would close the traffic lock mid-critical-section.
+#
+# A `command -v flock` guard is not sufficient on its own: busybox ships a flock
+# applet, so the guard passes, and it is specifically `-w` that busybox lacks.
+# The lock call then failed, this loop `continue`d, and the prune did nothing at
+# all on Alpine — silently, so global.tsv grew without bound and the retention
+# setting was quietly not honoured. Fall back to `-n`, which busybox does
+# support, rather than trusting that the binary's presence implies the flags.
+#
+# `exec` here is redirection-only, so it applies to the whole shell: a trailing
+# 2>/dev/null would silence stderr for the rest of the process, not just for
+# this line, which is why none of these carry one.
 history_prune() {
     local days="$1" now="${2:-$(date +%s)}"
     local cutoff=$(( now - days * 86400 ))
@@ -14805,9 +14814,11 @@ history_prune() {
     local f tmp
     for f in "$HISTORY_DIR/global.tsv" "$HISTORY_DIR/users.tsv"; do
         [ -f "$f" ] || continue
-        exec 8>"$HISTORY_DIR/.history.lock" 2>/dev/null || continue
+        exec 8>"$HISTORY_DIR/.history.lock" || continue
         if command -v flock &>/dev/null; then
-            flock -w 5 8 2>/dev/null || { exec 8>&- 2>/dev/null; continue; }
+            flock -w 5 8 2>/dev/null ||
+                flock -n 8 2>/dev/null ||
+                { exec 8>&-; continue; }
         fi
         tmp=$(mktemp "$HISTORY_DIR/.prune.XXXXXX" 2>/dev/null)
         if [ -n "$tmp" ]; then
@@ -14815,7 +14826,7 @@ history_prune() {
             awk -F'|' -v c="$cutoff" '$1 + 0 >= c' "$f" > "$tmp" 2>/dev/null
             mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
         fi
-        exec 8>&- 2>/dev/null
+        exec 8>&-
     done
 }
 # <<< TG_HISTORY_END
