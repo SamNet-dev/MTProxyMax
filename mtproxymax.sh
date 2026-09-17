@@ -485,16 +485,31 @@ validate_port() {
     [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
 }
 
+# Is anything listening on the given TCP port?
+# Returns 0 when something is listening, 1 otherwise — including when neither ss nor
+# netstat is installed, which is the case on a stock Debian or Fedora (iproute2 is not in
+# the base image) and on Alpine unless busybox-extras was added. Both tools put the local
+# address in column 4 of `-tln` output, so one awk serves either.
+_port_listening() {
+    local _port="${1:?port required}"
+    local _out=""
+    if command -v ss &>/dev/null; then
+        _out=$(ss -tln 2>/dev/null) || _out=""
+    elif command -v netstat &>/dev/null; then
+        _out=$(netstat -tln 2>/dev/null) || _out=""
+    else
+        return 1
+    fi
+    printf '%s\n' "$_out" | awk '{print $4}' | grep -cE "[:.]${_port}\$" >/dev/null
+}
+
 # Check if port is available
+# Note the historical behaviour preserved here: with no tool to ask, the port is reported
+# as available. That keeps the pre-flight check in run_proxy_container from blocking starts
+# on hosts where nothing can answer, rather than silently deciding the opposite.
 is_port_available() {
     local port="$1"
-    if command -v ss &>/dev/null; then
-        ! ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"
-    elif command -v netstat &>/dev/null; then
-        ! netstat -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"
-    else
-        return 0
-    fi
+    ! _port_listening "$port"
 }
 
 # Check if running as root
@@ -1642,7 +1657,18 @@ get_proxy_stats() {
     bytes_in=$(echo "$stats" | awk '/mtproxymax-in/ {print $2; exit}')
     bytes_out=$(echo "$stats" | awk '/mtproxymax-out/ {print $2; exit}')
     local connections
-    connections=$(ss -tn state established 2>/dev/null | grep -c ":${port} " || echo "0")
+    # Established connections to this port. ss and netstat need different patterns: ss is
+    # invoked with a state filter and prints no State column, while netstat prints one.
+    # With neither tool installed the count is unknown and reported as 0, which is what
+    # this returned unconditionally before (ss is absent on a stock Debian, Fedora and
+    # Alpine, so the fallback below is what makes this work on a stock host at all).
+    if command -v ss &>/dev/null; then
+        connections=$(ss -tn state established 2>/dev/null | grep -c ":${port} " || echo "0")
+    elif command -v netstat &>/dev/null; then
+        connections=$(netstat -tn 2>/dev/null | grep -cE "[:.]${port}[[:space:]].*ESTABLISHED" || echo "0")
+    else
+        connections=0
+    fi
 
     echo "${bytes_in:-0} ${bytes_out:-0} ${connections:-0}"
 }
@@ -3306,7 +3332,7 @@ run_doctor() {
         local _cfg; _cfg=$(_mktemp) || true
         if [ -n "$_cfg" ]; then
             printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TELEGRAM_BOT_TOKEN" > "$_cfg"
-            if curl -s --max-time 5 -K "$_cfg" 2>/dev/null | grep -q '"ok":true'; then
+            if curl -s --max-time 5 -K "$_cfg" 2>/dev/null | grep -c '"ok":true' >/dev/null; then
                 echo -e "  ${GREEN}${SYM_CHECK}${NC} Telegram bot reachable"
             else
                 echo -e "  ${YELLOW}!${NC}  Telegram bot unreachable (can't reach api.telegram.org)"
@@ -3811,7 +3837,7 @@ port_check() {
     # Test 2: external reachability via TLS handshake to self
     local result
     result=$(curl -sv --connect-timeout 5 --max-time 10 "https://${ip}:${PROXY_PORT}" 2>&1) || true
-    if echo "$result" | grep -q "Connected to.*${PROXY_PORT}"; then
+    if echo "$result" | grep -c "Connected to.*${PROXY_PORT}" >/dev/null; then
         echo -e "  ${GREEN}${SYM_CHECK}${NC} Port ${PROXY_PORT} is reachable from outside"
     else
         echo -e "  ${RED}${SYM_CROSS}${NC} Port ${PROXY_PORT} is NOT reachable from outside"
@@ -4798,9 +4824,9 @@ run_verify() {
 
     _check "Docker installed"           "command -v docker"
     _check "Engine container running"   "is_proxy_running"
-    _check "Port ${PROXY_PORT} listening" "ss -tln 2>/dev/null | grep -qE ':${PROXY_PORT}[[:space:]]'"
+    _check "Port ${PROXY_PORT} listening" "_port_listening ${PROXY_PORT}"
     _check "Metrics endpoint responds"  "curl -fsS --max-time 3 http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics -o /dev/null"
-    _check "TLS handshake on proxy port" "echo | timeout 5 openssl s_client -connect 127.0.0.1:${PROXY_PORT} -servername ${PROXY_DOMAIN:-cloudflare.com} 2>&1 | grep -q 'CONNECTED'"
+    _check "TLS handshake on proxy port" "echo | timeout 5 openssl s_client -connect 127.0.0.1:${PROXY_PORT} -servername ${PROXY_DOMAIN:-cloudflare.com} 2>&1 | grep -c 'CONNECTED' >/dev/null"
     _check "Domain ${PROXY_DOMAIN:-cloudflare.com} reachable" "curl -fsS --max-time 5 -o /dev/null https://${PROXY_DOMAIN:-cloudflare.com}"
     _check "api.telegram.org reachable" "curl -fsS --max-time 5 -o /dev/null https://api.telegram.org"
     _check "At least one active secret"  "[ ${#SECRETS_LABELS[@]} -gt 0 ]"
@@ -4810,7 +4836,7 @@ run_verify() {
     if [ "$TELEGRAM_ENABLED" = "true" ] && [ -n "$TELEGRAM_BOT_TOKEN" ]; then
         local _cfg; _cfg=$(_mktemp)
         printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TELEGRAM_BOT_TOKEN" > "$_cfg"
-        _check "Telegram bot token valid" "curl -fsS --max-time 5 -K '$_cfg' | grep -q '\"ok\":true'"
+        _check "Telegram bot token valid" "curl -fsS --max-time 5 -K '$_cfg' | grep -c '\"ok\":true' >/dev/null"
         rm -f "$_cfg"
     fi
 
@@ -5027,7 +5053,7 @@ run_digest() {
     echo ""
 
     local _running=false _pstatus="stopped" uptime_str="—"
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^${CONTAINER_NAME}$" >/dev/null; then
         _running=true
         _pstatus="running"
         local started_at
@@ -5825,12 +5851,12 @@ apply_qos_rules() {
     [ -z "${PROXY_PORT:-}" ] && return 0
     if command -v iptables >/dev/null 2>&1; then
         # Robustly delete any existing mtproxy_qos rules cleanly via line numbers
-        while iptables -S INPUT 2>/dev/null | grep -q "mtproxy_qos_in"; do
+        while iptables -S INPUT 2>/dev/null | grep -c "mtproxy_qos_in" >/dev/null; do
             local num
             num=$(iptables -L INPUT --line-numbers -n 2>/dev/null | awk '/mtproxy_qos_in/{print $1; exit}')
             [ -n "$num" ] && iptables -D INPUT "$num" 2>/dev/null || break
         done
-        while iptables -S FORWARD 2>/dev/null | grep -q "mtproxy_qos_out"; do
+        while iptables -S FORWARD 2>/dev/null | grep -c "mtproxy_qos_out" >/dev/null; do
             local num
             num=$(iptables -L FORWARD --line-numbers -n 2>/dev/null | awk '/mtproxy_qos_out/{print $1; exit}')
             [ -n "$num" ] && iptables -D FORWARD "$num" 2>/dev/null || break
@@ -6198,7 +6224,7 @@ run_ddns() {
                 -H "Authorization: Bearer ${DDNS_CF_TOKEN}" \
                 -H "Content-Type: application/json" \
                 --data "{\"type\":\"A\",\"name\":\"${DDNS_RECORD_NAME}\",\"content\":\"${cur_ip}\",\"ttl\":120,\"proxied\":false}" --max-time 10)
-            if echo "$update_res" | grep -q '"success":true'; then
+            if echo "$update_res" | grep -c '"success":true' >/dev/null; then
                 log_success "Cloudflare DDNS record '${DDNS_RECORD_NAME}' successfully updated to ${cur_ip}!"
             else
                 log_error "Failed to update Cloudflare DNS record."
@@ -7288,7 +7314,7 @@ run_chaos_test() {
         status|"")
             echo -e "\n  ── 🌪️ ${BOLD}Sandboxed Chaos Engineering & Stress Resilience Benchmarker${NC} ──\n"
             local st="${GREEN}NORMAL (No chaos faults injected)${NC}"
-            if command -v tc >/dev/null 2>&1 && tc qdisc show dev lo 2>/dev/null | grep -q "netem"; then
+            if command -v tc >/dev/null 2>&1 && tc qdisc show dev lo 2>/dev/null | grep -c "netem" >/dev/null; then
                 st="${RED}CHAOS INJECTED (Active netem fault simulation)${NC}"
             fi
             echo -e "  ${BOLD}Status:${NC}        ${st}"
@@ -7387,7 +7413,7 @@ run_backup_send_tg() {
     log_info "Sending backup archive (${target_file}) to Telegram admin chat..."
     local res
     res=$(curl -s --max-time 60 -F "chat_id=${TELEGRAM_CHAT_ID}" -F "document=@${target_file}" -F "caption=📦 MTProxyMax Server Backup (${SCRIPT_NAME} v${VERSION})" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument")
-    if echo "$res" | grep -q '"ok":true'; then
+    if echo "$res" | grep -c '"ok":true' >/dev/null; then
         log_success "Backup archive successfully dispatched to Telegram chat!"
     else
         log_error "Failed to send backup archive via Telegram API."
@@ -8694,7 +8720,7 @@ run_bbr() {
             modprobe tcp_bbr 2>/dev/null || true
             local avail_cc
             avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "")
-            if ! echo "$avail_cc" | grep -qw "bbr"; then
+            if ! echo "$avail_cc" | grep -cw "bbr" >/dev/null; then
                 log_warn "Kernel does not report 'bbr' in available congestion controls. Attempting sysctl anyway..."
             fi
             local sysctl_content="# MTProxyMax BBRv3 & ECN High-Throughput Optimization\n"
@@ -9442,7 +9468,7 @@ _start_all_instances() {
     for i in "${!INSTANCE_PORTS[@]}"; do
         [ "${INSTANCE_ENABLED[$i]}" = "true" ] || continue
         local cname="mtproxymax-${INSTANCE_PORTS[$i]}"
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cname}$" && continue
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^${cname}$" >/dev/null && continue
         # Regenerate instance config dynamically (straight to its own file — never via config.toml)
         local inst_config="${CONFIG_DIR}/config-${INSTANCE_PORTS[$i]}.toml"
         PROXY_PORT="${INSTANCE_PORTS[$i]}"
@@ -9522,7 +9548,7 @@ _engine_config_in_sync() {
 # Is a secondary instance container currently up? A stopped instance has no
 # engine to reload and must never be treated as an out-of-sync one.
 _instance_container_running() {
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^$1$"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^$1$" >/dev/null
 }
 
 # Hot-reload: rewrite config.toml and let the engine pick it up (no restart, no dropped connections)
@@ -9898,7 +9924,7 @@ show_geoblock_menu() {
                 read -r code
                 code=$(echo "$code" | tr '[:upper:]' '[:lower:]')
                 if [[ "$code" =~ ^[a-z]{2}$ ]]; then
-                    if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
+                    if echo ",$BLOCKLIST_COUNTRIES," | grep -c ",${code}," >/dev/null; then
                         log_info "Country '${code}' is already in the list"
                     else
                         _ensure_ipset && _download_country_cidrs "$code" && {
@@ -9919,7 +9945,7 @@ show_geoblock_menu() {
                 read -r rm_code
                 rm_code=$(echo "$rm_code" | tr '[:upper:]' '[:lower:]')
                 if [[ "$rm_code" =~ ^[a-z]{2}$ ]]; then
-                    if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${rm_code},"; then
+                    if echo ",$BLOCKLIST_COUNTRIES," | grep -c ",${rm_code}," >/dev/null; then
                         BLOCKLIST_COUNTRIES=$(echo ",$BLOCKLIST_COUNTRIES," | sed "s/,${rm_code},/,/g;s/^,//;s/,$//")
                         save_settings
                         _remove_country_rules "$rm_code"
@@ -10756,7 +10782,7 @@ FLEET_JSON
             [ -z "$_rhost" ] && continue
             local _remote_json
             _remote_json=$(ssh -i "${REPLICATION_SSH_KEY_PATH}" -p "$_rport" -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=accept-new "${_ruser}@${_rhost}" "${INSTALL_DIR}/mtproxymax fleet collect >/dev/null 2>&1 && cat ${FLEET_DATA_DIR}/node-*.json 2>/dev/null | head -1" 2>/dev/null || true)
-            if [ -n "$_remote_json" ] && echo "$_remote_json" | grep -q '"hostname":'; then
+            if [ -n "$_remote_json" ] && echo "$_remote_json" | grep -c '"hostname":' >/dev/null; then
                 echo "$_remote_json" > "${FLEET_DATA_DIR}/node-slave-${_rlbl}.json" 2>/dev/null || true
                 chmod 600 "${FLEET_DATA_DIR}/node-slave-${_rlbl}.json" 2>/dev/null || true
             fi
@@ -10933,7 +10959,7 @@ backup_cloud_push() {
                 return 1
             fi
             local caption="☁️ <b>MTProxyMax Daily Backup (${VERSION})</b>%0A🖥 Host: $(hostname 2>/dev/null || echo unknown)%0A📅 Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            if curl -s --max-time 120 -F "chat_id=${chat}" -F "document=@${latest_tar}" -F "caption=${caption}" -F "parse_mode=HTML" "https://api.telegram.org/bot${token}/sendDocument" | grep -q '"ok":true'; then
+            if curl -s --max-time 120 -F "chat_id=${chat}" -F "document=@${latest_tar}" -F "caption=${caption}" -F "parse_mode=HTML" "https://api.telegram.org/bot${token}/sendDocument" | grep -c '"ok":true' >/dev/null; then
                 log_success "Backup tarball uploaded to Telegram Admin Chat (${chat}) successfully!"
                 return 0
             else
@@ -11013,7 +11039,7 @@ telegram_send_message() {
     local rc=$?
     rm -f "$_cfg"
     [ "${rc:--1}" -ne 0 ] && return 1
-    echo "$response" | grep -q '"ok":true' && return 0
+    echo "$response" | grep -c '"ok":true' >/dev/null && return 0
     return 1
 }
 
@@ -11153,7 +11179,7 @@ telegram_setup_wizard() {
     local response
     response=$(curl -s --max-time 10 -K "$_cfg" 2>/dev/null) || true
     rm -f "$_cfg"
-    if ! echo "$response" | grep -q '"ok":true'; then
+    if ! echo "$response" | grep -c '"ok":true' >/dev/null; then
         log_error "Invalid token — bot not found"
         return 1
     fi
@@ -11979,7 +12005,7 @@ _process_cmd() {
             local health_out
             health_out=$("${INSTALL_DIR}/mtproxymax" health 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -20) || true
             local status_icon="🟢"
-            echo "$health_out" | grep -qi "fail\|error\|down" && status_icon="🔴"
+            echo "$health_out" | grep -ci "fail\|error\|down" >/dev/null && status_icon="🔴"
             tg_send "${status_icon} *Health Check*\n\n\`\`\`\n${health_out}\n\`\`\`"
             ;;
         /mp_traffic|/mp_traffic@*)
@@ -12138,8 +12164,9 @@ _process_cmd() {
     esac
 }
 
-# Cleanup trap for temp files
-trap _cleanup EXIT
+# No cleanup trap here. _cleanup is defined in the manager, not in this generated script,
+# and nothing here appends to _TEMP_FILES — so `trap _cleanup EXIT` could only ever print
+# "_cleanup: command not found" on every daemon exit while cleaning nothing.
 
 # Main loop
 echo "$$" > "$PID_FILE"
@@ -12777,7 +12804,7 @@ do_sync() {
     fi
 
     # itemize-changes: '<' prefix means file was sent to remote
-    if echo "$output" | grep -qE '^[<>]'; then
+    if echo "$output" | grep -cE '^[<>]' >/dev/null; then
         log_sync "CHANGE [${label}/${host}]: Files synced"
         if [ "${REPLICATION_RESTART_ON_CHANGE}" = "true" ]; then
             local r_out r_rc
@@ -13169,7 +13196,7 @@ replication_test() {
             "${REPLICATION_SSH_USER}@${host}" \
             "docker ps --filter name=mtproxymax --format '{{.Status}}' 2>/dev/null; echo ssh_ok" 2>&1)
 
-        if echo "$result" | grep -q "ssh_ok"; then
+        if echo "$result" | grep -c "ssh_ok" >/dev/null; then
             local docker_status
             docker_status=$(echo "$result" | grep -v "ssh_ok" | head -1)
             echo -e "${GREEN}SSH OK${NC} | docker: ${docker_status:-not running}"
@@ -13942,7 +13969,7 @@ instance_list() {
             local port="${INSTANCE_PORTS[$i]}" label="${INSTANCE_LABELS[$i]}"
             local cname="mtproxymax-${port}"
             local st
-            docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${cname}$" && st="${GREEN}running${NC}" || st="${RED}stopped${NC}"
+            docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^${cname}$" >/dev/null && st="${GREEN}running${NC}" || st="${RED}stopped${NC}"
             echo -e "  ${BOLD}${label}:${NC} port ${port} (container: ${cname})"
             echo -e "    Status: ${st} | Metrics: ${INSTANCE_METRICS_PORTS[$i]}"
         done
@@ -13990,7 +14017,7 @@ restore_backup() {
     [ ! -f "$backup_file" ] && { log_error "File not found: ${backup_file}"; return 1; }
 
     # Validate backup
-    if ! tar tzf "$backup_file" 2>/dev/null | grep -q "settings.conf"; then
+    if ! tar tzf "$backup_file" 2>/dev/null | grep -c "settings.conf" >/dev/null; then
         log_error "Invalid backup file (missing settings.conf)"
         return 1
     fi
@@ -15600,7 +15627,7 @@ cli_main() {
                     check_root
                     local code=$(echo "$2" | tr '[:upper:]' '[:lower:]')
                     if [[ "$code" =~ ^[a-z]{2}$ ]]; then
-                        if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
+                        if echo ",$BLOCKLIST_COUNTRIES," | grep -c ",${code}," >/dev/null; then
                             log_info "Country '${code^^}' is already blocked"
                         else
                             _ensure_ipset && _download_country_cidrs "$code" && {
@@ -15618,7 +15645,7 @@ cli_main() {
                     check_root
                     local code=$(echo "$2" | tr '[:upper:]' '[:lower:]')
                     if [[ "$code" =~ ^[a-z]{2}$ ]]; then
-                        if echo ",$BLOCKLIST_COUNTRIES," | grep -q ",${code},"; then
+                        if echo ",$BLOCKLIST_COUNTRIES," | grep -c ",${code}," >/dev/null; then
                             BLOCKLIST_COUNTRIES=$(echo ",$BLOCKLIST_COUNTRIES," | sed "s/,${code},/,/g;s/^,//;s/,$//")
                             save_settings
                             _remove_country_rules "$code"
@@ -16998,7 +17025,7 @@ show_main_menu() {
         draw_box_top "$w"
 
         local _running=false
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$"; then
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^${CONTAINER_NAME}$" >/dev/null; then
             _running=true
         fi
 
@@ -17088,7 +17115,7 @@ show_proxy_menu() {
         draw_header "PROXY MANAGEMENT"
         echo ""
         local _pstatus
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONTAINER_NAME}$" && _pstatus="running" || _pstatus="stopped"
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -c "^${CONTAINER_NAME}$" >/dev/null && _pstatus="running" || _pstatus="stopped"
         echo -e "  Status: $(draw_status "$_pstatus")"
         echo ""
         echo -e "  ${DIM}[1]${NC} Start proxy"
