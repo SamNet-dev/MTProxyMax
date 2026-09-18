@@ -245,7 +245,14 @@ cap_leaks() {
                 [ "$cap" = "superadmin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             a:enable|a:disable|a:rotate|c:enable|c:disable|c:rotate|u:l|u:s|t|t:w|t:u|y|y:e|s)
                 [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
-            n|m|m:h)
+            # Per-secret management. Every one of these mirrors an admin-tier
+            # CLI verb (secret setlimit / extend / quota-reset / template apply),
+            # and none of them is reachable by a reseller, whose only surface
+            # stays the voucher commands.
+            u:m|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
+            c:setq|c:setc|c:seti|c:setx|c:setr|c:tpl)
+                [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
+            n|m|m:h|p|p:x)
                 [ "$cap" = "public" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             *)
                 printf 'unclassified:%s\n' "$key" ;;

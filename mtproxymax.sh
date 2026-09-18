@@ -12791,6 +12791,19 @@ _tg_pending_clear() {
     return 0
 }
 
+# Arm a prompt and tell the chat about it. The prompt is SENT rather than used to
+# edit the card that spawned it, because that card is what the operator wants to
+# come back to when they cancel.
+_tg_pending_prompt() {
+    local chat="$1" verb="$2" target="$3" text="$4"
+    _tg_pending_set "$chat" "$verb" "$target" || return 1
+    _UI_ROLE="$(_check_tg_role "$chat")"
+    _kb_reset
+    _kb_row "❌ Cancel|p:x"
+    tg_send_to_kb "$chat" "${text}\n\n_Send it as a normal message. Any /command cancels._" "$(_kb_json)"
+    return 0
+}
+
 # Give an armed prompt first refusal on an incoming message. Returns 0 when the
 # message was consumed as an answer, 1 when the caller must dispatch it.
 _tg_pending_try() {
@@ -12817,6 +12830,21 @@ _tg_pending_run() {
                 return 1
             fi
             tg_send_to "$chat" "✅ Secret *$(_esc "$value")* created.$(_tg_new_secret_link "$value")"
+            ;;
+        setq|setc|seti|setx|setr)
+            # target is the label. It came out of a file on disk, so it is
+            # re-validated here exactly as it was on the way in.
+            if ! _cb_label_ok "$target" || ! _cb_secret_exists "$target"; then
+                tg_send_to "$chat" "❌ That secret no longer exists."
+                return 1
+            fi
+            _CB_TOAST=""
+            if _cb_apply_limit "$verb" "$target" "$value"; then
+                tg_send_to "$chat" "✅ *$(_esc "$target")*: ${_CB_TOAST}"
+            else
+                tg_send_to "$chat" "❌ ${_CB_TOAST}"
+                return 1
+            fi
             ;;
         *)
             tg_send_to "$chat" "❌ That prompt is no longer valid."
@@ -12877,7 +12905,25 @@ c:enable=admin
 c:disable=admin
 c:rotate=admin
 a:remove=superadmin
-c:remove=superadmin"
+c:remove=superadmin
+u:m=admin
+e=admin
+e:q=admin
+e:c=admin
+e:i=admin
+e:x=admin
+e:r=admin
+e:n=admin
+e:a=admin
+e:t=admin
+c:setq=admin
+c:setc=admin
+c:seti=admin
+c:setx=admin
+c:setr=admin
+c:tpl=admin
+p=public
+p:x=public"
 
 _tg_cap_rank() {
     case "$1" in
@@ -13121,8 +13167,13 @@ _cb_render_user_detail() {
         _msg+="⏳ no expiry\n"
     fi
 
+    local _reset; _reset=$(_cb_quota_reset_day "$label")
+    [ -n "$_notes" ] && _msg+="📝 $(_esc "$_notes")\n"
+    [ -n "$_reset" ] && _msg+="🔁 Quota resets on day ${_reset}\n"
+
     _kb_reset
     _kb_row "🔄 Refresh|u:s:${label}:${page}" "🔗 Link|u:k:${label}"
+    _kb_row "$(_kb_spec "⚙️ Manage" "u" "m" "$label" "$page")"
     if [ "$_en" = "true" ]; then
         _cb_can a disable && _kb_row "⏸ Disable|a:disable:${label}" "$(_cb_can a rotate && printf '♻️ Rotate|a:rotate:%s' "$label")"
     else
@@ -13131,6 +13182,170 @@ _cb_render_user_detail() {
     _cb_can a remove && _kb_row "🗑 Remove|a:remove:${label}"
     _kb_row "◀ Back|u:l:${page}"
     _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# "Label|payload", or "" when the payload cannot be encoded. One payload over
+# 64 bytes makes Telegram reject the WHOLE keyboard with a 400, so a button that
+# silently disappears is strictly better than a card that fails to render — but
+# only where the caller says so in the body. See _cb_render_tpl_picker.
+_kb_spec() {
+    local lbl="$1" p
+    p=$(_cb_enc "$2" "$3" "$4" "$5") || return 0
+    printf '%s|%s' "$lbl" "$p"
+}
+
+# Human text for a preset value. Values travel the wire in their raw form (the
+# callback charset has no room for "+", "∞" or a space), so the pretty form is
+# always computed here rather than stored.
+_cb_preset_label() {
+    case "$1" in
+        q|c|i) [ "$2" = "0" ] && printf '∞' || printf '%s' "$2" ;;
+        x)     [ "$2" = "0" ] && printf 'never' || printf '+%sd' "$2" ;;
+        *)     printf '%s' "$2" ;;
+    esac
+}
+
+_cb_render_user_manage() {
+    local label="$1" page="${2:-0}"
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _line _l _s _created _en _mc _mi _q _ex _notes _adtag
+    _line=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1)
+    IFS='|' read -r _l _s _created _en _mc _mi _q _ex _notes _adtag <<< "$_line"
+
+    local _reset; _reset=$(_cb_quota_reset_day "$label")
+
+    local _msg="⚙️ *Manage $(_esc "$label")*\n\n"
+    if [ -n "$_q" ] && [ "$_q" -gt 0 ] 2>/dev/null; then
+        _msg+="🧮 Quota: $(format_bytes "$_q")\n"
+    else
+        _msg+="🧮 Quota: unlimited\n"
+    fi
+    _msg+="🔌 Max connections: $([ -n "$_mc" ] && [ "$_mc" != "0" ] && printf '%s' "$_mc" || printf 'unlimited')\n"
+    _msg+="🌐 Max IPs: $([ -n "$_mi" ] && [ "$_mi" != "0" ] && printf '%s' "$_mi" || printf 'unlimited')\n"
+    _msg+="⏳ Expires: $(_cb_expiry_text "$_ex")\n"
+    _msg+="🔁 Quota reset: $([ -n "$_reset" ] && printf 'day %s' "$_reset" || printf 'off')\n"
+    _msg+="📝 Note: $([ -n "$_notes" ] && printf '%s' "$(_esc "$_notes")" || printf '_none_')\n"
+    _msg+="🏷 Ad-tag: $([ -n "$_adtag" ] && printf '`%s`' "$(_esc "$_adtag")" || printf '_global default_')"
+    # The expiry picker's relative presets and its "never" option mean different
+    # CLI verbs, so say which is which rather than making the operator guess.
+
+    _kb_reset
+    _kb_row "$(_kb_spec "🧮 Quota" "e" "q" "$label" "$page")" \
+            "$(_kb_spec "🔌 Conns" "e" "c" "$label" "$page")"
+    _kb_row "$(_kb_spec "🌐 IPs" "e" "i" "$label" "$page")" \
+            "$(_kb_spec "⏳ Expiry" "e" "x" "$label" "$page")"
+    _kb_row "$(_kb_spec "🔁 Reset day" "e" "r" "$label" "$page")" \
+            "$(_kb_spec "🧩 Template" "e" "t" "$label" "$page")"
+    _kb_row "$(_kb_spec "📝 Note" "e" "n" "$label" "$page")" \
+            "$(_kb_spec "🏷 Ad-tag" "e" "a" "$label" "$page")"
+    _kb_row "◀ Back|u:s:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The picker for one limit field. Every button commits through the per-field
+# CLI verb — never `secret setlimits`, whose zeroes mean "unlimited" and would
+# silently clear the fields the operator did not touch.
+_cb_render_limits() {
+    local field="$1" label="$2" page="${3:-0}" act title presets
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    case "$field" in
+        q) act="setq"; title="Quota";               presets="5G 10G 50G 100G 0" ;;
+        c) act="setc"; title="Max connections";     presets="5 10 20 50 0" ;;
+        i) act="seti"; title="Max IPs";             presets="1 3 5 10 0" ;;
+        x) act="setx"; title="Expiry";              presets="7 30 90 365 0" ;;
+        r) act="setr"; title="Quota reset day";     presets="1 15 28 off" ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+
+    local _msg="🧮 *${title} — $(_esc "$label")*\n\n"
+    case "$field" in
+        q) _msg+="_Pick a cap, or ∞ for no limit._" ;;
+        c) _msg+="_Telegram opens ~3 connections per device, so a cap under 5 will break a single client._" ;;
+        i) _msg+="_An IP cap is a weak anti-sharing measure: mobile clients roam between cells._" ;;
+        x) _msg+="_Relative presets extend from today. 'never' clears the date._" ;;
+        r) _msg+="_Resets the traffic counter on that day of each month._" ;;
+    esac
+
+    _kb_reset
+    # Two per row. Built as an array rather than a space-joined string: a spec
+    # containing a space would otherwise split into two bogus buttons.
+    local -a _specs=()
+    local _v _spec
+    for _v in $presets; do
+        _spec=$(_kb_spec "$(_cb_preset_label "$field" "$_v")" "c" "$act" "$label" "$_v")
+        [ -n "$_spec" ] && _specs+=("$_spec")
+        if [ "${#_specs[@]}" -eq 2 ]; then _kb_row "${_specs[@]}"; _specs=(); fi
+    done
+    [ "${#_specs[@]}" -gt 0 ] && _kb_row "${_specs[@]}"
+    # A value the presets do not cover. It arms a pending prompt rather than
+    # committing, because the grammar has no room for free text.
+    _kb_row "$(_kb_enc_custom "$label" "$field")"
+    _kb_row "◀ Back|u:m:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# "✏️ Custom…" — arms a pending prompt for a value the presets do not cover. The
+# field rides in the page slot so the flow keeps the label as its target, which
+# is what every other payload in this file does.
+_kb_enc_custom() {
+    local label="$1" field="$2" p
+    p=$(_cb_enc "e" "z" "$label" "$field") || return 0
+    printf '✏️ Custom…|%s' "$p"
+}
+
+# Templates that can be applied to this secret. A name that cannot survive the
+# callback charset is listed as text rather than as a button: _kb_spec drops
+# what it cannot encode, and a template the operator can see is unavailable
+# beats one that silently is not there.
+_cb_render_tpl_picker() {
+    local label="$1" page="${2:-0}" f="${INSTALL_DIR}/templates.conf" _t _rest
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _msg="🧩 *Apply a template to $(_esc "$label")*\n\n"
+    _kb_reset
+    local _n=0 _skipped=""
+    if [ -f "$f" ]; then
+        while IFS='|' read -r _t _rest; do
+            [ -z "$_t" ] && continue
+            if ! _cb_label_ok "$_t"; then _skipped+="${_t} "; continue; fi
+            _kb_row "$(_kb_spec "📋 $_t" "c" "tpl" "$label" "$_t")"
+            _n=$(( _n + 1 ))
+        done < "$f"
+    fi
+    if [ -n "$_skipped" ]; then
+        _msg+="_Not shown (name has characters a button cannot carry): ${_skipped}_\n\n"
+    fi
+    if [ "$_n" -eq 0 ]; then
+        _msg+="_Nothing to apply. Save one with_ \`mtproxymax template save <name> <conns> <ips> <quota> <expires>\`_._\n"
+    fi
+    _kb_row "◀ Back|u:m:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_quota_reset_day() {
+    local f="${INSTALL_DIR}/secrets_quota_reset.conf" _l _d
+    [ -f "$f" ] || return 0
+    while IFS='|' read -r _l _d; do
+        [ "$_l" = "$1" ] && { printf '%s' "$_d"; return 0; }
+    done < "$f"
+}
+
+_cb_expiry_text() {
+    local ex="$1" e days
+    if [ -z "$ex" ] || [ "$ex" = "0" ]; then printf 'never'; return 0; fi
+    e=$(_iso_to_epoch "$ex")
+    if [ "${e:-0}" -gt 0 ] 2>/dev/null; then
+        days=$(( (e - $(date +%s)) / 86400 ))
+        if [ "$days" -lt 0 ]; then printf 'expired (%s)' "$ex"
+        else printf 'in %sd (%s)' "$days" "$ex"; fi
+    else
+        printf '%s' "$ex"
+    fi
 }
 
 _cb_render_confirm() {
@@ -13162,16 +13377,118 @@ _cb_render_confirm() {
     _cb_edit "$_msg" "$(_kb_json)"
 }
 
+# Arm a pending prompt for a limit value outside the preset set. The verb in the
+# store is the same one the preset commits through, so the typed value lands on
+# exactly the same validated path — the prompt is not a second, laxer way in.
+_cb_prompt_custom_limit() {
+    local label="$1" field="$2" act="" title=""
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    case "$field" in
+        q) act="setq"; title="quota (e.g. 250M, 2G, or 0 for unlimited)" ;;
+        c) act="setc"; title="maximum connections (a whole number, 0 for unlimited)" ;;
+        i) act="seti"; title="maximum unique IPs (a whole number, 0 for unlimited)" ;;
+        x) act="setx"; title="expiry as days from today (0 for never) or YYYY-MM-DD" ;;
+        r) act="setr"; title="quota reset day (1-28, or 'off')" ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+    _tg_pending_prompt "$_CB_CHAT" "$act" "$label" \
+        "✏️ *Custom ${act#set} for $(_esc "$label")*\n\nSend the value as a normal message — ${title}."
+    _CB_TOAST="Send the value"
+}
+
+# Validate and apply one limit change. Sets _CB_TOAST on failure; returns 0 when
+# the CLI accepted it.
+#
+# The value arrives through callback_data (attacker-controlled) or through the
+# pending store (a file on disk), so it is validated here rather than trusted.
+# Every field goes through the per-field `secret setlimit` verb and never
+# `secret setlimits`, whose zeroes read as "unlimited" and would silently clear
+# the fields the operator did not touch.
+_cb_apply_limit() {
+    local verb="$1" label="$2" value="$3"
+    case "$verb" in
+        setq)
+            [[ "$value" =~ ^[0-9]+[KMGTkmgt]?$ ]] || { _CB_TOAST="Enter a size like 250M or 2G"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" quota "$value" &>/dev/null \
+                && { _CB_TOAST="Quota updated"; return 0; }
+            ;;
+        setc)
+            { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 1000000 ]; } || { _CB_TOAST="Enter a number up to 1000000"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" conns "$value" &>/dev/null \
+                && { _CB_TOAST="Connection limit updated"; return 0; }
+            ;;
+        seti)
+            { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 100000 ]; } || { _CB_TOAST="Enter a number up to 100000"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" ips "$value" &>/dev/null \
+                && { _CB_TOAST="IP limit updated"; return 0; }
+            ;;
+        setx)
+            if [ "$value" = "0" ]; then
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" expires 0 &>/dev/null \
+                    && { _CB_TOAST="Expiry cleared"; return 0; }
+            elif [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" expires "$value" &>/dev/null \
+                    && { _CB_TOAST="Expiry set to ${value}"; return 0; }
+            elif [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 3650 ]; then
+                # Relative dates are the CLI's job: it already does the calendar
+                # arithmetic, including the short-month and timezone handling.
+                "${INSTALL_DIR}/mtproxymax" secret extend "$label" "$value" &>/dev/null \
+                    && { _CB_TOAST="Extended by ${value}d"; return 0; }
+            else
+                _CB_TOAST="Enter days (1-3650), YYYY-MM-DD, or 0 for never"
+                return 1
+            fi
+            ;;
+        setr)
+            case "$value" in
+                off) ;;
+                [0-9]|[12][0-9]) ;;
+                *) _CB_TOAST="Enter a day between 1 and 28, or 'off'"; return 1 ;;
+            esac
+            "${INSTALL_DIR}/mtproxymax" secret quota-reset "$label" "$value" &>/dev/null \
+                && { _CB_TOAST="Reset day updated"; return 0; }
+            ;;
+        *) _CB_TOAST="Unknown action"; return 1 ;;
+    esac
+    _CB_TOAST="Failed — check the server log"
+    return 1
+}
+
 # Only the c: namespace mutates anything. a: just renders a confirmation, so a
 # destructive action is never one mis-tap away.
+#
+# $3 is the origin list page for the secret verbs and the VALUE for the set-*
+# verbs: the grammar allows four fields and a commit needs both, so they share
+# the slot. The cost is that a limit change forgets which list page the operator
+# came from. Putting the value in the action instead would cost more — the
+# capability table matches exact keys and is what decides whether a tap is
+# allowed at all, so a dynamic action name could not be authorised.
 _cb_exec_action() {
     local verb="$1" label="$2" page="${3:-0}" out=""
     case "$verb" in
         enable|disable|rotate|remove) ;;
+        setq|setc|seti|setx|setr) ;;
         *) _CB_TOAST="Unknown action"; return 1 ;;
     esac
+    ! _cb_label_ok "$label" && { _CB_TOAST="Invalid label"; return 1; }
     ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
-    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+    # Only the secret verbs carry a page number. Coercing unconditionally here
+    # would flatten a limit value like "10G" or "off" to 0 before it was read.
+    case "$verb" in
+        enable|disable|rotate|remove) [[ "$page" =~ ^[0-9]+$ ]] || page=0 ;;
+    esac
+
+    case "$verb" in
+        setq|setc|seti|setx|setr)
+            # Applied, then the card is redrawn. A button tap is the only caller
+            # that wants a redraw — the pending-input path shares this validation
+            # and reports back in the chat instead, which is why the write lives
+            # in _cb_apply_limit rather than here.
+            _cb_apply_limit "$verb" "$label" "$page" || return 1
+            _cb_render_user_manage "$label" 0
+            return 0
+            ;;
+    esac
 
     if [ "$verb" = "remove" ]; then
         if out=$("${INSTALL_DIR}/mtproxymax" secret remove "$label" 2>&1); then
@@ -13343,11 +13660,30 @@ _cb_dispatch() {
                 l) _cb_render_user_list "${_CB_TGT:-0}" ;;
                 s) _cb_render_user_detail "$_CB_TGT" "${_CB_PAGE:-0}" ;;
                 k) _cb_send_link "$_CB_TGT" ;;
+                m) _cb_render_user_manage "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                *) _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        e)
+            # One namespace for "edit a property of this secret". The page slot
+            # is the origin card for the pickers and the field code for the
+            # custom-value prompt, so it is read per action rather than once.
+            case "$_CB_ACT" in
+                q|c|i|x|r) _cb_render_limits "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                z) _cb_prompt_custom_limit "$_CB_TGT" "${_CB_PAGE:-}" ;;
+                t) _cb_render_tpl_picker "$_CB_TGT" "${_CB_PAGE:-0}" ;;
                 *) _CB_TOAST="Unknown action" ;;
             esac
             ;;
         a) _cb_render_confirm "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
         c) _cb_exec_action "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+        p)
+            # The prompt's own Cancel button. It clears whatever is armed for
+            # THIS chat and nothing else — _CB_CHAT comes from the callback,
+            # which Telegram authenticates, never from callback_data.
+            _tg_pending_clear "$_CB_CHAT"
+            _CB_TOAST="Cancelled"
+            ;;
         t) _cb_render_traffic "${_CB_TGT:-24h}" ;;
         y) _cb_render_engine ;;
         s) _cb_render_settings ;;
