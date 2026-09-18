@@ -26,6 +26,12 @@ for _i in $(seq 1 13); do
     printf 'user%02d|%s|1700000000|%s|0|0|0|0||\n' "$_i" "$(printf '%032d' "$_i")" "$_state" >> "$SECRETS_FILE"
 done
 
+# One well-formed template, plus one whose name can never be a button payload —
+# the second is what proves the list says so instead of dropping it silently.
+TEMPLATES_FILE="$INSTALL_DIR/templates.conf"
+printf 'vip|100|5|53687091200|2027-01-01|top tier\n' > "$TEMPLATES_FILE"
+printf 'not a button|10|2|1073741824|0|x\n' >> "$TEMPLATES_FILE"
+
 MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "${BASH_SOURCE[0]}")/../mtproxymax.sh"
 set +e
 trap 'rm -rf "$TEST_TMPDIR"' EXIT
@@ -49,7 +55,7 @@ telegram_generate_service_script
 DAEMON="$INSTALL_DIR/mtproxymax-telegram.sh"
 FNS="$TEST_TMPDIR/daemon-fns.sh"
 : > "$FNS"
-for _fn in _tg_security_log _cb_label_ok _cb_enc _cb_dec; do
+for _fn in _tg_security_log _cb_label_ok _cb_enc _cb_dec _esc _iso_to_epoch; do
     awk "/^${_fn}\\(\\)/,/^}\$/" "$DAEMON" >> "$FNS"
 done
 awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$FNS"
@@ -64,6 +70,14 @@ tg_edit_markup() { printf '%s' "$3" > "$EDIT"; }
 tg_answer_cb() { :; }
 tg_send_to() { :; }
 tg_send() { :; }
+# The server-console views read live state; the render test only cares about
+# their SHAPE, so these answer with fixed values rather than reaching for
+# docker or the metrics endpoint.
+get_uptime() { echo "98201"; }
+get_active_connections() { echo "3"; }
+get_cached_ip() { echo "203.0.113.9"; }
+is_proxy_running() { return 0; }
+get_container_uptime() { echo "98201"; }
 load_tg_settings() { :; }
 is_running() { return 1; }
 get_cached_ip() { echo "203.0.113.9"; }
@@ -84,6 +98,23 @@ render() {
         traffic)  _cb_render_traffic 24h ;;
         engine)   _cb_render_engine ;;
         settings) _cb_render_settings ;;
+        manage)   _cb_render_user_manage "${3:-user01}" "${4:-0}" ;;
+        limits_q) _cb_render_limits q "${3:-user01}" "${4:-0}" ;;
+        limits_c) _cb_render_limits c "${3:-user01}" "${4:-0}" ;;
+        limits_i) _cb_render_limits i "${3:-user01}" "${4:-0}" ;;
+        limits_x) _cb_render_limits x "${3:-user01}" "${4:-0}" ;;
+        limits_r) _cb_render_limits r "${3:-user01}" "${4:-0}" ;;
+        tpl_list)   _cb_render_tpl_list ;;
+        tpl_edit)   _cb_render_tpl_edit "${3:-vip}" 0 ;;
+        tpl_field)  _cb_render_tpl_field "${3:-vip}" "${4:-q}" ;;
+        tpl_apply)  _cb_render_tpl_apply_picker "${3:-vip}" 0 ;;
+        tpl_picker) _cb_render_tpl_picker "${3:-user01}" 0 ;;
+        tools)     _cb_render_tools ;;
+        digest)    _cb_render_digest ;;
+        upstreams) _cb_render_upstreams ;;
+        fleet)     _cb_render_fleet ;;
+        vouchers)  _cb_render_vouchers ;;
+        update)    _cb_render_update "Installed version: test" ;;
     esac
     cat "$EDIT"
 }
@@ -92,7 +123,10 @@ cbs_of() { printf '%s' "$1" | grep -o '"callback_data":"[^"]*"' | sed 's/.*:"//;
 
 echo "Telegram menu render tests"
 
-VIEWS="hub help list detail confirm traffic engine settings"
+VIEWS="hub help list detail confirm traffic engine settings manage \
+limits_q limits_c limits_i limits_x limits_r \
+tpl_list tpl_edit tpl_field tpl_apply tpl_picker \
+tools digest upstreams fleet vouchers update"
 
 # ── Every view for every role is structurally sound ──────────────────────────
 for _role in superadmin reseller operator; do

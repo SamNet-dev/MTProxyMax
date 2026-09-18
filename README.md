@@ -454,6 +454,32 @@ mtproxymax telegram sync-commands
 | `/mp_update` | Check for updates |
 | `/mp_help` | Show all commands |
 
+#### 🎛 Running the proxy from buttons
+
+Every command above also exists as a button, so day-to-day management needs no
+typing. Send any command — or tap **🏠 Menu** on any reply — to open the hub:
+
+| Section | What it covers |
+|---------|----------------|
+| 👥 **Users** | Paginated list → per-user card with live connections, traffic, quota bar, expiry, note and quota-reset day, plus link/QR, enable, disable, rotate and remove |
+| ⚙️ **Manage** (per user) | Quota, connection cap, IP cap, expiry, monthly quota-reset day, note, ad-tag, and applying a saved limit template to that user |
+| 🧩 **Templates** | Create, edit every field of, apply and delete limit templates |
+| 📈 **Traffic** | Windowed totals (24h / 7d / 30d) with a sparkline, peak and average rate, and top talkers |
+| 🖥 **Server** | Engine health, posture digest, upstreams, fleet, vouchers, updates |
+| 🛠 **Tools** | Add user, broadcast, rotate-all, lockdown, restart, apply update |
+| ⚙️ **Settings** | Port, domain, metrics port, report interval |
+
+Limits are edited with preset buttons for the common values, plus a **✏️ Custom…**
+prompt for anything else. Anything that affects live users — removing, rotating,
+disabling, restarting, locking down — asks for confirmation first, and the
+confirmation is the only path that performs the write.
+
+**Typed input.** Adding a user, setting a custom limit, saving a template name,
+broadcasting and writing a note all need text, which buttons cannot supply. Tapping
+one of those sends a prompt; your next message is taken as the answer. The prompt is
+always escapable: sending any `/command` cancels it, and so does the **❌ Cancel**
+button. An unanswered prompt expires after five minutes.
+
 **Automatic alerts & announcements:**
 - 🚨 Emergency Lockdown activated → immediate posture alert
 - 📢 System Broadcasts (`mtproxymax broadcast <msg>`) sent directly to admin chat

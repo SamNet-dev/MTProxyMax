@@ -252,6 +252,14 @@ cap_leaks() {
             u:m|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
             c:setq|c:setc|c:seti|c:setx|c:setr|c:tpl)
                 [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
+            # The server console and the template section: read-mostly views
+            # mirroring admin-tier CLI verbs.
+            y:d|y:p|y:f|y:v|y:u|g|g:a|g:b|k|k:e|k:p|k:a|k:s|k:d|k:n)
+                [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
+            # The four verbs _process_cmd re-checks superadmin for inline:
+            # /mp_remove, /mp_restart, /mp_update, /mp_lockdown.
+            a:rotall|c:rotall|a:restart|c:restart|a:update|c:update|a:lockdown|c:lockdown)
+                [ "$cap" = "superadmin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             n|m|m:h|p|p:x)
                 [ "$cap" = "public" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             *)
