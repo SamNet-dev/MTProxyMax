@@ -29,15 +29,21 @@ TESTS_FAILED=0
 assert_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then printf '  PASS  %s\n' "$name"
+    if [[ "$haystack" == *"$needle"* ]]; then printf '  PASS  %s\n' "$name"
     else TESTS_FAILED=$((TESTS_FAILED + 1)); printf '  FAIL  %s (missing %q)\n' "$name" "$needle"; fi
 }
 assert_not_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         TESTS_FAILED=$((TESTS_FAILED + 1)); printf '  FAIL  %s (unexpected %q)\n' "$name" "$needle"
     else printf '  PASS  %s\n' "$name"; fi
+}
+assert_eq() {
+    local name="$1" want="$2" got="$3"
+    TESTS_RUN=$((TESTS_RUN + 1))
+    if [ "$got" = "$want" ]; then printf '  PASS  %s\n' "$name"
+    else TESTS_FAILED=$((TESTS_FAILED + 1)); printf '  FAIL  %s (got=%q want=%q)\n' "$name" "$got" "$want"; fi
 }
 
 telegram_generate_service_script
@@ -87,7 +93,7 @@ EOF
 : > "$HISTORY_DIR/users.tsv"
 _body=$(report auto)
 assert_contains "an idle window reports a heartbeat" "idle" "$_body"
-assert_not_contains "an idle window omits the sparkline" '```' "$_body"
+assert_not_contains "an idle window omits the sparkline" '📉' "$_body"
 assert_not_contains "an idle window omits the lifetime totals line" "24h ↓" "$_body"
 assert_contains "the heartbeat still proves liveness" "alive" "$_body"
 
@@ -103,7 +109,7 @@ EOF
 _body=$(report auto)
 assert_contains "an active window reports the 24h totals" "24h ↓" "$_body"
 assert_contains "an active window reports a peak rate" "Peak" "$_body"
-assert_contains "an active window draws a sparkline" '```' "$_body"
+assert_contains "an active window draws a sparkline" '📉' "$_body"
 assert_contains "an active window names top talkers" "alice" "$_body"
 assert_not_contains "an active window is not a heartbeat" "alive, idle" "$_body"
 
@@ -111,11 +117,28 @@ assert_not_contains "an active window is not a heartbeat" "alive, idle" "$_body"
 # be the whole message. The window figure has to be present.
 assert_contains "the report is windowed, not lifetime" "24h" "$_body"
 
-# ── The sparkline is fenced, and NOT escaped ─────────────────────────────────
-# Inside a code fence nothing is escaped, so passing the bars through _esc would
-# render literal backslashes. Bars are U+2581..U+2588 and contain none.
-_spark_line=$(printf '%s' "$_body" | grep -A1 '^```$' | tail -1)
-assert_not_contains "the fenced sparkline is not Markdown-escaped" '\' "$_spark_line"
+# ── The sparkline is inline, unescaped, and never fenced ─────────────────────
+# It used to sit inside a code fence "for monospace alignment". The glyphs are
+# block elements and share an advance width in a proportional font, so the fence
+# bought nothing and cost a monospace box with a copy button on every report.
+assert_not_contains "the report draws no code box" '```' "$_body"
+# Any of the eight block glyphs counts: with a single non-zero bucket the series
+# is flat, so which glyph a bar gets depends on the scale, not on correctness.
+_spark_line=""
+while IFS= read -r _l; do
+    case "$_l" in *📉*) _spark_line="$_l"; break ;; esac
+done <<< "$_body"
+if [[ "$_spark_line" =~ ([▁▂▃▄▅▆▇█]+) ]]; then
+    _spark_glyphs="${BASH_REMATCH[1]}"
+else
+    _spark_glyphs=""
+fi
+assert_eq "the sparkline still draws bars" 1 "$([ -n "$_spark_glyphs" ] && echo 1 || echo 0)"
+# Bars are U+2581..U+2588 and contain no Markdown metacharacter, so escaping the
+# run would render literal backslashes inside it for no benefit. The check is on
+# the glyph run rather than the whole line: the body carries its newlines as
+# literal \n, so the line has backslashes in it either way.
+assert_not_contains "the inline sparkline is not Markdown-escaped" '\' "$_spark_glyphs"
 
 # ── Verbosity override ───────────────────────────────────────────────────────
 _body=$(report summary)

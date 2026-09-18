@@ -31,7 +31,7 @@ TESTS_FAILED=0
 assert_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         printf '  PASS  %s\n' "$name"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -42,7 +42,7 @@ assert_contains() {
 assert_not_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         TESTS_FAILED=$((TESTS_FAILED + 1))
         printf '  FAIL  %s (unexpected %q in %q)\n' "$name" "$needle" "$haystack"
     else

@@ -13226,6 +13226,7 @@ c:rotate=admin
 a:remove=superadmin
 c:remove=superadmin
 u:m=admin
+u:t=admin
 e=admin
 e:q=admin
 e:c=admin
@@ -13529,7 +13530,7 @@ _cb_render_user_detail() {
 
     _kb_reset
     _kb_row "🔄 Refresh|u:s:${label}:${page}" "🔗 Link|u:k:${label}"
-    _kb_row "$(_kb_spec "⚙️ Manage" "u" "m" "$label" "$page")"
+    _kb_row "$(_kb_spec "⚙️ Manage" "u" "m" "$label" "$page")" "$(_kb_spec "📊 Traffic" "u" "t" "$label" "$page")"
     if [ "$_en" = "true" ]; then
         _cb_can a disable && _kb_row "⏸ Disable|a:disable:${label}" "$(_cb_can a rotate && printf '♻️ Rotate|a:rotate:%s' "$label")"
     else
@@ -13839,6 +13840,58 @@ _cb_render_tpl_picker() {
         _msg+="_Nothing to apply. Save one with_ \`mtproxymax template save <name> <conns> <ips> <quota> <expires>\`_._\n"
     fi
     _kb_row "◀ Back|u:m:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# What one user actually moved, windowed. users.tsv has been written since the
+# history subsystem landed but nothing read it back per user — the user card
+# could only show the cumulative total since the last reset, which cannot
+# answer "how much today, and is that up or down?".
+#
+# All three windows are on one card rather than behind a window selector: three
+# totals fit comfortably, and a selector would need a fifth field the callback
+# grammar does not have, costing the origin page on the way back.
+_cb_render_user_traffic() {
+    local label="$1" page="${2:-0}"
+    ! _cb_label_ok "$label" && { _CB_TOAST="Invalid label"; return 1; }
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _now _w
+    _now=$(date +%s)
+    local _msg="📊 *Traffic — $(_esc "$label")*\n"
+    local _in _out
+    for _w in 86400 604800 2592000; do
+        # history_users already does the windowed sum in one pass; reuse it
+        # rather than adding a second reader that could drift from it.
+        IFS='|' read -r _ _in _out <<< "$(history_users "$_w" "$_now" "$label")"
+        case "$_w" in
+            86400)   _msg+="\n*Last 24h*  ↓ $(format_bytes "${_out:-0}")  ↑ $(format_bytes "${_in:-0}")" ;;
+            604800)  _msg+="\n*Last 7d*   ↓ $(format_bytes "${_out:-0}")  ↑ $(format_bytes "${_in:-0}")" ;;
+            2592000) _msg+="\n*Last 30d*  ↓ $(format_bytes "${_out:-0}")  ↑ $(format_bytes "${_in:-0}")" ;;
+        esac
+    done
+
+    local _spark
+    _spark=$(_tg_spark "$(history_user_series "$label" 86400 "$_now" 24)")
+    [ -n "$_spark" ] && _msg+="\n\n📉 ${_spark}"
+
+    # The card carries the same quota/expiry context as the user card, so an
+    # operator reading the traffic does not have to navigate back to judge it.
+    local _line _q _ex
+    _line=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1)
+    IFS='|' read -r _ _ _ _ _ _ _q _ex _ <<< "$_line"
+    if [ -n "$_q" ] && [ "$_q" -gt 0 ] 2>/dev/null; then
+        local _cum=$(( ${_cum_user_in[$label]:-0} + ${_cum_user_out[$label]:-0} ))
+        local _pct=$(( (_cum * 100) / _q ))
+        [ "$_pct" -gt 100 ] && _pct=100
+        _msg+="\n\n🧮 quota $(_cb_bar "$_pct") ${_pct}% of $(format_bytes "$_q")"
+    fi
+    [ -n "$_ex" ] && [ "$_ex" != "0" ] && _msg+="\n⏳ expires $(_cb_expiry_text "$_ex")"
+
+    _kb_reset
+    _kb_row "🔄 Refresh|u:t:${label}:${page}" "⚙️ Manage|u:m:${label}:${page}"
+    _kb_row "◀ Back|u:s:${label}:${page}"
     _cb_edit "$_msg" "$(_kb_json)"
 }
 
@@ -14177,7 +14230,13 @@ _cb_render_traffic() {
 
     local _spark
     _spark=$(_tg_spark "$(history_hourly "$_win_s" "$_now")")
-    [ -n "$_spark" ] && _msg+="\n\`\`\`\n${_spark}\n\`\`\`\n"
+    # Inline, not fenced. The glyphs are block elements, which are drawn as a
+    # tiling set and share an advance width in a proportional font, so the
+    # sparkline stays aligned without a fence — and a fence would wrap it in a
+    # monospace box with a copy button, which is the wrong shape for a chart.
+    # Not passed through _esc either: the glyphs contain no Markdown
+    # metacharacter, and escaping would render literal backslashes.
+    [ -n "$_spark" ] && _msg+="\n📉 ${_spark}\n"
 
     local _top _l _b
     _top=$(history_top "$_win_s" "$_now" 5)
@@ -14452,6 +14511,7 @@ _cb_dispatch() {
                 s) _cb_render_user_detail "$_CB_TGT" "${_CB_PAGE:-0}" ;;
                 k) _cb_send_link "$_CB_TGT" ;;
                 m) _cb_render_user_manage "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                t) _cb_render_user_traffic "$_CB_TGT" "${_CB_PAGE:-0}" ;;
                 *) _CB_TOAST="Unknown action" ;;
             esac
             ;;
@@ -14781,6 +14841,30 @@ history_hourly() {
     ' "$f" 2>/dev/null
 }
 
+# One user's series across the window, bucketed the same way history_hourly
+# buckets the global one, so _tg_spark consumes either unchanged.
+#
+# A label with no rows yields ZEROS rather than an empty string: the card draws
+# a flat line for a quiet account, and an empty string would silently drop the
+# sparkline row instead. The filter is on the label column, so one user's rows
+# can never be counted for another.
+history_user_series() {
+    local label="$1" win="$2" now="$3" n="${4:-24}"
+    local f="$HISTORY_DIR/users.tsv"
+    [ -f "$f" ] || { local _o="0" _i; for (( _i = 1; _i < n; _i++ )); do _o="${_o} 0"; done; printf '%s' "$_o"; return 0; }
+    awk -F'|' -v win="$win" -v now="$now" -v n="$n" -v who="$label" '
+        BEGIN { w = win / n; for (i = 0; i < n; i++) b[i] = 0 }
+        { if ($2 != who) next
+          s = now - win; t = $1 + 0
+          if (t < s || t > now) next
+          idx = int((t - s) / w)
+          if (idx < 0) idx = 0
+          if (idx > n - 1) idx = n - 1
+          b[idx] += $3 + $4 }
+        END { out = ""; for (i = 0; i < n; i++) out = out (i ? " " : "") b[i] + 0; print out }
+    ' "$f" 2>/dev/null || printf '0'
+}
+
 # "label|bytes", heaviest first. One awk plus one sort, whatever the user count.
 history_top() {
     local win="$1" now="$2" n="${3:-3}"
@@ -14876,12 +14960,10 @@ _tg_periodic_report() {
 
     local _spark
     _spark=$(_tg_spark "$(history_hourly "$win" "$now")")
-    if [ -n "$_spark" ]; then
-        # Fenced for monospace alignment. Deliberately NOT passed through _esc:
-        # inside a fence nothing is escaped, so escaping would render literal
-        # backslashes.
-        _msg+="\n\`\`\`\n${_spark}\n\`\`\`\n"
-    fi
+    # Inline, not fenced — see _cb_render_traffic for why the fence bought
+    # nothing. Deliberately NOT passed through _esc: the block glyphs contain no
+    # Markdown metacharacter, and escaping would render literal backslashes.
+    [ -n "$_spark" ] && _msg+="\n📉 ${_spark}\n"
 
     local _top _l _b _first=1
     _top=$(history_top "$win" "$now" 3)

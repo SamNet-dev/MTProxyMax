@@ -101,6 +101,7 @@ render() {
         engine)   _cb_render_engine ;;
         settings) _cb_render_settings ;;
         manage)   _cb_render_user_manage "${3:-user01}" "${4:-0}" ;;
+        usertraffic) _cb_render_user_traffic "${3:-user01}" "${4:-0}" ;;
         limits_q) _cb_render_limits q "${3:-user01}" "${4:-0}" ;;
         limits_c) _cb_render_limits c "${3:-user01}" "${4:-0}" ;;
         limits_i) _cb_render_limits i "${3:-user01}" "${4:-0}" ;;
@@ -125,7 +126,7 @@ cbs_of() { printf '%s' "$1" | grep -o '"callback_data":"[^"]*"' | sed 's/.*:"//;
 
 echo "Telegram menu render tests"
 
-VIEWS="hub help list detail confirm traffic engine settings manage \
+VIEWS="hub help list detail confirm traffic engine settings manage usertraffic \
 limits_q limits_c limits_i limits_x limits_r \
 tpl_list tpl_edit tpl_field tpl_apply tpl_picker \
 tools digest upstreams fleet vouchers update"

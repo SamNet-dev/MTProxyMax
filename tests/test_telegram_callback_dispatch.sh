@@ -47,7 +47,7 @@ assert_eq() {
 assert_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         printf '  PASS  %s\n' "$name"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -57,7 +57,7 @@ assert_contains() {
 assert_not_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         TESTS_FAILED=$((TESTS_FAILED + 1))
         printf '  FAIL  %s (unexpected %q in %q)\n' "$name" "$needle" "$haystack"
     else
@@ -249,7 +249,7 @@ cap_leaks() {
             # CLI verb (secret setlimit / extend / quota-reset / template apply),
             # and none of them is reachable by a reseller, whose only surface
             # stays the voucher commands.
-            u:m|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
+            u:m|u:t|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
             c:setq|c:setc|c:seti|c:setx|c:setr|c:tpl)
                 [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             # The server console and the template section: read-mostly views

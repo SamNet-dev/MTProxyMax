@@ -16,7 +16,7 @@
     <a href="#-quick-start">Quick Start</a> &bull;
     <a href="#-features">Features</a> &bull;
     <a href="#-comparison">Comparison</a> &bull;
-    <a href="#-telegram-bot-21-commands">Telegram Bot</a> &bull;
+    <a href="#-telegram-bot-27-commands">Telegram Bot</a> &bull;
     <a href="#-cli-reference">CLI Reference</a> &bull;
     <a href="#-changelog">Changelog</a> &bull;
     <a href="https://www.samnet.dev/learn/networking/mtproto-proxy-telegram/">Full Guide ↗</a>
@@ -521,6 +521,7 @@ typing. Send any command — or tap **🏠 Menu** on any reply — to open the h
 | Section | What it covers |
 |---------|----------------|
 | 👥 **Users** | Paginated list → per-user card with live connections, traffic, quota bar, expiry, note and quota-reset day, plus link/QR, enable, disable, rotate and remove |
+| 📊 **Per-user traffic** | What that user moved over the last 24h / 7d / 30d, with a 24-hour sparkline, beside their quota and expiry |
 | ⚙️ **Manage** (per user) | Quota, connection cap, IP cap, expiry, monthly quota-reset day, note, ad-tag, and applying a saved limit template to that user |
 | 🧩 **Templates** | Create, edit every field of, apply and delete limit templates |
 | 📈 **Traffic** | Windowed totals (24h / 7d / 30d) with a sparkline, peak and average rate, and top talkers |

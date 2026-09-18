@@ -48,7 +48,7 @@ TESTS_FAILED=0
 assert_not_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         TESTS_FAILED=$((TESTS_FAILED + 1))
         printf '  FAIL  %s (unexpected %q in %q)\n' "$name" "$needle" "$haystack"
     else
@@ -58,7 +58,7 @@ assert_not_contains() {
 assert_contains() {
     local name="$1" needle="$2" haystack="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
-    if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+    if [[ "$haystack" == *"$needle"* ]]; then
         printf '  PASS  %s\n' "$name"
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
@@ -87,6 +87,9 @@ for _fn in _tg_security_log _cb_label_ok _cb_enc _cb_dec _esc _process_cmd \
     awk "/^${_fn}\\(\\)/,/^}\$/" "$DAEMON" >> "$FNS"
 done
 awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$FNS"
+# The analytics views read the rolling history, so their block comes too.
+awk '/^# >>> TG_HISTORY_BEGIN$/,/^# <<< TG_HISTORY_END$/' "$DAEMON" >> "$FNS"
+awk '/^# >>> TG_REPORT_BEGIN$/,/^# <<< TG_REPORT_END$/' "$DAEMON" >> "$FNS"
 assert_eq "dispatcher extraction is valid bash" 0 \
     "$(bash -n "$FNS" 2>/dev/null; echo $?)"
 assert_eq "menu block was found in the daemon" 1 \
@@ -97,6 +100,10 @@ SENDS="$TEST_TMPDIR/sends.log"
 CALLS="$TEST_TMPDIR/calls.log"
 
 _check_tg_role() { echo "superadmin"; }
+EDIT="$TEST_TMPDIR/edit.txt"
+tg_edit() { printf '%s\n%s' "$3" "$4" > "$EDIT"; }
+tg_edit_markup() { printf '%s' "$3" > "$EDIT"; }
+tg_answer_cb() { :; }
 tg_send() { printf 'admin|%s\n' "$*" >> "$SENDS"; }
 tg_send_to() { printf '%s|%s\n' "$1" "$2" >> "$SENDS"; }
 tg_send_kb() { printf 'admin|%s\n' "$1" >> "$SENDS"; }
@@ -220,12 +227,33 @@ for _c in "/mp_help" "/mp_status" "/mp_secrets" "/mp_link" "/mp_limits" \
 done
 
 # ── The views reachable by button ────────────────────────────────────────────
+# ── The analytics views ──────────────────────────────────────────────────────
+# These two draw a sparkline. It used to sit in a fence "for monospace
+# alignment"; the glyphs are block elements, which share an advance width in a
+# proportional font, so the fence bought nothing and cost a code box.
+HISTORY="$TEST_TMPDIR/history"
+HISTORY_DIR="$HISTORY"
+mkdir -p "$HISTORY"
+_now=$(date +%s)
+for _i in $(seq 0 23); do
+    printf '%s|%s|%s|%s|-\n' "$(( _now - _i * 3600 ))" "$(( _i * 1024 ))" "$(( _i * 2048 ))" "3" >> "$HISTORY/global.tsv"
+done
+printf '%s|alice|5000|9000\n' "$_now" > "$HISTORY/users.tsv"
+
+EDIT="$TEST_TMPDIR/edit-traffic.txt"; : > "$EDIT"
+_cb_render_traffic "24h"
+assert_not_contains "the traffic view draws no code box" '```' "$(cat "$EDIT")"
+assert_contains "the traffic view still draws a sparkline" "▁" "$(cat "$EDIT")"
+
+# The periodic report is a push, not an edit — it goes out through tg_send_kb.
+: > "$SENDS"
+_tg_periodic_report "$_now" 86400
+assert_not_contains "the periodic report draws no code box" '```' "$(cat "$SENDS")"
+assert_contains "the periodic report still draws a sparkline" "▁" "$(cat "$SENDS")"
+
 for _v in hub help user_list engine settings; do
     EDIT="$TEST_TMPDIR/edit-$_v.txt"
     : > "$EDIT"
-    tg_edit() { printf '%s\n%s' "$3" "$4" > "$EDIT"; }
-    tg_edit_markup() { :; }
-    tg_answer_cb() { :; }
     _CB_CHAT="111"; _CB_MID="77"; _CB_DATA=""; _UI_ROLE="superadmin"
     case "$_v" in
         hub)          _cb_render_hub ;;
