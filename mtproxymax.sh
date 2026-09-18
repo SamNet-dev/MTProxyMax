@@ -12225,6 +12225,12 @@ _process_cmd() {
         grep -q "^${chat_id}$" "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || echo "$chat_id" >> "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || true
     fi
 
+    # An armed prompt owns the next plain message from this chat. It runs before
+    # the command table so a value can never be mistaken for a command, and it
+    # deliberately sits AFTER the role lookup — the answer still executes as the
+    # sender, never as whoever armed the prompt.
+    _tg_pending_try "$chat_id" "$text" && return
+
     # Public user or unauthenticated commands
     case "$text" in
         /start|/start@*)
@@ -12333,16 +12339,30 @@ _process_cmd() {
                     local cnt=$(echo "$text" | awk '{print $3}')
                     local qta=$(echo "$text" | awk '{print $4}')
                     local dys=$(echo "$text" | awk '{print $5}')
-                    "${INSTALL_DIR}/mtproxymax" voucher create "${cnt:-1}" "${qta:-10G}" "${dys:-30}" &>/dev/null
-                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | tail -n +3 | head -n "${cnt:-1}")
-                    tg_send "🎟 *Generated Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    [[ "$cnt" =~ ^[0-9]+$ ]] && [ "$cnt" -ge 1 ] && [ "$cnt" -le 100 ] || cnt=1
+                    # Snapshot the active count first: the vault is append-only,
+                    # so the rows past that index are exactly the new ones. The
+                    # previous version read the list back and did `tail -n +3`,
+                    # which silently showed the wrong rows.
+                    local _before; _before=$(_tg_voucher_count)
+                    "${INSTALL_DIR}/mtproxymax" voucher create "$cnt" "${qta:-10G}" "${dys:-30}" &>/dev/null
+                    local vbody; vbody=$(_tg_voucher_lines "$_before")
+                    if [ -n "$vbody" ]; then
+                        tg_send "🎟 *Generated ${cnt} voucher(s)*${vbody}"
+                    else
+                        tg_send "❌ No vouchers were created — check the server log."
+                    fi
                     ;;
                 list)
-                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | head -n 25)
-                    tg_send "📋 *Active Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    local vbody; vbody=$(_tg_voucher_lines)
+                    if [ -n "$vbody" ]; then
+                        tg_send "📋 *Active Vouchers*${vbody}"
+                    else
+                        tg_send "📋 *Active Vouchers*\n\n_None yet._"
+                    fi
                     ;;
                 *)
-                    tg_send "🎟 *Voucher Engine*\n\nUsage:\n\`/mp_voucher create <count> <quota> <days>\`\n\`/mp_voucher list\`"
+                    tg_send "🎟 *Voucher Engine*\n\n• /mp\\_voucher create <count> <quota> <days>\n• /mp\\_voucher list"
                     ;;
             esac
             ;;
@@ -12496,10 +12516,20 @@ _process_cmd() {
             ;;
         /mp_health|/mp_health@*)
             local health_out
-            health_out=$("${INSTALL_DIR}/mtproxymax" health 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -20) || true
-            local status_icon="🟢"
-            echo "$health_out" | grep -qi "fail\|error\|down" && status_icon="🔴"
-            tg_send "${status_icon} *Health Check*\n\n\`\`\`\n${health_out}\n\`\`\`"
+            health_out=$("${INSTALL_DIR}/mtproxymax" health 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -40) || true
+            local hbody
+            hbody=$(_tg_kv_lines <<< "$health_out")
+            if [ -z "$hbody" ]; then
+                # The check output is key/value today. If that ever changes, fall
+                # back to the raw lines rather than an empty reply — a failed
+                # parse must not read as "everything is fine".
+                hbody=$(while IFS= read -r _l; do
+                            [ -z "$_l" ] && continue
+                            printf '\n• %s' "$(_esc "$_l")"
+                        done <<< "$(printf '%s' "$health_out" | head -15)")
+                [ -z "$hbody" ] && hbody=$'\n⚠️ No output from the health check.'
+            fi
+            tg_send_kb "🩺 *Health Check*${hbody}" "$(_tg_button_bar "$chat_id")"
             ;;
         /mp_traffic|/mp_traffic@*)
             load_tg_settings
@@ -12523,7 +12553,12 @@ _process_cmd() {
             local update_out
             update_out=$("${INSTALL_DIR}/mtproxymax" update </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tail -5)
             if [ -n "$update_out" ]; then
-                tg_send "📋 Update check:\n\`\`\`\n${update_out}\n\`\`\`"
+                local ubody=""
+                while IFS= read -r _l; do
+                    [ -z "$_l" ] && continue
+                    ubody+="\n• $(_esc "$_l")"
+                done <<< "$update_out"
+                tg_send "📋 *Update check*${ubody}"
             else
                 tg_send "✅ Script is up to date"
             fi
@@ -12561,8 +12596,26 @@ _process_cmd() {
             ;;
         /mp_fleet|/mp_fleet@*)
             local fleet_out; fleet_out=$("${INSTALL_DIR}/mtproxymax" fleet status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-            [ -z "$fleet_out" ] && fleet_out="No multi-server fleet telemetry collected yet."
-            tg_send "🌐 *Global Federation Fleet Summary*\n\`\`\`\n${fleet_out}\n\`\`\`"
+            if [ -z "$fleet_out" ]; then
+                tg_send "🌐 *Fleet*\n\n_No multi-server fleet telemetry collected yet._"
+                return
+            fi
+            # One block per node. The CLI aligns this with printf padding, which
+            # only reads as columns inside a fence; per-node lines carry the same
+            # data and survive a proportional font.
+            local _f _msg="🌐 *Fleet*" _n=0 _h _ip _users _traffic _load
+            while IFS= read -r _f; do
+                case "$_f" in ""|HOSTNAME*|*"---"*) continue ;; esac
+                read -r _h _ip _users _traffic _load _ <<< "$_f"
+                [ -z "$_h" ] && continue
+                _msg+="\n🟢 *$(_esc "$_h")*"
+                [ -n "$_ip" ] && _msg+=" — \`$(_esc "$_ip")\`"
+                [ -n "$_users" ] && _msg+=" · 👥 ${_users}"
+                [ -n "$_traffic" ] && _msg+=" · 📊 ${_traffic}"
+                _n=$(( _n + 1 ))
+            done <<< "$fleet_out"
+            [ "$_n" -eq 0 ] && _msg+="\n\n_No nodes reported._"
+            tg_send "$_msg"
             ;;
         /mp_upstreams|/mp_upstreams@*)
             load_tg_settings
@@ -12602,7 +12655,7 @@ _process_cmd() {
                 *)
                     load_tg_settings
                     local st="🟢 NORMAL"; [ "${LOCKDOWN_MODE:-false}" = "true" ] && st="🔴 LOCKDOWN ACTIVE"
-                    tg_send "🔒 *Emergency Lockdown Mode*: ${st}\n\nUsage:\n\`/mp_lockdown on\` — Activate Emergency Shield\n\`/mp_lockdown off\` — Return to Normal"
+                    tg_send "🔒 *Emergency Lockdown Mode*: ${st}\n\n• /mp\\_lockdown on — Activate Emergency Shield\n• /mp\\_lockdown off — Return to Normal"
                     ;;
             esac
             ;;
@@ -12658,6 +12711,140 @@ _process_cmd() {
 }
 
 # >>> TG_MENU_BEGIN
+
+
+# >>> TG_PENDING_BEGIN
+# ── Pending input ───────────────────────────────────────────────────────────
+#
+# Inline buttons cannot collect typed text, so a flow that needs a value arms a
+# prompt for that chat and the next plain message from it is taken as the
+# answer. State is one line per chat:
+#
+#   <chat_id>|<verb>|<target>|<expires_epoch>
+#
+# This daemon is the only reader AND the only writer (one shell, one loop), so
+# the rewrite needs no lock — the same reasoning the history appenders use.
+#
+# The answer is consumed by _tg_pending_try before the command dispatcher ever
+# sees it, and a slash command always escapes: being trapped in a prompt with no
+# way back to the command surface is a worse failure than losing an answer.
+_TG_PENDING_TTL=300
+_tg_pending_file() { printf '%s' "${INSTALL_DIR}/relay_stats/.tg_pending"; }
+
+_tg_pending_set() {
+    local chat="$1" verb="$2" target="${3:--}"
+    local f now exp tmp
+    f=$(_tg_pending_file)
+    # An empty path would make the temp file below land in the CURRENT
+    # DIRECTORY as "./.tmp.<pid>" — which is how a stray dotfile gets committed.
+    # INSTALL_DIR is always set in the shipped daemon, so this only ever fires
+    # in a caller that sourced the block without it.
+    [ -n "$f" ] || return 1
+    now=$(date +%s)
+    exp=$(( now + ${_TG_PENDING_TTL:-300} ))
+    mkdir -p "${INSTALL_DIR}/relay_stats" 2>/dev/null || true
+    tmp="${f}.tmp.$$"
+    # Re-arm REPLACES rather than appends: leaving an older line in place would
+    # answer with the stale verb, and the file is read top-down.
+    {
+        [ -f "$f" ] && grep -v "^${chat}|" "$f" 2>/dev/null
+        printf '%s|%s|%s|%s\n' "$chat" "$verb" "$target" "$exp"
+    } > "$tmp" 2>/dev/null && mv "$tmp" "$f" 2>/dev/null
+    chmod 600 "$f" 2>/dev/null || true
+    return 0
+}
+
+# Read-and-clear. Prints "<verb>|<target>"; non-zero when nothing was armed.
+_tg_pending_take() {
+    local chat="$1" f now tmp out="" matched=1
+    f=$(_tg_pending_file)
+    [ -n "$f" ] || return 1
+    [ -f "$f" ] || return 1
+    now=$(date +%s)
+    tmp="${f}.tmp.$$"
+    # Expired rows are dropped here rather than by a sweeper: this is the only
+    # place they matter, and a prompt nobody answers leaves no garbage behind.
+    while IFS='|' read -r _c _v _t _e; do
+        [ -z "$_c" ] && continue
+        if [ "$_c" = "$chat" ]; then
+            if [ "${_e:-0}" -gt "$now" ] 2>/dev/null; then
+                out="${_v}|${_t}"; matched=0
+            fi
+            continue
+        fi
+        printf '%s|%s|%s|%s\n' "$_c" "$_v" "$_t" "$_e"
+    done < "$f" > "$tmp" 2>/dev/null
+    mv "$tmp" "$f" 2>/dev/null || : > "$f"
+    [ "$matched" -eq 0 ] || return 1
+    printf '%s' "$out"
+    return 0
+}
+
+_tg_pending_clear() {
+    local chat="$1" f tmp
+    f=$(_tg_pending_file)
+    [ -n "$f" ] || return 0
+    [ -f "$f" ] || return 0
+    tmp="${f}.tmp.$$"
+    grep -v "^${chat}|" "$f" > "$tmp" 2>/dev/null
+    mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
+# Give an armed prompt first refusal on an incoming message. Returns 0 when the
+# message was consumed as an answer, 1 when the caller must dispatch it.
+_tg_pending_try() {
+    local chat="$1" text="$2" v
+    case "$text" in
+        /*) _tg_pending_clear "$chat"; return 1 ;;
+    esac
+    v=$(_tg_pending_take "$chat") || return 1
+    _tg_pending_run "$chat" "${v%%|*}" "${v#*|}" "$text"
+    return 0
+}
+
+# Dispatch a consumed answer to the flow that armed the prompt.
+_tg_pending_run() {
+    local chat="$1" verb="$2" target="$3" value="$4"
+    case "$verb" in
+        add)
+            if ! _cb_label_ok "$value"; then
+                tg_send_to "$chat" "❌ Invalid label — letters, digits, '_' and '-' only, max 32 characters."
+                return 1
+            fi
+            if ! "${INSTALL_DIR}/mtproxymax" secret add "$value" &>/dev/null; then
+                tg_send_to "$chat" "❌ Could not add *$(_esc "$value")* — it may already exist."
+                return 1
+            fi
+            tg_send_to "$chat" "✅ Secret *$(_esc "$value")* created.$(_tg_new_secret_link "$value")"
+            ;;
+        *)
+            tg_send_to "$chat" "❌ That prompt is no longer valid."
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# The connect block for a just-created secret, or "" if it cannot be built.
+# Shared by every flow that provisions a secret so the wording and the
+# FakeTLS/plain branch stay in one place.
+_tg_new_secret_link() {
+    local label="$1" ip secret dh fs
+    ip=$(get_cached_ip)
+    [ -z "$ip" ] && return 0
+    secret=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+    [ -z "$secret" ] && return 0
+    if [ "${MASKING_ENABLED:-true}" != "false" ]; then
+        dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+        fs="ee${secret}${dh}"
+    else
+        fs="dd${secret}"
+    fi
+    printf '\n\n🔗 [Connect](https://t.me/proxy?server=%s&port=%s&secret=%s)\n📡 `%s:%s`' \
+        "$ip" "${PROXY_PORT}" "$fs" "$ip" "${PROXY_PORT}"
+}
+# <<< TG_PENDING_END
 # ── Interactive inline-keyboard menus ───────────────────────────────────────
 #
 # The security model: callback_data is entirely attacker-controlled — a user
@@ -13179,6 +13366,86 @@ _process_callback() {
     _cb_dispatch || true
     tg_answer_cb "$_CB_ID" "$_CB_TOAST" "$_CB_ALERT"
 }
+# >>> TG_FMT_BEGIN
+# ── Reply formatting ────────────────────────────────────────────────────────
+#
+# Command replies used to dump CLI output into a Markdown code fence, which
+# Telegram draws as a monospace box with a copy button. That is the wrong shape
+# for a status reply: it reads as pasted console output, it cannot wrap, and it
+# puts a tap target on every line.
+#
+# The replacement is one line per fact. Alignment by padding is not available —
+# `printf "%-14s"` pads with letters, and letters do not have a uniform advance
+# width in a proportional font, so padded columns collapse outside a fence. The
+# block-element glyphs used for bars and sparklines are a different case: they
+# are drawn as a tiling set and DO share an advance width, which is why the
+# charts can stay inline.
+
+# "  Key:            value" -> "✅ *Key*: value", one line each. The padding is
+# decorative, so dropping it costs nothing; the key/value pairs are the data.
+_tg_kv_lines() {
+    local _line _k _v _icon _n=0
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        [[ "$_line" =~ ^[[:space:]]*([^:]+):[[:space:]]*(.*)$ ]] || continue
+        _k="${BASH_REMATCH[1]}"
+        _v="${BASH_REMATCH[2]}"
+        # Trim the padding printf added between the key and the colon.
+        _k="${_k%"${_k##*[![:space:]]}"}"
+        [ -z "$_k" ] && continue
+        case "$_v" in
+            *fail*|*Fail*|*FAIL*|*error*|*Error*|*down*|*Down*|*stopped*|*not\ running*)
+                _icon="❌" ;;
+            *warn*|*Warn*|*WARN*|*degraded*|*slow*)
+                _icon="⚠️" ;;
+            *) _icon="✅" ;;
+        esac
+        printf '\n%s *%s*: %s' "$_icon" "$(_esc "$_k")" "$(_esc "$_v")"
+        _n=$(( _n + 1 ))
+    done
+    [ "$_n" -gt 0 ]
+}
+
+# Active vouchers as one line each, read from vouchers.conf rather than parsed
+# out of the CLI's padded table — the source of truth for both the list reply
+# and the create reply, and it needs no column alignment to be re-derived.
+#
+# skip_first drops the rows that already existed before a create, so the reply
+# shows the codes that were just generated instead of the whole inventory.
+_tg_voucher_lines() {
+    local skip_first="${1:-0}" f="${INSTALL_DIR}/vouchers.conf" _n=0
+    local _code _quota _days _conns _ips _tier _status _created _by _at
+    [ -f "$f" ] || return 0
+    while IFS='|' read -r _code _quota _days _conns _ips _tier _status _created _by _at; do
+        [ -z "$_code" ] && continue
+        [ "$_status" != "ACTIVE" ] && continue
+        _n=$(( _n + 1 ))
+        [ "$_n" -le "$skip_first" ] && continue
+        # The code goes inside a Markdown span, so anything outside the code
+        # alphabet would either break the span or inject formatting.
+        _code=$(printf '%s' "$_code" | tr -cd 'A-Za-z0-9-')
+        [ -z "$_code" ] && continue
+        printf '\n🎟 `%s`' "$_code"
+        [ -n "$_quota" ] && [ "$_quota" != "0" ] && printf ' · %s' "$(format_bytes "$_quota")"
+        [ -n "$_days" ] && [ "$_days" != "0" ] && printf ' · %sd' "$_days"
+        [ -n "$_tier" ] && [ "$_tier" != "standard" ] && printf ' · %s' "$_tier"
+    done < "$f"
+}
+
+# How many ACTIVE rows vouchers.conf holds, so a create can report only the new
+# ones. Counted before the create runs.
+_tg_voucher_count() {
+    local f="${INSTALL_DIR}/vouchers.conf" _status
+    [ -f "$f" ] || { printf '0'; return 0; }
+    local _c=0
+    while IFS='|' read -r _code _q _d _cn _i _t _status _cr _by _at; do
+        [ -z "$_code" ] && continue
+        [ "$_status" = "ACTIVE" ] && _c=$(( _c + 1 ))
+    done < "$f"
+    printf '%s' "$_c"
+}
+# <<< TG_FMT_END
+
 # <<< TG_MENU_END
 
 # Cleanup trap for temp files
