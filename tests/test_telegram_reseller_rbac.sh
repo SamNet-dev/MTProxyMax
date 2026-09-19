@@ -18,6 +18,8 @@ mkdir -p "$INSTALL_DIR/relay_stats"
 OFFSET_FILE="$INSTALL_DIR/relay_stats/tg_offset"
 ADMINS_FILE="$INSTALL_DIR/admins.conf"
 AUDIT_LOG="$INSTALL_DIR/audit.log"
+VOUCHERS_FILE="$INSTALL_DIR/vouchers.conf"
+printf 'MTP-SEED-0001|10737418240|30|15|5|standard|ACTIVE|2026-01-01 00:00:00 UTC|-|-\n' > "$VOUCHERS_FILE"
 
 MTPROXYMAX_SOURCE_ONLY=true source "$(dirname "${BASH_SOURCE[0]}")/../mtproxymax.sh"
 set +e
@@ -66,27 +68,43 @@ ROLE_TO_RETURN="reseller"
 _check_tg_role() { echo "$ROLE_TO_RETURN"; }
 tg_send() { printf 'admin|%s\n' "$*" >> "$REPLIES"; }
 tg_send_to() { printf 'to:%s|%s\n' "$1" "$2" >> "$REPLIES"; }
+# The replies that carry an inline keyboard go through these instead, so they
+# must be captured too or those assertions silently see an empty log.
+tg_send_kb() { printf 'admin|%s\n' "$*" >> "$REPLIES"; }
+tg_send_to_kb() { printf 'to:%s|%s\n' "$1" "$2" >> "$REPLIES"; }
 load_tg_settings() { :; }
 is_running() { return 1; }
 log_warn() { :; }
 
 # Stand-in for the manager binary the voucher handler shells out to.
+#
+# The voucher reply reads the vault file rather than the CLI's padded table, so
+# this stub has to do what the real manager does — append to vouchers.conf — and
+# not merely print a table. A stub that only printed would let the reply look
+# correct while reading a file the manager never writes.
 cat > "$INSTALL_DIR/mtproxymax" <<'EOS'
 #!/bin/bash
 case "$1 $2" in
-    # Three lines so the create path (which does `tail -n +3`) still yields one.
     "voucher list") printf 'HEADER\nSEPARATOR\nMTP-AAAA-BBBB\n' ;;
-    "voucher create"|"voucher redeem") : ;;
+    "voucher create")
+        printf 'MTP-NEW1-NEW2|10737418240|30|15|5|standard|ACTIVE|2026-01-02 00:00:00 UTC|-|-\n' >> "$VOUCHERS_FILE"
+        ;;
+    "voucher redeem") : ;;
     *) : ;;
 esac
 EOS
 chmod +x "$INSTALL_DIR/mtproxymax"
+export VOUCHERS_FILE
 
 # Exercise the exact dispatcher shipped in the generated bot daemon.
 telegram_generate_service_script
 DAEMON="$INSTALL_DIR/mtproxymax-telegram.sh"
 awk '/^_tg_security_log\(\)/,/^}$/' "$DAEMON" > "$TEST_TMPDIR/daemon-fns.sh"
 awk '/^_process_cmd\(\)/,/^}$/' "$DAEMON" >> "$TEST_TMPDIR/daemon-fns.sh"
+# Reply handlers build their button bar via _tg_button_bar, so the menu block
+# has to resolve too. It does not define _check_tg_role, so the role stub above
+# survives.
+awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$TEST_TMPDIR/daemon-fns.sh"
 assert_eq "daemon helper extraction is valid bash" 0 \
     "$(bash -n "$TEST_TMPDIR/daemon-fns.sh" 2>/dev/null; echo $?)"
 source "$TEST_TMPDIR/daemon-fns.sh"
@@ -126,8 +144,12 @@ for _cmd in "/mp_voucher list" "/mp_voucher create 5 10G 30"; do
     run reseller 333 "$_cmd"
     assert_not_contains "reseller is allowed $_cmd" "Permission denied" "$(cat "$REPLIES")"
     assert_eq "allowed $_cmd is not logged as a violation" "" "$(audit_now)"
-    assert_contains "allowed $_cmd reaches the voucher engine" "MTP-AAAA-BBBB" "$(cat "$REPLIES")"
 done
+# The list reply shows the standing inventory; the create reply shows only the
+# codes it just generated, so the two reach the vault in different ways and need
+# different evidence.
+assert_contains "a reseller can read the vault" "MTP-SEED-0001" "$(run reseller 333 "/mp_voucher list" >/dev/null; cat "$REPLIES")"
+assert_contains "a reseller can add to the vault" "MTP-NEW1-NEW2" "$(run reseller 333 "/mp_voucher create 5 10G 30" >/dev/null; cat "$REPLIES")"
 
 reset_audit
 run reseller 333 "/start"
