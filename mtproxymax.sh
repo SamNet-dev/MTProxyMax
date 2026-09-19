@@ -10237,8 +10237,15 @@ voucher_create() {
     local i code p1 p2
     echo -e "  ${BOLD}${CYAN}Generating ${count} Voucher(s) (${quota_str}, ${days} days)...${NC}\n"
     for ((i=1; i<=count; i++)); do
-        p1=$(tr -dc 'A-Z0-9' < /dev/urandom 2>/dev/null | head -c 4 || echo "8F9A")
-        p2=$(tr -dc 'A-Z0-9' < /dev/urandom 2>/dev/null | head -c 4 || echo "2K1X")
+        # Do not use `tr | head` here: with the script-wide `pipefail`, tr gets
+        # SIGPIPE and the fallback text is appended to otherwise valid output.
+        # Four random bytes per part give a stable 64-bit voucher identifier.
+        p1=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
+        p2=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | tr '[:lower:]' '[:upper:]')
+        [ ${#p1} -eq 8 ] && [ ${#p2} -eq 8 ] || {
+            log_error "Could not generate a secure voucher code"
+            return 1
+        }
         code="MTP-${p1}-${p2}"
         echo "${code}|${quota_raw}|${days}|${conns}|${ips}|${tier}|ACTIVE|${created_at}|-|-" >> "$VOUCHERS_FILE"
         echo -e "  ${GREEN}✓${NC} Voucher #${i}: ${BOLD}${BRIGHT_GREEN}${code}${NC} (Tier: ${tier}, Quota: ${quota_str}, Valid: ${days}d)"
@@ -10281,33 +10288,91 @@ voucher_redeem() {
     local target="$1" label="${2:-}"
     [ -z "$target" ] && { log_error "Usage: voucher redeem <code> [label]"; return 1; }
     load_vouchers
-    local line; line=$(grep "^${target}|" "$VOUCHERS_FILE" 2>/dev/null | head -1)
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+    exec 8>"${VOUCHERS_FILE}.lock" || { log_error "Cannot lock voucher database"; return 1; }
+    if command -v flock &>/dev/null; then
+        flock -w 10 8 || { exec 8>&-; log_error "Voucher database is busy; try again"; return 1; }
+    fi
+
+    local line; line=$(awk -F'|' -v c="$target" '$1==c {print; exit}' "$VOUCHERS_FILE" 2>/dev/null)
     if [ -z "$line" ]; then
+        exec 8>&-
         log_error "Voucher '${target}' does not exist."
         return 1
     fi
     IFS='|' read -r code quota days conns ips tier status created_at redeemed_by redeemed_at <<< "$line"
-    if [ "$status" != "ACTIVE" ]; then
-        log_error "Voucher '${target}' is already ${status}."
-        return 1
-    fi
     [ -z "$label" ] && label="v_${code//MTP-/}"
+    [[ "$label" =~ ^[a-zA-Z0-9_-]+$ ]] && [ ${#label} -le 32 ] || {
+        exec 8>&-
+        log_error "Label must contain only a-z, A-Z, 0-9, _ or - and be at most 32 characters"
+        return 1
+    }
+
+    # Load the complete database before secret_add; otherwise a redemption from
+    # the standalone `voucher` command could overwrite existing users.
+    load_secrets
+
+    local recovery="false"
+    if [ "$status" != "ACTIVE" ]; then
+        # v1.4.1 consumed the voucher before calling secret_add with an invalid
+        # argument list. Let the same account repair that interrupted redemption
+        # when its secret was never created; never transfer it to another label.
+        if [ "$status" = "REDEEMED" ] && [ "$redeemed_by" = "$label" ] &&
+           ! grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
+            recovery="true"
+        else
+            exec 8>&-
+            log_error "Voucher '${target}' is already ${status}."
+            return 1
+        fi
+    fi
     local now_iso; now_iso=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
     local exp_iso="never"
     if [ "${days:-0}" -gt 0 ]; then
-        exp_iso=$(date -u -d "+${days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%SZ')
+        exp_iso=$(date -u -d "+${days} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null) || {
+            exec 8>&-
+            log_error "Could not calculate voucher expiry"
+            return 1
+        }
     fi
-    # Mark voucher redeemed atomically
-    awk -F'|' -v c="$target" -v u="$label" -v t="$now_iso" 'BEGIN{OFS="|"} $1==c && $7=="ACTIVE"{$7="REDEEMED"; $9=u; $10=t} {print}' "$VOUCHERS_FILE" > "${VOUCHERS_FILE}.tmp" && mv "${VOUCHERS_FILE}.tmp" "$VOUCHERS_FILE"
-    
-    # Add or update secret
+
+    # Create or update the account first. A failed account operation must leave
+    # the voucher ACTIVE so that the customer can retry it.
     if grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
-        secret_set_limits "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" >/dev/null 2>&1
-        log_success "Applied voucher '${target}' to existing secret '${label}'"
+        if ! secret_set_limits "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" >/dev/null 2>&1; then
+            exec 8>&-
+            log_error "Could not apply voucher to secret '${label}'"
+            return 1
+        fi
+        local result_msg="Applied voucher '${target}' to existing secret '${label}'"
     else
-        secret_add "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" "Voucher ${target}" >/dev/null 2>&1
-        log_success "Redeemed voucher '${target}' — created secret '${label}'"
+        if ! secret_add "$label" "" "true" >/dev/null 2>&1 ||
+           ! secret_set_limits "$label" "${conns:-15}" "${ips:-5}" "${quota:-0}" "${exp_iso}" "true" >/dev/null 2>&1 ||
+           ! secret_edit_note "$label" "Voucher ${target}" >/dev/null 2>&1 ||
+           ! reload_proxy_config >/dev/null 2>&1; then
+            exec 8>&-
+            log_error "Could not create secret '${label}'; voucher was not consumed"
+            return 1
+        fi
+        local result_msg="Redeemed voucher '${target}' — created secret '${label}'"
     fi
+
+    local voucher_tmp
+    voucher_tmp=$(_mktemp "$INSTALL_DIR") || { exec 8>&-; return 1; }
+    if ! awk -F'|' -v c="$target" -v u="$label" -v t="$now_iso" -v recovery="$recovery" '
+        BEGIN { OFS="|"; changed=0 }
+        $1==c && $7=="ACTIVE" { $7="REDEEMED"; $9=u; $10=t; changed++ }
+        $1==c && recovery=="true" && $7=="REDEEMED" && $9==u { $10=t; changed++ }
+        { print }
+        END { if (changed != 1) exit 1 }
+    ' "$VOUCHERS_FILE" > "$voucher_tmp" || ! mv "$voucher_tmp" "$VOUCHERS_FILE"; then
+        exec 8>&-
+        log_error "Account was updated, but voucher status could not be saved; contact the administrator"
+        return 1
+    fi
+    chmod 600 "$VOUCHERS_FILE" 2>/dev/null || true
+    exec 8>&-
+    log_success "$result_msg"
 }
 
 # ── Section 13d: Role-Based Access Control (RBAC) ───────────
@@ -11711,7 +11776,7 @@ _process_cmd() {
     # Public user or unauthenticated commands
     case "$text" in
         /start|/start@*)
-            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> [label] — Redeem a gift code / voucher\n  /voucher <code> [label] — Alias for /redeem\n  /support <message> — Send a support request to server admins"
+            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> — Redeem a gift code / voucher\n  /voucher <code> — Alias for /redeem\n  /support <message> — Send a support request to server admins"
             return
             ;;
         /my_status\ *|/my_status@*\ *)
@@ -11734,9 +11799,8 @@ _process_cmd() {
             ;;
         /voucher\ *|/voucher@*\ *)
             local vcode=$(echo "$text" | awk '{print $2}')
-            local vlabel=$(echo "$text" | awk '{print $3}')
-            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /voucher <code> [optional_label]"; return; }
-            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
+            local vlabel="tg_${chat_id}"
+            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /voucher <code>"; return; }
             if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
                 load_tg_settings
                 local ip; ip=$(get_cached_ip)
@@ -11759,9 +11823,8 @@ _process_cmd() {
             ;;
         /redeem\ *|/redeem@*\ *|/mp_redeem\ *|/mp_redeem@*\ *)
             local vcode=$(echo "$text" | awk '{print $2}')
-            local vlabel=$(echo "$text" | awk '{print $3}')
-            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /redeem <code> [optional_label]"; return; }
-            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
+            local vlabel="tg_${chat_id}"
+            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /redeem <code>"; return; }
             if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
                 load_tg_settings
                 local ip; ip=$(get_cached_ip)
