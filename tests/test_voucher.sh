@@ -53,6 +53,10 @@ assert_eq "new user is created" 1 "$(grep -c '^tg_123|' "$SECRETS_FILE")"
 assert_eq "voucher is consumed after account creation" REDEEMED "$(cut -d'|' -f7 "$VOUCHERS_FILE")"
 assert_eq "voucher records its account" tg_123 "$(cut -d'|' -f9 "$VOUCHERS_FILE")"
 
+voucher_redeem "$code" tg_123 >/dev/null
+assert_eq "the original owner can retry idempotently" 0 "$?"
+assert_eq "owner retry does not duplicate the user" 1 "$(grep -c '^tg_123|' "$SECRETS_FILE")"
+
 voucher_redeem "$code" tg_456 >/dev/null
 assert_eq "a consumed voucher cannot be reused" 1 "$?"
 assert_eq "failed reuse creates no user" 0 "$(grep -c '^tg_456|' "$SECRETS_FILE")"

@@ -10322,9 +10322,16 @@ voucher_redeem() {
         # v1.4.1 consumed the voucher before calling secret_add with an invalid
         # argument list. Let the same account repair that interrupted redemption
         # when its secret was never created; never transfer it to another label.
-        if [ "$status" = "REDEEMED" ] && [ "$redeemed_by" = "$label" ] &&
-           ! grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
-            recovery="true"
+        if [ "$status" = "REDEEMED" ] && [ "$redeemed_by" = "$label" ]; then
+            if grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
+                # Idempotent retry by the original owner. The Telegram handler
+                # can safely rebuild and resend the connection link/QR.
+                exec 8>&-
+                log_success "Voucher '${target}' is already active for secret '${label}'"
+                return 0
+            else
+                recovery="true"
+            fi
         else
             exec 8>&-
             log_error "Voucher '${target}' is already ${status}."
