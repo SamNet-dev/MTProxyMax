@@ -10253,7 +10253,7 @@ voucher_list() {
         return 0
     fi
     local filter="${1:-all}"
-    printf "  %-14s %-10s %-6s %-8s %-10s %-15s\n" "CODE" "QUOTA" "DAYS" "STATUS" "TIER" "REDEEMED BY"
+    printf "  %-23s %-10s %-6s %-8s %-10s %-20s\n" "CODE" "QUOTA" "DAYS" "STATUS" "TIER" "TG CHAT ID / ACCOUNT"
     draw_line
     while IFS='|' read -r code quota days conns ips tier status created_at redeemed_by redeemed_at; do
         [[ "$code" =~ ^# ]] && continue; [ -z "$code" ] && continue
@@ -10261,7 +10261,10 @@ voucher_list() {
         if [ "$filter" = "redeemed" ] && [ "$status" != "REDEEMED" ]; then continue; fi
         local q_fmt="Unlimited"; [ "${quota:-0}" -gt 0 ] && q_fmt=$(format_human_bytes "$quota")
         local st_col="$GREEN"; [ "$status" = "REDEEMED" ] && st_col="$DIM"; [ "$status" = "REVOKED" ] && st_col="$RED"
-        printf "  ${BOLD}%-14s${NC} %-10s %-6s ${st_col}%-8s${NC} %-10s %-15s\n" "$code" "$q_fmt" "${days}d" "$status" "${tier:-std}" "${redeemed_by:-}"
+        local owner="${redeemed_by:--}"
+        [ "$status" = "REDEEMED" ] && { [ -z "$redeemed_by" ] || [ "$redeemed_by" = "-" ]; } && owner="UNKNOWN (legacy)"
+        [[ "$owner" == tg_* ]] && owner="${owner#tg_}"
+        printf "  ${BOLD}%-23s${NC} %-10s %-6s ${st_col}%-8s${NC} %-10s %-20s\n" "$code" "$q_fmt" "${days}d" "$status" "${tier:-std}" "$owner"
     done < "$VOUCHERS_FILE"
 }
 
@@ -11711,7 +11714,7 @@ _process_cmd() {
     # Public user or unauthenticated commands
     case "$text" in
         /start|/start@*)
-            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> [label] — Redeem a gift code / voucher\n  /voucher <code> [label] — Alias for /redeem\n  /support <message> — Send a support request to server admins"
+            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> — Redeem a gift code / voucher\n  /voucher <code> — Alias for /redeem\n  /support <message> — Send a support request to server admins"
             return
             ;;
         /my_status\ *|/my_status@*\ *)
@@ -11732,11 +11735,10 @@ _process_cmd() {
             fi
             return
             ;;
-        /voucher\ *|/voucher@*\ *)
+        /voucher\ *|/voucher@*\ *|/redeem\ *|/redeem@*\ *|/mp_redeem\ *|/mp_redeem@*\ *)
             local vcode=$(echo "$text" | awk '{print $2}')
-            local vlabel=$(echo "$text" | awk '{print $3}')
-            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /voucher <code> [optional_label]"; return; }
-            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
+            local vlabel="tg_${chat_id}"
+            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /redeem <code>"; return; }
             if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
                 load_tg_settings
                 local ip; ip=$(get_cached_ip)
@@ -11755,24 +11757,6 @@ _process_cmd() {
             [ -z "$msg" ] || [ "$msg" = "/support" ] || [ "$msg" = "/mp_support" ] && { tg_send_to "$chat_id" "❌ Usage: /support <your question or issue>"; return; }
             tg_send "📩 *New Customer Support Ticket*\n\n👤 *User Chat ID*: \`${chat_id}\`\n💬 *Message*:\n${msg}\n\n👉 *To reply*, type: \`/reply ${chat_id} <your answer>\`"
             tg_send_to "$chat_id" "✅ *Ticket Received!*\n\nYour message has been forwarded to our support team. We will get back to you shortly."
-            return
-            ;;
-        /redeem\ *|/redeem@*\ *|/mp_redeem\ *|/mp_redeem@*\ *)
-            local vcode=$(echo "$text" | awk '{print $2}')
-            local vlabel=$(echo "$text" | awk '{print $3}')
-            [ -z "$vcode" ] && { tg_send_to "$chat_id" "❌ Usage: /redeem <code> [optional_label]"; return; }
-            [ -z "$vlabel" ] && vlabel="tg_${chat_id}"
-            if "${INSTALL_DIR}/mtproxymax" voucher redeem "$vcode" "$vlabel" &>/dev/null; then
-                load_tg_settings
-                local ip; ip=$(get_cached_ip)
-                local ns=$(grep "^${vlabel}|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
-                local dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
-                local fs="ee${ns}${dh}"
-                tg_send_to "$chat_id" "🎉 *Voucher Redeemed Successfully!*\n\nWelcome account *$(_esc "$vlabel")*!\n\n🔗 [Connect Now](https://t.me/proxy?server=${ip}&port=${PROXY_PORT}&secret=${fs})\n📡 \`${ip}:${PROXY_PORT}\`"
-                send_proxy_qr_to "$chat_id" "$ip" "$PROXY_PORT" "$fs"
-            else
-                tg_send_to "$chat_id" "❌ Failed to redeem voucher '$(_esc "$vcode")' — invalid, expired, or already redeemed."
-            fi
             return
             ;;
     esac
