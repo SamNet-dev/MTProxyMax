@@ -3471,8 +3471,13 @@ secret_generate_links() {
                 local label="${SECRETS_LABELS[$i]}"
                 local fs; fs=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
                 local link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${fs}"
-                local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$(printf '%s' "$link" | sed 's/:/%3A/g;s|/|%2F|g;s/?/%3F/g;s/=/%3D/g;s/&/%26/g')"
-                echo "<div class='user'><h2>${label}</h2><a href='${link}'>${link}</a><br><img src='${qr_url}' alt='QR'></div>"
+                # Rendered here and inlined: pointing <img> at a remote
+                # renderer would post this user's key to it every time the sheet
+                # is opened. Empty means no renderer — the link above still works.
+                local qr_url; qr_url=$(_qr_data_uri "$link")
+                local qr_tag=""
+                [ -n "$qr_url" ] && qr_tag="<br><img src='${qr_url}' alt='QR'>"
+                echo "<div class='user'><h2>${label}</h2><a href='${link}'>${link}</a>${qr_tag}</div>"
             done
             echo "</body></html>"
         } > "$outfile"
@@ -6579,12 +6584,17 @@ EOF
         local label="${SECRETS_LABELS[$i]}"
         local sec="${SECRETS_KEYS[$i]}"
         local tg_url="tg://proxy?server=${ip}&port=${port}&secret=${sec}"
-        local qr_api="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${tg_url}"
-        
+        # Inlined rather than fetched: see _qr_data_uri.
+        local qr_api; qr_api=$(_qr_data_uri "$tg_url")
+
         echo "<div class='card'>" >> "$outfile"
         echo "  <h3>${label}</h3>" >> "$outfile"
         echo "  <p>High-Speed MTProto Proxy</p>" >> "$outfile"
-        echo "  <div class='qr-box'><img src='${qr_api}' alt='QR Code' width='150' height='150'></div>" >> "$outfile"
+        if [ -n "$qr_api" ]; then
+            echo "  <div class='qr-box'><img src='${qr_api}' alt='QR Code' width='150' height='150'></div>" >> "$outfile"
+        else
+            echo "  <p><small>No QR renderer on the server — install <code>qrencode</code> to include codes.</small></p>" >> "$outfile"
+        fi
         echo "  <p>Scan with Telegram Camera</p>" >> "$outfile"
         echo "</div>" >> "$outfile"
     done
@@ -9693,12 +9703,49 @@ secret_qr() {
 }
 
 
-# Generate QR code URL (for Telegram photo messages)
-generate_qr_url() {
-    local link="$1"
-    local encoded
-    encoded=$(printf '%s' "$link" | sed 's/&/%26/g; s/?/%3F/g; s/=/%3D/g; s/:/%3A/g; s|/|%2F|g')
-    echo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encoded}"
+# Render a QR to a PNG on this host. Non-zero when no renderer is available.
+#
+# Duplicated from the bot daemon on purpose: the daemon is generated as a
+# self-contained script and never sources this one, which is the same reason
+# format_bytes and friends appear in both.
+_qr_png() {
+    local data="$1" out="$2"
+    [ -n "$data" ] && [ -n "$out" ] || return 1
+    if command -v qrencode &>/dev/null; then
+        qrencode -o "$out" -s 6 -m 2 "$data" 2>/dev/null && [ -s "$out" ] && return 0
+    fi
+    if command -v python3 &>/dev/null && python3 -c '' &>/dev/null 2>&1 && \
+       python3 -c 'import qrcode' &>/dev/null; then
+        python3 - "$data" "$out" <<'PYQ' 2>/dev/null && [ -s "$out" ] && return 0
+import sys
+import qrcode
+qrcode.make(sys.argv[1]).save(sys.argv[2])
+PYQ
+    fi
+    rm -f "$out" 2>/dev/null
+    return 1
+}
+
+# A self-contained <img> source for a QR, or "" when nothing can render one.
+#
+# The exported HTML sheets used to point <img> straight at api.qrserver.com, so
+# opening the sheet in a browser handed every user's proxy key — the link IS the
+# credential — to a third party. A data: URI keeps the image inside the file and
+# the key on this machine. Callers must render the link without an image when
+# this returns empty rather than reaching for a remote renderer.
+_qr_data_uri() {
+    local data="$1" png b64
+    command -v base64 &>/dev/null || return 0
+    png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || return 0
+    if _qr_png "$data" "$png"; then
+        # busybox base64 has no -w, GNU's wraps at 76 columns by default.
+        b64=$(base64 -w0 < "$png" 2>/dev/null) || b64=$(base64 < "$png" 2>/dev/null | tr -d '\n')
+        rm -f "$png" 2>/dev/null
+        [ -n "$b64" ] && printf 'data:image/png;base64,%s' "$b64"
+        return 0
+    fi
+    rm -f "$png" 2>/dev/null
+    return 0
 }
 
 # ── Section 11: Geo-Blocking ────────────────────────────────
@@ -11172,11 +11219,15 @@ telegram_clear_commands() {
     return 0
 }
 
-telegram_send_photo() {
-    local photo_url="$1" caption="${2:-}"
+# Upload a photo from a file on this host. The Bot API only fetches a URL
+# itself, so a locally rendered image has to be sent as multipart — and it is
+# the reason the QR no longer has to be posted to a third party first.
+telegram_send_photo_file() {
+    local file="$1" caption="${2:-}"
     local token="${TELEGRAM_BOT_TOKEN}"
     local chat_id="${TELEGRAM_CHAT_ID}"
     { [ -z "$token" ] || [ -z "$chat_id" ]; } && return 1
+    [ -s "$file" ] || return 1
 
     local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
     [ -n "$caption" ] && caption="[${label}] ${caption}"
@@ -11185,17 +11236,18 @@ telegram_send_photo() {
     _cfg=$(_mktemp) || return 1
     printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$token" > "$_cfg"
 
-    curl -s --max-time 15 --max-filesize 10485760 -X POST \
+    curl -s --max-time 30 -X POST \
         -K "$_cfg" \
-        --data-urlencode "chat_id=${chat_id}" \
-        --data-urlencode "photo=${photo_url}" \
-        --data-urlencode "caption=${caption}" \
-        --data-urlencode "parse_mode=Markdown" \
+        -F "chat_id=${chat_id}" \
+        -F "photo=@${file}" \
+        --form-string "caption=${caption}" \
+        --form-string "parse_mode=Markdown" \
         >/dev/null 2>&1 || true
     local rc=$?
     rm -f "$_cfg"
     return $rc
 }
+
 
 telegram_get_chat_id() {
     local token="${TELEGRAM_BOT_TOKEN}"
@@ -11272,11 +11324,19 @@ telegram_notify_proxy_started() {
 
     telegram_send_message "$msg"
 
-    # Send QR for first enabled secret
+    # Send QR for first enabled secret. Rendered here and uploaded as a file;
+    # a remote renderer would be handed the key.
     if [ -n "$_first_secret" ]; then
-        local qr_url
-        qr_url=$(generate_qr_url "https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${_first_secret}")
-        telegram_send_photo "$qr_url" "📱 *MTProxy QR Code* — Scan in Telegram to connect"
+        local _qr_link _qr_file
+        _qr_link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${_first_secret}"
+        _qr_file=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || _qr_file=""
+        if [ -n "$_qr_file" ] && _qr_png "$_qr_link" "$_qr_file"; then
+            telegram_send_photo_file "$_qr_file" "📱 *MTProxy QR Code* — Scan in Telegram to connect"
+            rm -f "$_qr_file"
+        else
+            rm -f "$_qr_file" 2>/dev/null
+            telegram_send_message "🔗 [Connect](${_qr_link})\n\n_Install \`qrencode\` for a scannable QR._"
+        fi
     fi
 }
 
@@ -11527,39 +11587,84 @@ tg_send_to() {
         --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
 }
 
-tg_send_photo() {
-    local photo="$1" caption="${2:-}"
-    curl -s --max-time 15 -X POST \
+
+# ── QR codes ────────────────────────────────────────────────────────────────
+#
+# The QR used to be drawn by handing the proxy link to api.qrserver.com and
+# letting Telegram fetch the image from there. The link IS the credential —
+# server, port and secret are the whole key — so that handed a working proxy key
+# to a third party on every /mp_link, every /start and every voucher redemption,
+# including in the customer's own chat. It is rendered on this host now, and the
+# image is uploaded from here; nothing but Telegram sees it.
+#
+# The same reasoning applies to the QR image embedded in the exported HTML
+# sheets, which were built from the same kind of URL.
+
+# Render a QR to a PNG on this host. Non-zero when no renderer is available, in
+# which case the caller must NOT fall back to a remote one.
+_qr_png() {
+    local data="$1" out="$2"
+    [ -n "$data" ] && [ -n "$out" ] || return 1
+    if command -v qrencode &>/dev/null; then
+        qrencode -o "$out" -s 6 -m 2 "$data" 2>/dev/null && [ -s "$out" ] && return 0
+    fi
+    if _tg_have_python && python3 -c 'import qrcode' &>/dev/null; then
+        python3 - "$data" "$out" <<'PYQ' 2>/dev/null && [ -s "$out" ] && return 0
+import sys
+import qrcode
+qrcode.make(sys.argv[1]).save(sys.argv[2])
+PYQ
+    fi
+    rm -f "$out" 2>/dev/null
+    return 1
+}
+
+# Upload a local file as a photo. The token travels in a curl config rather than
+# argv so it never appears in `ps`; -F is required because the image is a file,
+# not a URL the API can fetch itself.
+_tg_send_photo_file() {
+    local chat="$1" file="$2" caption="${3:-}"
+    [ -s "$file" ] || return 1
+    curl -s --max-time 30 -X POST \
         -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "photo=${photo}" \
-        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
-        --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
+        -F "chat_id=${chat}" \
+        -F "photo=@${file}" \
+        --form-string "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
+        --form-string "parse_mode=Markdown" >/dev/null 2>&1
+}
+
+# "https://t.me/proxy?...", the one form of the link that is also a credential.
+_proxy_link() {
+    printf 'https://t.me/proxy?server=%s&port=%s&secret=%s' "$1" "$2" "$3"
+}
+
+_send_qr() {
+    local chat="$1" ip="$2" port="$3" secret="$4" caption="$5"
+    local link png
+    link=$(_proxy_link "$ip" "$port" "$secret")
+    png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || png=""
+    if [ -n "$png" ] && _qr_png "$link" "$png"; then
+        _tg_send_photo_file "$chat" "$png" "$caption"
+        rm -f "$png" 2>/dev/null
+        return 0
+    fi
+    rm -f "$png" 2>/dev/null
+    # No renderer here. Send the tappable link rather than reaching for a remote
+    # one: the operator gets something usable, and the key stays on this host.
+    tg_send_to "$chat" "🔗 [Connect](${link})\n\n_Install \`qrencode\` (or \`python3-qrcode\`) for a scannable QR._"
+    return 1
 }
 
 # Send QR code image for a proxy secret (no text URL — avoids Telegram bot bans)
 send_proxy_qr() {
     local ip="$1" port="$2" secret="$3" caption="${4:-Scan in Telegram to connect}"
-    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
-    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
-    tg_send_photo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
+    _send_qr "$TELEGRAM_CHAT_ID" "$ip" "$port" "$secret" "$caption"
 }
 
-tg_send_photo_to() {
-    local target_cid="$1" photo="$2" caption="${3:-}"
-    curl -s --max-time 15 -X POST \
-        -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
-        --data-urlencode "chat_id=${target_cid}" \
-        --data-urlencode "photo=${photo}" \
-        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
-        --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
-}
 
 send_proxy_qr_to() {
     local target_cid="$1" ip="$2" port="$3" secret="$4" caption="${5:-Scan in Telegram to connect}"
-    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
-    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
-    tg_send_photo_to "$target_cid" "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
+    _send_qr "$target_cid" "$ip" "$port" "$secret" "$caption"
 }
 
 # Escape Markdown special chars in labels for Telegram
@@ -12607,12 +12712,39 @@ _process_cmd() {
             local sl_ips=$(echo "$args" | awk '{print $3}')
             local sl_quota=$(echo "$args" | awk '{print $4}')
             local sl_exp=$(echo "$args" | awk '{print $5}')
-            [ -z "$sl_label" ] && tg_send "❌ Usage: /mp\\_setlimit <label> <conns> <ips> <quota> [expires]\nExample: /mp\\_setlimit alice 100 5 5G 2026-12-31" && return
+            [ -z "$sl_label" ] && tg_send "❌ Usage: /mp\\_setlimit <label> <conns> <ips> <quota> [expires]\nExample: /mp\\_setlimit alice 100 5 5G 2026-12-31\n_Leave a field out to keep it as it is._" && return
             [[ "$sl_label" =~ ^[a-zA-Z0-9_-]+$ ]] || { tg_send "❌ Invalid label"; return; }
-            if "${INSTALL_DIR}/mtproxymax" secret setlimits "$sl_label" "${sl_conns:-0}" "${sl_ips:-0}" "${sl_quota:-0}" "${sl_exp:-}" &>/dev/null; then
-                tg_send "✅ Limits updated for *$(_esc "$sl_label")*\nConns: ${sl_conns:-0} | IPs: ${sl_ips:-0} | Quota: ${sl_quota:-0}"
+
+            # Only the fields actually given are written. `secret setlimits`
+            # cannot express that: it reads an empty argument as 0, and
+            # secret_set_limits reads 0 as UNLIMITED — so `/mp_setlimit alice
+            # 100` used to clear alice's IP cap and quota as a side effect. The
+            # per-field `secret setlimit` verb touches one field and no other.
+            local -a _sl_changes=() _sl_flags
+            [ -n "$sl_conns" ] && _sl_changes+=("conns:$sl_conns")
+            [ -n "$sl_ips" ]   && _sl_changes+=("ips:$sl_ips")
+            [ -n "$sl_quota" ] && _sl_changes+=("quota:$sl_quota")
+            [ -n "$sl_exp" ]   && _sl_changes+=("expires:$sl_exp")
+            if [ "${#_sl_changes[@]}" -eq 0 ]; then
+                tg_send "❌ Nothing to change — give at least one of conns, ips, quota or expires."
+                return
+            fi
+
+            local _ok=1 _i _n=${#_sl_changes[@]}
+            for (( _i = 0; _i < _n; _i++ )); do
+                # Every field but the last is applied without a reload, so a
+                # multi-field change costs one engine sync rather than four.
+                _sl_flags=()
+                [ $(( _i + 1 )) -lt "$_n" ] && _sl_flags=(--no-restart)
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$sl_label" \
+                    "${_sl_changes[$_i]%%:*}" "${_sl_changes[$_i]#*:}" "${_sl_flags[@]}" &>/dev/null || _ok=0
+            done
+            if [ "$_ok" -eq 1 ]; then
+                local _shown="" _c
+                for _c in "${_sl_changes[@]}"; do _shown+="${_shown:+ · }${_c/:/ = }"; done
+                tg_send "✅ Limits updated for *$(_esc "$sl_label")*\n${_shown}"
             else
-                tg_send "❌ Failed to set limits for *$(_esc "$sl_label")* — check label exists"
+                tg_send "❌ Failed to set limits for *$(_esc "$sl_label")* — check the value and that the label exists"
             fi
             ;;
         /mp_fleet|/mp_fleet@*)
@@ -20727,8 +20859,11 @@ show_info_qrcode() {
     echo -e "  ${BOLD}QR generation methods (auto-detected):${NC}"
     echo -e "  ${GREEN}1.${NC} ${BOLD}qrencode${NC} (native) — fastest, renders in terminal"
     echo -e "     Install: ${DIM}apt install qrencode${NC}"
-    echo -e "  ${GREEN}2.${NC} ${BOLD}Docker${NC} — uses alpine + qrencode container"
-    echo -e "  ${GREEN}3.${NC} ${BOLD}Web API${NC} — qrserver.com (for Telegram photo messages)"
+    echo -e "  ${GREEN}2.${NC} ${BOLD}python3-qrcode${NC} — renders a PNG for the bot and the HTML sheets"
+    echo -e "     Install: ${DIM}pip install qrcode${NC}"
+    echo -e "  ${DIM}Without one of these the bot sends the tappable link instead of a QR"
+    echo -e "  image. It is never rendered by a remote service: the link contains the"
+    echo -e "  secret, so posting it anywhere would hand over the key.${NC}"
     echo ""
     echo -e "  ${BOLD}Commands:${NC}"
     echo -e "  ${GREEN}mtproxymax secret qr <label>${NC}   Show QR in terminal"
