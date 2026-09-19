@@ -1785,6 +1785,10 @@ _load_all_cumulative_user_stats() {
 # One-shot flush of traffic counters to disk (for use before stop/restart)
 # Works standalone — loads cumulative from disk, computes delta from live metrics, saves back
 flush_traffic_to_disk() {
+    # Keep record fields local. Bash variables are dynamically scoped, so this
+    # function must not overwrite a caller's `label` (voucher_redeem relies on it
+    # after reload_proxy_config flushes traffic).
+    local label secret created enabled _mc _mi _q _ex _notes _adtag
     local _stats_dir="${INSTALL_DIR}/relay_stats"
     local _tf="${_stats_dir}/cumulative_traffic"
     local _utf="${_stats_dir}/user_traffic"
@@ -10322,7 +10326,27 @@ voucher_redeem() {
         # v1.4.1 consumed the voucher before calling secret_add with an invalid
         # argument list. Let the same account repair that interrupted redemption
         # when its secret was never created; never transfer it to another label.
-        if [ "$status" = "REDEEMED" ] && [ "$redeemed_by" = "$label" ]; then
+        if [ "$status" = "REDEEMED" ] && { [ -z "$redeemed_by" ] || [ "$redeemed_by" = "-" ]; } &&
+           awk -F'|' -v l="$label" -v n="Voucher ${target}" '$1==l && $9==n {found=1} END {exit !found}' "$SECRETS_FILE" 2>/dev/null; then
+            # Repair vouchers affected by the old dynamic-scope bug. Claiming is
+            # safe only when this exact account carries this voucher in its note.
+            local repair_tmp
+            repair_tmp=$(_mktemp "$INSTALL_DIR") || { exec 8>&-; return 1; }
+            if awk -F'|' -v c="$target" -v u="$label" -v t="$(date -u '+%Y-%m-%d %H:%M:%S UTC')" '
+                BEGIN { OFS="|"; changed=0 }
+                $1==c && $7=="REDEEMED" && ($9=="" || $9=="-") { $9=u; $10=t; changed++ }
+                { print }
+                END { if (changed != 1) exit 1 }
+            ' "$VOUCHERS_FILE" > "$repair_tmp" && mv "$repair_tmp" "$VOUCHERS_FILE"; then
+                chmod 600 "$VOUCHERS_FILE" 2>/dev/null || true
+                exec 8>&-
+                log_success "Recovered voucher owner '${label}' for '${target}'"
+                return 0
+            fi
+            exec 8>&-
+            log_error "Could not recover owner for voucher '${target}'"
+            return 1
+        elif [ "$status" = "REDEEMED" ] && [ "$redeemed_by" = "$label" ]; then
             if grep -q "^${label}|" "$SECRETS_FILE" 2>/dev/null; then
                 # Idempotent retry by the original owner. The Telegram handler
                 # can safely rebuild and resend the connection link/QR.

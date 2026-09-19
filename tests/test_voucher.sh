@@ -57,6 +57,14 @@ voucher_redeem "$code" tg_123 >/dev/null
 assert_eq "the original owner can retry idempotently" 0 "$?"
 assert_eq "owner retry does not duplicate the user" 1 "$(grep -c '^tg_123|' "$SECRETS_FILE")"
 
+# Repair the dynamic-scope regression that created the account but left the
+# voucher's redeemed_by field blank.
+awk -F'|' -v c="$code" 'BEGIN{OFS="|"} $1==c {$9=""} {print}' "$VOUCHERS_FILE" > "${VOUCHERS_FILE}.tmp"
+mv "${VOUCHERS_FILE}.tmp" "$VOUCHERS_FILE"
+voucher_redeem "$code" tg_123 >/dev/null
+assert_eq "blank legacy owner is recovered from the account note" 0 "$?"
+assert_eq "recovered voucher records its chat account" tg_123 "$(cut -d'|' -f9 "$VOUCHERS_FILE")"
+
 voucher_redeem "$code" tg_456 >/dev/null
 assert_eq "a consumed voucher cannot be reused" 1 "$?"
 assert_eq "failed reuse creates no user" 0 "$(grep -c '^tg_456|' "$SECRETS_FILE")"
