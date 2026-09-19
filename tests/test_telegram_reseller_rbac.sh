@@ -61,6 +61,8 @@ assert_eq() {
 
 # ── Stubs ────────────────────────────────────────────────────────────────────
 REPLIES="$TEST_TMPDIR/replies.log"
+MANAGER_CALLS="$TEST_TMPDIR/manager-calls.log"
+export MANAGER_CALLS
 ROLE_TO_RETURN="reseller"
 
 _check_tg_role() { echo "$ROLE_TO_RETURN"; }
@@ -76,7 +78,8 @@ cat > "$INSTALL_DIR/mtproxymax" <<'EOS'
 case "$1 $2" in
     # Three lines so the create path (which does `tail -n +3`) still yields one.
     "voucher list") printf 'HEADER\nSEPARATOR\nMTP-AAAA-BBBB\n' ;;
-    "voucher create"|"voucher redeem") : ;;
+    "voucher create") : ;;
+    "voucher redeem") printf '%s\n' "$*" >> "$MANAGER_CALLS" ;;
     *) : ;;
 esac
 EOS
@@ -133,6 +136,16 @@ reset_audit
 run reseller 333 "/start"
 assert_not_contains "reseller keeps the public /start" "Permission denied" "$(cat "$REPLIES")"
 assert_contains "reseller gets the self-service welcome" "Welcome to MTProxyMax" "$(cat "$REPLIES")"
+
+# Public voucher aliases must have identical behavior and bind redemption to
+# the sender's Telegram chat ID instead of accepting an arbitrary account.
+for _cmd in voucher redeem; do
+    : > "$MANAGER_CALLS"
+    run none 8393457899 "/${_cmd} MTP-AAAA-BBBB чужой_label"
+    assert_contains "/${_cmd} reaches voucher redemption" "voucher redeem MTP-AAAA-BBBB" "$(cat "$MANAGER_CALLS")"
+    assert_contains "/${_cmd} binds the sender chat ID" "tg_8393457899" "$(cat "$MANAGER_CALLS")"
+    assert_not_contains "/${_cmd} ignores a supplied account label" "чужой_label" "$(cat "$MANAGER_CALLS")"
+done
 
 # ── Superadmins are unaffected ───────────────────────────────────────────────
 reset_audit
