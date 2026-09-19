@@ -885,6 +885,11 @@ declare -a SECRETS_AD_TAGS=()
 
 # Load secrets database
 load_secrets() {
+    # Bash uses dynamic scoping. Keep parser fields local so loading the secrets
+    # database cannot overwrite variables (label, quota, created, etc.) in a
+    # caller such as voucher_redeem.
+    local label secret created enabled max_conns max_ips quota expires notes ad_tag
+
     SECRETS_LABELS=()
     SECRETS_KEYS=()
     SECRETS_CREATED=()
