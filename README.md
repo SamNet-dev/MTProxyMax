@@ -16,7 +16,7 @@
     <a href="#-quick-start">Quick Start</a> &bull;
     <a href="#-features">Features</a> &bull;
     <a href="#-comparison">Comparison</a> &bull;
-    <a href="#-telegram-bot-21-commands">Telegram Bot</a> &bull;
+    <a href="#-telegram-bot-27-commands">Telegram Bot</a> &bull;
     <a href="#-cli-reference">CLI Reference</a> &bull;
     <a href="#-changelog">Changelog</a> &bull;
     <a href="https://www.samnet.dev/learn/networking/mtproto-proxy-telegram/">Full Guide ↗</a>
@@ -413,7 +413,7 @@ mtproxymax secret remove bob     # Permanent removal
 
 ---
 
-### 🤖 Telegram Bot (21 Commands)
+### 🤖 Telegram Bot (27 Commands)
 
 Full proxy management from your phone. Setup takes 60 seconds:
 
@@ -421,27 +421,124 @@ Full proxy management from your phone. Setup takes 60 seconds:
 mtproxymax telegram setup
 ```
 
+The bot registers its commands with Telegram, so tapping the **`/` menu button** in
+the chat lists everything you are allowed to run — no need to memorise them. The
+menu is scoped to your role: everyone sees the public self-service commands, admins
+see the Admin Control Plane, and superadmins additionally see `/mp_remove`,
+`/mp_restart`, `/mp_update` and `/mp_lockdown`. The list is re-synced whenever the
+bot service starts; to refresh it by hand use:
+
+```bash
+mtproxymax telegram sync-commands
+```
+
+**Public self-service** — every user, including ones with no admin role:
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Self-service onboarding |
+| `/my_status <label>` | Your data quota and expiry |
+| `/redeem <code> [label]` | Redeem a voucher |
+| `/voucher <code> [label]` | Alias for `/redeem` |
+| `/support <message>` | Send a ticket to the admins |
+
+**Admin Control Plane** (`admin` and above):
+
 | Command | Description |
 |---------|-------------|
 | `/mp_status` | Proxy status, uptime, connections |
 | `/mp_secrets` | List all users with active connections |
 | `/mp_link` | Get proxy details + QR code image |
 | `/mp_add <label>` | Add new user |
-| `/mp_remove <label>` | Delete user |
-| `/mp_revoke <label>` | Revoke and purge a user secret immediately |
 | `/mp_rotate <label>` | Generate new key for user |
 | `/mp_enable <label>` | Re-enable disabled user |
 | `/mp_disable <label>` | Temporarily disable user |
-| `/mp_lockdown [on\|off]` | Toggle emergency panic lockdown defensive posture |
-| `/mp_digest` | View live executive health, posture, and traffic digest box |
 | `/mp_limits` | Show all user limits |
 | `/mp_setlimit` | Set user limits |
 | `/mp_traffic` | Per-user traffic breakdown |
 | `/mp_upstreams` | List proxy chains |
 | `/mp_health` | Run diagnostics |
+| `/mp_digest` | View live executive health, posture, and traffic digest box |
+| `/mp_broadcast <msg>` | Message every known bot user |
+| `/mp_fleet` | Global federation fleet dashboard |
+| `/mp_voucher create\|list` | Generate or list vouchers |
+| `/reply <chat_id> <msg>` | Answer a support ticket |
+| `/mp_help` | Show all commands |
+
+**Superadmin only:**
+
+| Command | Description |
+|---------|-------------|
+| `/mp_remove <label>` | Delete user (`/mp_revoke` is an alias, handled but not listed in the `/` menu) |
 | `/mp_restart` | Restart proxy |
 | `/mp_update` | Check for updates |
-| `/mp_help` | Show all commands |
+| `/mp_lockdown [on\|off]` | Toggle emergency panic lockdown defensive posture |
+
+#### Inline menu buttons
+
+Replies carry buttons, so most of the above is reachable by tapping rather than
+typing. Tapping **👥 Users** opens a paginated list; tapping a user opens a card
+showing its live connections, unique IPs, quota bar and expiry, with actions
+attached. Tapping **📈 Traffic** opens the analytics view with 24h / 7d / 30d
+windows.
+
+Anything that destroys state is behind a confirmation step — the ⏸ Disable,
+♻️ Rotate and 🗑 Remove buttons only *ask*; a second tap on **✅ Yes** performs
+it. Nothing destructive is ever one mis-tap away.
+
+The buttons you see are filtered by your role: a `reseller` gets the public
+views only, and a button never grants more than typing the equivalent command
+would.
+
+#### Traffic history
+
+The bot records rolling traffic samples under
+`/opt/mtproxymax/relay_stats/history/` (5-minute samples, 7-day retention) and
+uses them for the analytics view and the periodic report. Samples are stored as
+**deltas**, so an engine restart or a traffic reset cannot corrupt a window.
+
+```bash
+mtproxymax telegram history status   # sample counts, date range, retention
+mtproxymax telegram history prune    # apply retention now
+mtproxymax telegram history reset    # delete all recorded history
+```
+
+#### Report settings
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `TELEGRAM_INTERVAL` | `6` | Hours between periodic reports |
+| `TELEGRAM_REPORT_DETAIL` | `auto` | `auto` sends a full report only when there was traffic, otherwise a one-line heartbeat. `full` and `summary` force the two behaviours. |
+| `TELEGRAM_HISTORY_ENABLED` | `true` | Record traffic samples |
+| `TELEGRAM_HISTORY_INTERVAL_MIN` | `5` | Minutes between samples |
+| `TELEGRAM_HISTORY_RETENTION_DAYS` | `7` | Days of history to keep |
+
+#### 🎛 Running the proxy from buttons
+
+Every command above also exists as a button, so day-to-day management needs no
+typing. Send any command — or tap **🏠 Menu** on any reply — to open the hub:
+
+| Section | What it covers |
+|---------|----------------|
+| 👥 **Users** | Paginated list → per-user card with live connections, traffic, quota bar, expiry, note and quota-reset day, plus link/QR, enable, disable, rotate and remove |
+| 📊 **Per-user traffic** | What that user moved over the last 24h / 7d / 30d, with a 24-hour sparkline, beside their quota and expiry |
+| ⚙️ **Manage** (per user) | Quota, connection cap, IP cap, expiry, monthly quota-reset day, note, ad-tag, and applying a saved limit template to that user |
+| 🧩 **Templates** | Create, edit every field of, apply and delete limit templates |
+| 📈 **Traffic** | Windowed totals (24h / 7d / 30d) with a sparkline, peak and average rate, and top talkers |
+| 🖥 **Server** | Engine health, posture digest, upstreams, fleet, vouchers, updates |
+| 🛠 **Tools** | Add user, broadcast, rotate-all, lockdown, restart, apply update |
+| ⚙️ **Settings** | Port, domain, metrics port, report interval |
+
+Limits are edited with preset buttons for the common values, plus a **✏️ Custom…**
+prompt for anything else. Anything that affects live users — removing, rotating,
+disabling, restarting, locking down — asks for confirmation first, and the
+confirmation is the only path that performs the write.
+
+**Typed input.** Adding a user, setting a custom limit, saving a template name,
+broadcasting and writing a note all need text, which buttons cannot supply. Tapping
+one of those sends a prompt; your next message is taken as the answer. The prompt is
+always escapable: sending any `/command` cancels it, and so does the **❌ Cancel**
+button. An unanswered prompt expires after five minutes.
 
 **Automatic alerts & announcements:**
 - 🚨 Emergency Lockdown activated → immediate posture alert
@@ -627,6 +724,16 @@ mtproxymax status        # Overview with connections count
 - Bytes uploaded/downloaded per user
 - Active connections per user
 - Cumulative tracking across restarts
+
+Cumulative counters only ever grow, so they cannot answer *"how much moved
+today, and is that more or less than yesterday?"*. For that the Telegram bot
+records a rolling history of 5-minute samples (see
+[Traffic history](#traffic-history)) and reports **windowed** figures — 24h/7d/30d
+totals, period-over-period change, peak and average rate, top talkers, and an
+hourly sparkline — both in the periodic report and in the 📈 Traffic view.
+
+The periodic report is activity-aware: with no traffic in the window it
+collapses to a one-line heartbeat rather than repeating a dashboard of zeroes.
 
 ---
 
@@ -1503,6 +1610,7 @@ mtproxymax update                       # Check for script + engine updates
 - **Automated SSL Shield (`ssl-shield`):** Zero-touch Let's Encrypt / `openssl` certificate issuance and ACME domain management.
 - **Automated Cloud Backups (`backup-cloud`):** Automatic tarball offloading to Telegram admin chat (`sendDocument`) or multi-cloud storage (`rclone`/S3/R2).
 - **Dual-Tier Telegram Bot (`telegram`):** Public self-service tier (`/start`, `/my_status <label>`, `/voucher`) combined with an authenticated Admin Control Plane (`/mp_fleet`, `/mp_secrets`, `/mp_lockdown`).
+- **Telegram Command Menu:** The bot registers its commands via `setMyCommands`, so the in-app `/` menu button lists every command you can run. Scopes mirror the role model — public commands for everyone, the Admin Control Plane for admins, and the superadmin-only commands (`/mp_remove`, `/mp_restart`, `/mp_update`, `/mp_lockdown`) only for superadmins. Re-synced on every bot service start and on `mtproxymax telegram sync-commands`.
 - **Comprehensive Hardening & Audit:** Fixed race conditions (`flock`), prevented configuration code injection (`grep | cut`), added comma/pipe CSV import normalization (`secret_import`), and ensured strict-mode container fallbacks across 18,369 lines (`100% clean`).
 
 ### v1.3.1 — Performance & Anti-DPI Upgrade Suite
