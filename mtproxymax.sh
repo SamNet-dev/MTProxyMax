@@ -7932,9 +7932,13 @@ run_heal() {
     echo -e "  └────────────────────────────────────────────────────────┘\n"
 
     if ! is_proxy_running; then
-        log_warn "Proxy container is not running — attempting recovery start..."
-        docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
-        start_proxy_container 2>/dev/null || true
+        # Transient Docker daemon hiccups (e.g. right after drop_caches) can cause a probe
+        # to miss. Verify with a second probe after a brief pause before declaring it down.
+        sleep 1
+        if ! is_proxy_running; then
+            log_warn "Proxy container is not running — attempting recovery start..."
+            start_proxy_container 2>/dev/null || true
+        fi
     fi
 }
 
@@ -9362,7 +9366,19 @@ upstream_test() {
 # ── Section 9: Container Management ─────────────────────────
 
 is_proxy_running() {
-    [ "$(docker inspect -f '{{.State.Running}}' "${CONTAINER_NAME:-mtproxymax}" 2>/dev/null)" = "true" ]
+    local _cname="${1:-${CONTAINER_NAME:-mtproxymax}}"
+    local _state
+    _state=$(docker inspect -f '{{.State.Running}}' "$_cname" 2>/dev/null)
+    if [ "$_state" = "true" ]; then
+        return 0
+    elif [ "$_state" = "false" ]; then
+        return 1
+    fi
+    # If inspect failed to report true or false (e.g. transient Docker daemon latency
+    # or socket hiccup), retry once after a short pause before treating it as not running.
+    sleep 0.5 2>/dev/null || sleep 1
+    _state=$(docker inspect -f '{{.State.Running}}' "$_cname" 2>/dev/null)
+    [ "$_state" = "true" ]
 }
 
 run_proxy_container() {
@@ -11834,7 +11850,16 @@ format_duration() {
 }
 
 is_proxy_running() {
-    [ "$(docker inspect -f '{{.State.Running}}' mtproxymax 2>/dev/null)" = "true" ]
+    local _state
+    _state=$(docker inspect -f '{{.State.Running}}' mtproxymax 2>/dev/null)
+    if [ "$_state" = "true" ]; then
+        return 0
+    elif [ "$_state" = "false" ]; then
+        return 1
+    fi
+    sleep 0.5 2>/dev/null || sleep 1
+    _state=$(docker inspect -f '{{.State.Running}}' mtproxymax 2>/dev/null)
+    [ "$_state" = "true" ]
 }
 
 get_container_uptime() {
@@ -15289,9 +15314,11 @@ load_traffic
 
 _last_report=0
 _report_interval=$(( ${TELEGRAM_INTERVAL:-6} * 3600 ))
-_last_health=0
 _last_traffic_update=0
-_last_enforcement=0
+# Stagger the initial health check and maintenance sweep so neither fires on
+# pass 1 immediately after daemon start when Docker may still be initializing.
+_last_health=$(date +%s)
+_last_enforcement=$(( $(date +%s) - 150 ))
 # Seeded to now so the first tick after a restart does not immediately write a
 # near-empty bucket for the seconds since the process started.
 _last_hist_sample=$(date +%s)
