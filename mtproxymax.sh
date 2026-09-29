@@ -10497,8 +10497,10 @@ voucher_redeem() {
     load_vouchers
     mkdir -p "$INSTALL_DIR" 2>/dev/null || true
     exec 8>"${VOUCHERS_FILE}.lock" || { log_error "Cannot lock voucher database"; return 1; }
-    if command -v flock &>/dev/null; then
-        flock -w 10 8 || { exec 8>&-; log_error "Voucher database is busy; try again"; return 1; }
+    if ! _lock_fd 8; then
+        exec 8>&-
+        log_error "Voucher database is busy; try again"
+        return 1
     fi
 
     local line; line=$(awk -F'|' -v c="$target" '$1==c {print; exit}' "$VOUCHERS_FILE" 2>/dev/null)
