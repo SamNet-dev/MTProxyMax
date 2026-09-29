@@ -1590,6 +1590,15 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
+### v1.4.2-LTS — Telemt Engine 3.5.9 & Transactional Middle-End Hardening
+
+- **Telemt Engine 3.5.9 (`e3f62db`):** Upgraded core Rust proxy engine to 3.5.9 ("Kostenfaktor") and 3.5.8 ("Kanzlersturz"):
+  - **Multi-call Firewall Binary Support (PR #933):** Preserved `argv[0]` when executing system helpers (`iptables`, `ip6tables`, `iptables-restore`, `ip6tables-restore`), fixing firewall command dispatches on systems where tools are symlinked to `xtables-nft-multi` or `xtables-legacy-multi`.
+  - **Transactional Conntrack Reconciler:** Process-owned firewall state manager with automatic rollback on transition errors.
+  - **Fenced Middle-End Lifecycle:** Generation fences preventing credential leaks across cutovers, transactional writer refresh, and hardswap publication tracking.
+  - **Process-Wide User Admission Authority:** Incarnation isolation for user delete/re-create cycles and bounded compare-and-swap retry budgets for traffic buckets.
+  - **Engine Tunables & Observability:** Added `direct_relay_buffer_budget_max_bytes` and `conntrack_control` to `mtproxymax tune`, and integrated Prometheus metrics for pending hardswaps (`telemt_me_hardswap_pending`) and conntrack rollbacks (`telemt_conntrack_rule_rollback_total`).
+
 ### v1.4.1-LTS — Enterprise Hardening, Multi-Instance Isolation & Telemt 3.5.7
 
 - **Telemt Engine 3.5.7 (`4ca7418`):** Updated core Rust proxy engine with TCP-only probe validation (#919) and automatic stale websocket lane recovery after restart (#923).

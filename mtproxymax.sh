@@ -11,7 +11,7 @@ set -eo pipefail
 export LC_NUMERIC=C
 
 # ── Section 1: Initialization ────────────────────────────────
-VERSION="1.4.1-LTS"
+VERSION="1.4.2-LTS"
 SCRIPT_NAME="mtproxymax"
 INSTALL_DIR="${INSTALL_DIR:-/opt/mtproxymax}"
 CONFIG_DIR="${CONFIG_DIR:-${INSTALL_DIR}/mtproxy}"
@@ -41,8 +41,8 @@ RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.5.7"
-TELEMT_COMMIT="4ca7418"  # Pinned: v3.5.7 — Wirtschaftsvertreter: TCP probe validation & websocket recovery
+TELEMT_MIN_VERSION="3.5.9"
+TELEMT_COMMIT="e3f62db"  # Pinned: v3.5.9 — Kostenfaktor: Trusted Helper Argv0 for multi-call firewall binaries & ME lifecycle
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -4742,6 +4742,8 @@ _TUNE_WHITELIST=(
     "prefer_ipv6:general:^(true|false)$"
     "fast_mode:general:^(true|false)$"
     "log_level:general:^(debug|verbose|normal|silent)$"
+    "direct_relay_buffer_budget_max_bytes:general:^[0-9]+$"
+    "conntrack_control:server:^(true|false)$"
     "mask_relay_timeout_ms:censorship:^[0-9]+$"
     "mask_relay_idle_timeout_ms:censorship:^[0-9]+$"
     "syn_per_sec:rate_limit:^[0-9]+$"
@@ -17572,9 +17574,11 @@ show_metrics() {
         /^telemt_me_writers_warm_current /                  { me_ww  = $NF }
         /^telemt_me_endpoint_quarantine_total /             { me_quar= $NF }
         /^telemt_me_crc_mismatch_total /                    { me_crc = $NF }
+        /^telemt_me_hardswap_pending /                      { me_hsp = $NF }
         /^telemt_pool_drain_active /                        { pool   = $NF }
         /^telemt_desync_total /                             { desync = $NF }
         /^telemt_secure_padding_invalid_total /             { padinv = $NF }
+        /^telemt_conntrack_rule_rollback_total /            { ct_rb  = $NF }
         /^telemt_upstream_connect_duration_success_total\{/ { b=lbl($0,"bucket"); if(b) ds[b]+=$NF }
         /^telemt_upstream_connect_duration_fail_total\{/    { b=lbl($0,"bucket"); if(b) df[b]+=$NF }
         /^telemt_user_connections_current\{/ { u=lbl($0,"user"); if(u) uc[u]+=$NF }
@@ -17584,10 +17588,11 @@ show_metrics() {
         /^telemt_user_unique_ips_current\{/  { u=lbl($0,"user"); if(u) ui[u]+=$NF }
         END {
             for (u in uc) c_cur += uc[u]
-            printf "S|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
+            printf "S|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f\n",
                 uptime+0,c_tot+0,c_bad+0,c_cur+0,
                 up_att+0,up_ok+0,up_fail+0,me_att+0,me_ok+0,
-                me_wa+0,me_ww+0,me_quar+0,me_crc+0,pool+0,desync+0,padinv+0
+                me_wa+0,me_ww+0,me_quar+0,me_crc+0,pool+0,desync+0,padinv+0,
+                me_hsp+0,ct_rb+0
             bkeys[1]="le_100ms";   bnames[1]="<=100ms"
             bkeys[2]="101_500ms";  bnames[2]="101-500ms"
             bkeys[3]="501_1000ms"; bnames[3]="501ms-1s"
@@ -17606,9 +17611,10 @@ show_metrics() {
     ')
 
     # Parse scalar line
-    local uptime c_tot c_bad c_cur up_att up_ok up_fail me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv
+    local uptime c_tot c_bad c_cur up_att up_ok up_fail me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv me_hsp ct_rb
     IFS='|' read -r _ uptime c_tot c_bad c_cur up_att up_ok up_fail \
                        me_att me_ok me_wa me_ww me_quar me_crc pool desync padinv \
+                       me_hsp ct_rb \
         <<< "$(echo "$parsed" | grep '^S|')"
 
     local c_good=$(( ${c_tot:-0} - ${c_bad:-0} ))
@@ -17666,12 +17672,14 @@ show_metrics() {
     [ "${me_quar:-0}" -gt 0 ] && echo -e "  ${DIM}quarantined endpoints:${NC} ${YELLOW}${me_quar}${NC}"
     [ "${me_crc:-0}"  -gt 0 ] && echo -e "  ${DIM}CRC mismatches:${NC}       ${YELLOW}${me_crc}${NC}"
     [ "${pool:-0}"    -gt 0 ] && echo -e "  ${DIM}writers draining:${NC}     ${pool}"
+    [ "${me_hsp:-0}"   -gt 0 ] && echo -e "  ${DIM}hardswap pending:${NC}     ${YELLOW}${me_hsp}${NC}"
     echo ""
 
-    if [ "${desync:-0}" -gt 0 ] || [ "${padinv:-0}" -gt 0 ]; then
+    if [ "${desync:-0}" -gt 0 ] || [ "${padinv:-0}" -gt 0 ] || [ "${ct_rb:-0}" -gt 0 ]; then
         echo -e "  ${BOLD}Security${NC}"
-        [ "${desync:-0}"  -gt 0 ] && echo -e "  ${DIM}desync events:${NC}   ${YELLOW}${desync}${NC}"
-        [ "${padinv:-0}"  -gt 0 ] && echo -e "  ${DIM}invalid padding:${NC} ${YELLOW}${padinv}${NC}"
+        [ "${desync:-0}"  -gt 0 ] && echo -e "  ${DIM}desync events:${NC}       ${YELLOW}${desync}${NC}"
+        [ "${padinv:-0}"  -gt 0 ] && echo -e "  ${DIM}invalid padding:${NC}     ${YELLOW}${padinv}${NC}"
+        [ "${ct_rb:-0}"   -gt 0 ] && echo -e "  ${DIM}conntrack rollbacks:${NC} ${YELLOW}${ct_rb}${NC}"
         echo ""
     fi
 }
