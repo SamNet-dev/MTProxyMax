@@ -3471,8 +3471,13 @@ secret_generate_links() {
                 local label="${SECRETS_LABELS[$i]}"
                 local fs; fs=$(build_faketls_secret "${SECRETS_KEYS[$i]}")
                 local link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${fs}"
-                local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$(printf '%s' "$link" | sed 's/:/%3A/g;s|/|%2F|g;s/?/%3F/g;s/=/%3D/g;s/&/%26/g')"
-                echo "<div class='user'><h2>${label}</h2><a href='${link}'>${link}</a><br><img src='${qr_url}' alt='QR'></div>"
+                # Rendered here and inlined: pointing <img> at a remote
+                # renderer would post this user's key to it every time the sheet
+                # is opened. Empty means no renderer — the link above still works.
+                local qr_url; qr_url=$(_qr_data_uri "$link")
+                local qr_tag=""
+                [ -n "$qr_url" ] && qr_tag="<br><img src='${qr_url}' alt='QR'>"
+                echo "<div class='user'><h2>${label}</h2><a href='${link}'>${link}</a>${qr_tag}</div>"
             done
             echo "</body></html>"
         } > "$outfile"
@@ -6579,12 +6584,17 @@ EOF
         local label="${SECRETS_LABELS[$i]}"
         local sec="${SECRETS_KEYS[$i]}"
         local tg_url="tg://proxy?server=${ip}&port=${port}&secret=${sec}"
-        local qr_api="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${tg_url}"
-        
+        # Inlined rather than fetched: see _qr_data_uri.
+        local qr_api; qr_api=$(_qr_data_uri "$tg_url")
+
         echo "<div class='card'>" >> "$outfile"
         echo "  <h3>${label}</h3>" >> "$outfile"
         echo "  <p>High-Speed MTProto Proxy</p>" >> "$outfile"
-        echo "  <div class='qr-box'><img src='${qr_api}' alt='QR Code' width='150' height='150'></div>" >> "$outfile"
+        if [ -n "$qr_api" ]; then
+            echo "  <div class='qr-box'><img src='${qr_api}' alt='QR Code' width='150' height='150'></div>" >> "$outfile"
+        else
+            echo "  <p><small>No QR renderer on the server — install <code>qrencode</code> to include codes.</small></p>" >> "$outfile"
+        fi
         echo "  <p>Scan with Telegram Camera</p>" >> "$outfile"
         echo "</div>" >> "$outfile"
     done
@@ -9693,12 +9703,49 @@ secret_qr() {
 }
 
 
-# Generate QR code URL (for Telegram photo messages)
-generate_qr_url() {
-    local link="$1"
-    local encoded
-    encoded=$(printf '%s' "$link" | sed 's/&/%26/g; s/?/%3F/g; s/=/%3D/g; s/:/%3A/g; s|/|%2F|g')
-    echo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encoded}"
+# Render a QR to a PNG on this host. Non-zero when no renderer is available.
+#
+# Duplicated from the bot daemon on purpose: the daemon is generated as a
+# self-contained script and never sources this one, which is the same reason
+# format_bytes and friends appear in both.
+_qr_png() {
+    local data="$1" out="$2"
+    [ -n "$data" ] && [ -n "$out" ] || return 1
+    if command -v qrencode &>/dev/null; then
+        qrencode -o "$out" -s 6 -m 2 "$data" 2>/dev/null && [ -s "$out" ] && return 0
+    fi
+    if command -v python3 &>/dev/null && python3 -c '' &>/dev/null 2>&1 && \
+       python3 -c 'import qrcode' &>/dev/null; then
+        python3 - "$data" "$out" <<'PYQ' 2>/dev/null && [ -s "$out" ] && return 0
+import sys
+import qrcode
+qrcode.make(sys.argv[1]).save(sys.argv[2])
+PYQ
+    fi
+    rm -f "$out" 2>/dev/null
+    return 1
+}
+
+# A self-contained <img> source for a QR, or "" when nothing can render one.
+#
+# The exported HTML sheets used to point <img> straight at api.qrserver.com, so
+# opening the sheet in a browser handed every user's proxy key — the link IS the
+# credential — to a third party. A data: URI keeps the image inside the file and
+# the key on this machine. Callers must render the link without an image when
+# this returns empty rather than reaching for a remote renderer.
+_qr_data_uri() {
+    local data="$1" png b64
+    command -v base64 &>/dev/null || return 0
+    png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || return 0
+    if _qr_png "$data" "$png"; then
+        # busybox base64 has no -w, GNU's wraps at 76 columns by default.
+        b64=$(base64 -w0 < "$png" 2>/dev/null) || b64=$(base64 < "$png" 2>/dev/null | tr -d '\n')
+        rm -f "$png" 2>/dev/null
+        [ -n "$b64" ] && printf 'data:image/png;base64,%s' "$b64"
+        return 0
+    fi
+    rm -f "$png" 2>/dev/null
+    return 0
 }
 
 # ── Section 11: Geo-Blocking ────────────────────────────────
@@ -11108,6 +11155,26 @@ _tg_set_commands() {
     fi
     _tg_api_post setMyCommands "$body"
 }
+# Print the registered command list for a role, as "command|description" lines.
+#
+# The bot daemon cannot read TG_CMDS_* itself — they live here, outside the
+# heredoc it is generated from, and it deliberately re-runs `telegram
+# sync-commands` on boot rather than keeping a copy that could drift. Its /help
+# view calls this instead, so the list a user is shown and the list Telegram is
+# told about are the same bytes.
+telegram_print_commands() {
+    case "${1:-admin}" in
+        public) printf '%s\n' "$TG_CMDS_PUBLIC" ;;
+        # A reseller reaches the public surface plus the voucher engine, which
+        # is exactly the allowlist _process_cmd applies to that role.
+        reseller)
+            printf '%s\n' "$TG_CMDS_PUBLIC"
+            printf 'mp_voucher|Generate or list vouchers\n'
+            ;;
+        superadmin) printf '%s\n' "$TG_CMDS_SUPERADMIN" ;;
+        *) printf '%s\n' "$TG_CMDS_ADMIN" ;;
+    esac
+}
 
 # Push the whole menu: public commands for everyone, the admin control plane for
 # admins, and the privileged commands for superadmins. Entirely best-effort — a
@@ -11151,11 +11218,15 @@ telegram_clear_commands() {
     return 0
 }
 
-telegram_send_photo() {
-    local photo_url="$1" caption="${2:-}"
+# Upload a photo from a file on this host. The Bot API only fetches a URL
+# itself, so a locally rendered image has to be sent as multipart — and it is
+# the reason the QR no longer has to be posted to a third party first.
+telegram_send_photo_file() {
+    local file="$1" caption="${2:-}"
     local token="${TELEGRAM_BOT_TOKEN}"
     local chat_id="${TELEGRAM_CHAT_ID}"
     { [ -z "$token" ] || [ -z "$chat_id" ]; } && return 1
+    [ -s "$file" ] || return 1
 
     local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
     [ -n "$caption" ] && caption="[${label}] ${caption}"
@@ -11164,17 +11235,18 @@ telegram_send_photo() {
     _cfg=$(_mktemp) || return 1
     printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$token" > "$_cfg"
 
-    curl -s --max-time 15 --max-filesize 10485760 -X POST \
+    curl -s --max-time 30 -X POST \
         -K "$_cfg" \
-        --data-urlencode "chat_id=${chat_id}" \
-        --data-urlencode "photo=${photo_url}" \
-        --data-urlencode "caption=${caption}" \
-        --data-urlencode "parse_mode=Markdown" \
+        -F "chat_id=${chat_id}" \
+        -F "photo=@${file}" \
+        --form-string "caption=${caption}" \
+        --form-string "parse_mode=Markdown" \
         >/dev/null 2>&1 || true
     local rc=$?
     rm -f "$_cfg"
     return $rc
 }
+
 
 telegram_get_chat_id() {
     local token="${TELEGRAM_BOT_TOKEN}"
@@ -11251,11 +11323,19 @@ telegram_notify_proxy_started() {
 
     telegram_send_message "$msg"
 
-    # Send QR for first enabled secret
+    # Send QR for first enabled secret. Rendered here and uploaded as a file;
+    # a remote renderer would be handed the key.
     if [ -n "$_first_secret" ]; then
-        local qr_url
-        qr_url=$(generate_qr_url "https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${_first_secret}")
-        telegram_send_photo "$qr_url" "📱 *MTProxy QR Code* — Scan in Telegram to connect"
+        local _qr_link _qr_file
+        _qr_link="https://t.me/proxy?server=${server_ip}&port=${PROXY_PORT}&secret=${_first_secret}"
+        _qr_file=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || _qr_file=""
+        if [ -n "$_qr_file" ] && _qr_png "$_qr_link" "$_qr_file"; then
+            telegram_send_photo_file "$_qr_file" "📱 *MTProxy QR Code* — Scan in Telegram to connect"
+            rm -f "$_qr_file"
+        else
+            rm -f "$_qr_file" 2>/dev/null
+            telegram_send_message "🔗 [Connect](${_qr_link})\n\n_Install \`qrencode\` for a scannable QR._"
+        fi
     fi
 }
 
@@ -11506,39 +11586,84 @@ tg_send_to() {
         --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
 }
 
-tg_send_photo() {
-    local photo="$1" caption="${2:-}"
-    curl -s --max-time 15 -X POST \
+
+# ── QR codes ────────────────────────────────────────────────────────────────
+#
+# The QR used to be drawn by handing the proxy link to api.qrserver.com and
+# letting Telegram fetch the image from there. The link IS the credential —
+# server, port and secret are the whole key — so that handed a working proxy key
+# to a third party on every /mp_link, every /start and every voucher redemption,
+# including in the customer's own chat. It is rendered on this host now, and the
+# image is uploaded from here; nothing but Telegram sees it.
+#
+# The same reasoning applies to the QR image embedded in the exported HTML
+# sheets, which were built from the same kind of URL.
+
+# Render a QR to a PNG on this host. Non-zero when no renderer is available, in
+# which case the caller must NOT fall back to a remote one.
+_qr_png() {
+    local data="$1" out="$2"
+    [ -n "$data" ] && [ -n "$out" ] || return 1
+    if command -v qrencode &>/dev/null; then
+        qrencode -o "$out" -s 6 -m 2 "$data" 2>/dev/null && [ -s "$out" ] && return 0
+    fi
+    if _tg_have_python && python3 -c 'import qrcode' &>/dev/null; then
+        python3 - "$data" "$out" <<'PYQ' 2>/dev/null && [ -s "$out" ] && return 0
+import sys
+import qrcode
+qrcode.make(sys.argv[1]).save(sys.argv[2])
+PYQ
+    fi
+    rm -f "$out" 2>/dev/null
+    return 1
+}
+
+# Upload a local file as a photo. The token travels in a curl config rather than
+# argv so it never appears in `ps`; -F is required because the image is a file,
+# not a URL the API can fetch itself.
+_tg_send_photo_file() {
+    local chat="$1" file="$2" caption="${3:-}"
+    [ -s "$file" ] || return 1
+    curl -s --max-time 30 -X POST \
         -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
-        --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-        --data-urlencode "photo=${photo}" \
-        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
-        --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
+        -F "chat_id=${chat}" \
+        -F "photo=@${file}" \
+        --form-string "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
+        --form-string "parse_mode=Markdown" >/dev/null 2>&1
+}
+
+# "https://t.me/proxy?...", the one form of the link that is also a credential.
+_proxy_link() {
+    printf 'https://t.me/proxy?server=%s&port=%s&secret=%s' "$1" "$2" "$3"
+}
+
+_send_qr() {
+    local chat="$1" ip="$2" port="$3" secret="$4" caption="$5"
+    local link png
+    link=$(_proxy_link "$ip" "$port" "$secret")
+    png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || png=""
+    if [ -n "$png" ] && _qr_png "$link" "$png"; then
+        _tg_send_photo_file "$chat" "$png" "$caption"
+        rm -f "$png" 2>/dev/null
+        return 0
+    fi
+    rm -f "$png" 2>/dev/null
+    # No renderer here. Send the tappable link rather than reaching for a remote
+    # one: the operator gets something usable, and the key stays on this host.
+    tg_send_to "$chat" "🔗 [Connect](${link})\n\n_Install \`qrencode\` (or \`python3-qrcode\`) for a scannable QR._"
+    return 1
 }
 
 # Send QR code image for a proxy secret (no text URL — avoids Telegram bot bans)
 send_proxy_qr() {
     local ip="$1" port="$2" secret="$3" caption="${4:-Scan in Telegram to connect}"
-    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
-    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
-    tg_send_photo "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
+    _send_qr "$TELEGRAM_CHAT_ID" "$ip" "$port" "$secret" "$caption"
 }
 
-tg_send_photo_to() {
-    local target_cid="$1" photo="$2" caption="${3:-}"
-    curl -s --max-time 15 -X POST \
-        -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
-        --data-urlencode "chat_id=${target_cid}" \
-        --data-urlencode "photo=${photo}" \
-        --data-urlencode "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
-        --data-urlencode "parse_mode=Markdown" >/dev/null 2>&1
-}
 
 send_proxy_qr_to() {
     local target_cid="$1" ip="$2" port="$3" secret="$4" caption="${5:-Scan in Telegram to connect}"
-    local hl="https://t.me/proxy?server=${ip}&port=${port}&secret=${secret}"
-    local el=$(printf '%s' "$hl" | sed 's/&/%26/g;s/?/%3F/g;s/=/%3D/g;s/:/%3A/g;s|/|%2F|g')
-    tg_send_photo_to "$target_cid" "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${el}" "$caption"
+    _send_qr "$target_cid" "$ip" "$port" "$secret" "$caption"
 }
 
 # Escape Markdown special chars in labels for Telegram
@@ -11725,7 +11850,7 @@ _cb_enc() {
     [ -n "$act" ]  && out="${out}:${act}"
     [ -n "$tgt" ]  && out="${out}:${tgt}"
     [ -n "$page" ] && out="${out}:${page}"
-    [ "${#out}" -le "$_CB_MAX" ] || return 1
+    [ "${#out}" -le "${_CB_MAX:-64}" ] || return 1
     printf '%s' "$out"
 }
 
@@ -11739,7 +11864,7 @@ _cb_dec() {
     local p="$1"
     _CB_NS=""; _CB_ACT=""; _CB_TGT=""; _CB_PAGE=""
     [ -n "$p" ] || return 1
-    [ "${#p}" -le "$_CB_MAX" ] || return 1
+    [ "${#p}" -le "${_CB_MAX:-64}" ] || return 1
     [[ "$p" =~ ^[a-z]{1,2}(:[A-Za-z0-9_-]{1,32}){0,3}$ ]] || return 1
     local IFS=':' _f
     local -a _fields
@@ -12225,10 +12350,17 @@ _process_cmd() {
         grep -q "^${chat_id}$" "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || echo "$chat_id" >> "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || true
     fi
 
+    # An armed prompt owns the next plain message from this chat. It runs before
+    # the command table so a value can never be mistaken for a command, and it
+    # deliberately sits AFTER the role lookup — the answer still executes as the
+    # sender, never as whoever armed the prompt.
+    _tg_pending_try "$chat_id" "$text" && return
+
     # Public user or unauthenticated commands
     case "$text" in
         /start|/start@*)
-            tg_send_to "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> [label] — Redeem a gift code / voucher\n  /voucher <code> [label] — Alias for /redeem\n  /support <message> — Send a support request to server admins"
+            tg_send_to_kb "$chat_id" "🛡️ *Welcome to MTProxyMax Self-Service Portal (${VERSION})*\n\n👋 Hello! You can use this bot to check your proxy status, data limits, and connection links without admin assistance.\n\n📱 *Public Commands Available:*\n  /my_status <label> — Check your data quota & expiration\n  /redeem <code> [label] — Redeem a gift code / voucher\n  /voucher <code> [label] — Alias for /redeem\n  /support <message> — Send a support request to server admins" \
+                "$(_tg_button_bar "$chat_id")"
             return
             ;;
         /my_status\ *|/my_status@*\ *)
@@ -12332,16 +12464,30 @@ _process_cmd() {
                     local cnt=$(echo "$text" | awk '{print $3}')
                     local qta=$(echo "$text" | awk '{print $4}')
                     local dys=$(echo "$text" | awk '{print $5}')
-                    "${INSTALL_DIR}/mtproxymax" voucher create "${cnt:-1}" "${qta:-10G}" "${dys:-30}" &>/dev/null
-                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | tail -n +3 | head -n "${cnt:-1}")
-                    tg_send "🎟 *Generated Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    [[ "$cnt" =~ ^[0-9]+$ ]] && [ "$cnt" -ge 1 ] && [ "$cnt" -le 100 ] || cnt=1
+                    # Snapshot the active count first: the vault is append-only,
+                    # so the rows past that index are exactly the new ones. The
+                    # previous version read the list back and did `tail -n +3`,
+                    # which silently showed the wrong rows.
+                    local _before; _before=$(_tg_voucher_count)
+                    "${INSTALL_DIR}/mtproxymax" voucher create "$cnt" "${qta:-10G}" "${dys:-30}" &>/dev/null
+                    local vbody; vbody=$(_tg_voucher_lines "$_before")
+                    if [ -n "$vbody" ]; then
+                        tg_send "🎟 *Generated ${cnt} voucher(s)*${vbody}"
+                    else
+                        tg_send "❌ No vouchers were created — check the server log."
+                    fi
                     ;;
                 list)
-                    local vout=$("${INSTALL_DIR}/mtproxymax" voucher list active | head -n 25)
-                    tg_send "📋 *Active Vouchers*\n\`\`\`\n${vout}\n\`\`\`"
+                    local vbody; vbody=$(_tg_voucher_lines)
+                    if [ -n "$vbody" ]; then
+                        tg_send "📋 *Active Vouchers*${vbody}"
+                    else
+                        tg_send "📋 *Active Vouchers*\n\n_None yet._"
+                    fi
                     ;;
                 *)
-                    tg_send "🎟 *Voucher Engine*\n\nUsage:\n\`/mp_voucher create <count> <quota> <days>\`\n\`/mp_voucher list\`"
+                    tg_send "🎟 *Voucher Engine*\n\n• /mp\\_voucher create <count> <quota> <days>\n• /mp\\_voucher list"
                     ;;
             esac
             ;;
@@ -12353,7 +12499,8 @@ _process_cmd() {
             fi
             local _si _so _sc; read -r _si _so _sc <<< "$(get_stats)"
             local up=$(get_uptime)
-            tg_send "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${_sc}\n📊 Traffic: ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}"
+            tg_send_kb "📱 *MTProxy Status*\n\n🟢 Status: Running\n⏱ Uptime: $(format_duration $up)\n👥 Connections: ${_sc}\n📊 Traffic: ↓ $(format_bytes ${_cum_out:-0}) ↑ $(format_bytes ${_cum_in:-0})\n🔗 Port: ${PROXY_PORT} | Domain: ${PROXY_DOMAIN}" \
+                "$(_tg_button_bar "$chat_id")"
             ;;
         /mp_secrets|/mp_secrets@*)
             load_tg_settings
@@ -12380,7 +12527,7 @@ _process_cmd() {
                 local cui=${_cum_user_in["$label"]:-0} cuo=${_cum_user_out["$label"]:-0}
                 msg+="${icon} *$(_esc "$label")* — ${uc} conn | ↓$(format_bytes $cuo) ↑$(format_bytes $cui)\n"
             done < "$SECRETS_FILE"
-            tg_send "$msg"
+            tg_send_kb "$msg" "$(_tg_button_bar "$chat_id")"
             ;;
         /mp_link|/mp_link@*)
             load_tg_settings
@@ -12494,10 +12641,20 @@ _process_cmd() {
             ;;
         /mp_health|/mp_health@*)
             local health_out
-            health_out=$("${INSTALL_DIR}/mtproxymax" health 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -20) || true
-            local status_icon="🟢"
-            echo "$health_out" | grep -qi "fail\|error\|down" && status_icon="🔴"
-            tg_send "${status_icon} *Health Check*\n\n\`\`\`\n${health_out}\n\`\`\`"
+            health_out=$("${INSTALL_DIR}/mtproxymax" health 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | head -40) || true
+            local hbody
+            hbody=$(_tg_kv_lines <<< "$health_out")
+            if [ -z "$hbody" ]; then
+                # The check output is key/value today. If that ever changes, fall
+                # back to the raw lines rather than an empty reply — a failed
+                # parse must not read as "everything is fine".
+                hbody=$(while IFS= read -r _l; do
+                            [ -z "$_l" ] && continue
+                            printf '\n• %s' "$(_esc "$_l")"
+                        done <<< "$(printf '%s' "$health_out" | head -15)")
+                [ -z "$hbody" ] && hbody=$'\n⚠️ No output from the health check.'
+            fi
+            tg_send_kb "🩺 *Health Check*${hbody}" "$(_tg_button_bar "$chat_id")"
             ;;
         /mp_traffic|/mp_traffic@*)
             load_tg_settings
@@ -12513,7 +12670,7 @@ _process_cmd() {
                 local cuo; cuo=$(echo "$cum_u" | awk '{print $2}')
                 msg+="👤 *$(_esc "$label")*: ↓ $(format_bytes $cuo) ↑ $(format_bytes $cui)\n"
             done < "$SECRETS_FILE"
-            tg_send "$msg"
+            tg_send_kb "$msg" "$(_tg_button_bar "$chat_id")"
             ;;
         /mp_update|/mp_update@*)
             [ "$role" != "superadmin" ] && { tg_send "⛔ Permission denied: superadmin required."; return; }
@@ -12521,7 +12678,12 @@ _process_cmd() {
             local update_out
             update_out=$("${INSTALL_DIR}/mtproxymax" update </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tail -5)
             if [ -n "$update_out" ]; then
-                tg_send "📋 Update check:\n\`\`\`\n${update_out}\n\`\`\`"
+                local ubody=""
+                while IFS= read -r _l; do
+                    [ -z "$_l" ] && continue
+                    ubody+="\n• $(_esc "$_l")"
+                done <<< "$update_out"
+                tg_send "📋 *Update check*${ubody}"
             else
                 tg_send "✅ Script is up to date"
             fi
@@ -12549,18 +12711,63 @@ _process_cmd() {
             local sl_ips=$(echo "$args" | awk '{print $3}')
             local sl_quota=$(echo "$args" | awk '{print $4}')
             local sl_exp=$(echo "$args" | awk '{print $5}')
-            [ -z "$sl_label" ] && tg_send "❌ Usage: /mp\\_setlimit <label> <conns> <ips> <quota> [expires]\nExample: /mp\\_setlimit alice 100 5 5G 2026-12-31" && return
+            [ -z "$sl_label" ] && tg_send "❌ Usage: /mp\\_setlimit <label> <conns> <ips> <quota> [expires]\nExample: /mp\\_setlimit alice 100 5 5G 2026-12-31\n_Leave a field out to keep it as it is._" && return
             [[ "$sl_label" =~ ^[a-zA-Z0-9_-]+$ ]] || { tg_send "❌ Invalid label"; return; }
-            if "${INSTALL_DIR}/mtproxymax" secret setlimits "$sl_label" "${sl_conns:-0}" "${sl_ips:-0}" "${sl_quota:-0}" "${sl_exp:-}" &>/dev/null; then
-                tg_send "✅ Limits updated for *$(_esc "$sl_label")*\nConns: ${sl_conns:-0} | IPs: ${sl_ips:-0} | Quota: ${sl_quota:-0}"
+
+            # Only the fields actually given are written. `secret setlimits`
+            # cannot express that: it reads an empty argument as 0, and
+            # secret_set_limits reads 0 as UNLIMITED — so `/mp_setlimit alice
+            # 100` used to clear alice's IP cap and quota as a side effect. The
+            # per-field `secret setlimit` verb touches one field and no other.
+            local -a _sl_changes=() _sl_flags
+            [ -n "$sl_conns" ] && _sl_changes+=("conns:$sl_conns")
+            [ -n "$sl_ips" ]   && _sl_changes+=("ips:$sl_ips")
+            [ -n "$sl_quota" ] && _sl_changes+=("quota:$sl_quota")
+            [ -n "$sl_exp" ]   && _sl_changes+=("expires:$sl_exp")
+            if [ "${#_sl_changes[@]}" -eq 0 ]; then
+                tg_send "❌ Nothing to change — give at least one of conns, ips, quota or expires."
+                return
+            fi
+
+            local _ok=1 _i _n=${#_sl_changes[@]}
+            for (( _i = 0; _i < _n; _i++ )); do
+                # Every field but the last is applied without a reload, so a
+                # multi-field change costs one engine sync rather than four.
+                _sl_flags=()
+                [ $(( _i + 1 )) -lt "$_n" ] && _sl_flags=(--no-restart)
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$sl_label" \
+                    "${_sl_changes[$_i]%%:*}" "${_sl_changes[$_i]#*:}" "${_sl_flags[@]}" &>/dev/null || _ok=0
+            done
+            if [ "$_ok" -eq 1 ]; then
+                local _shown="" _c
+                for _c in "${_sl_changes[@]}"; do _shown+="${_shown:+ · }${_c/:/ = }"; done
+                tg_send "✅ Limits updated for *$(_esc "$sl_label")*\n${_shown}"
             else
-                tg_send "❌ Failed to set limits for *$(_esc "$sl_label")* — check label exists"
+                tg_send "❌ Failed to set limits for *$(_esc "$sl_label")* — check the value and that the label exists"
             fi
             ;;
         /mp_fleet|/mp_fleet@*)
             local fleet_out; fleet_out=$("${INSTALL_DIR}/mtproxymax" fleet status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
-            [ -z "$fleet_out" ] && fleet_out="No multi-server fleet telemetry collected yet."
-            tg_send "🌐 *Global Federation Fleet Summary*\n\`\`\`\n${fleet_out}\n\`\`\`"
+            if [ -z "$fleet_out" ]; then
+                tg_send "🌐 *Fleet*\n\n_No multi-server fleet telemetry collected yet._"
+                return
+            fi
+            # One block per node. The CLI aligns this with printf padding, which
+            # only reads as columns inside a fence; per-node lines carry the same
+            # data and survive a proportional font.
+            local _f _msg="🌐 *Fleet*" _n=0 _h _ip _users _traffic _load
+            while IFS= read -r _f; do
+                case "$_f" in ""|HOSTNAME*|*"---"*) continue ;; esac
+                read -r _h _ip _users _traffic _load _ <<< "$_f"
+                [ -z "$_h" ] && continue
+                _msg+="\n🟢 *$(_esc "$_h")*"
+                [ -n "$_ip" ] && _msg+=" — \`$(_esc "$_ip")\`"
+                [ -n "$_users" ] && _msg+=" · 👥 ${_users}"
+                [ -n "$_traffic" ] && _msg+=" · 📊 ${_traffic}"
+                _n=$(( _n + 1 ))
+            done <<< "$fleet_out"
+            [ "$_n" -eq 0 ] && _msg+="\n\n_No nodes reported._"
+            tg_send "$_msg"
             ;;
         /mp_upstreams|/mp_upstreams@*)
             load_tg_settings
@@ -12600,7 +12807,7 @@ _process_cmd() {
                 *)
                     load_tg_settings
                     local st="🟢 NORMAL"; [ "${LOCKDOWN_MODE:-false}" = "true" ] && st="🔴 LOCKDOWN ACTIVE"
-                    tg_send "🔒 *Emergency Lockdown Mode*: ${st}\n\nUsage:\n\`/mp_lockdown on\` — Activate Emergency Shield\n\`/mp_lockdown off\` — Return to Normal"
+                    tg_send "🔒 *Emergency Lockdown Mode*: ${st}\n\n• /mp\\_lockdown on — Activate Emergency Shield\n• /mp\\_lockdown off — Return to Normal"
                     ;;
             esac
             ;;
@@ -12650,20 +12857,1639 @@ _process_cmd() {
             tg_send "📢 Broadcast dispatched to all users."
             ;;
         /mp_help|/mp_help@*)
-            tg_send "📋 *MTProxyMax Commands (${VERSION})*\n\n*Public Self-Service:*\n/start — Self-service onboarding\n/my\_status <label> — Check data quota & expiry\n/voucher <code> — Redeem voucher code\n/support <msg> — Send ticket to helpdesk\n\n*Admin Control Plane:*\n/mp\_fleet — Global Federation Fleet Dashboard\n/mp\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\_voucher list — List vouchers\n/mp\_status — Proxy status\n/mp\_secrets — List secrets\n/mp\_link — Get proxy links + QR\n/mp\_add <label> — Add secret\n/mp\_remove / /mp\_revoke <label> — Remove secret\n/mp\_rotate <label> — Rotate secret\n/mp\_enable <label> — Enable secret\n/mp\_disable <label> — Disable secret\n/mp\_limits — Show user limits\n/mp\_setlimit — Set user limits\n/mp\_upstreams — List upstreams\n/mp\_traffic — Traffic report\n/mp\_health — Health check\n/mp\_lockdown [on|off] — Emergency shield\n/mp\_digest — System digest report\n/mp\_broadcast <msg> — Broadcast to all users\n/reply <chat\_id> <msg> — Reply to support ticket\n/mp\_restart — Restart proxy\n/mp\_update — Check for updates\n/mp\_help — This help"
+            tg_send_kb "📋 *MTProxyMax Commands (${VERSION})*\n\n*Public Self-Service:*\n/start — Self-service onboarding\n/my\_status <label> — Check data quota & expiry\n/voucher <code> — Redeem voucher code\n/support <msg> — Send ticket to helpdesk\n\n*Admin Control Plane:*\n/mp\_fleet — Global Federation Fleet Dashboard\n/mp\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\_voucher list — List vouchers\n/mp\_status — Proxy status\n/mp\_secrets — List secrets\n/mp\_link — Get proxy links + QR\n/mp\_add <label> — Add secret\n/mp\_remove / /mp\_revoke <label> — Remove secret\n/mp\_rotate <label> — Rotate secret\n/mp\_enable <label> — Enable secret\n/mp\_disable <label> — Disable secret\n/mp\_limits — Show user limits\n/mp\_setlimit — Set user limits\n/mp\_upstreams — List upstreams\n/mp\_traffic — Traffic report\n/mp\_health — Health check\n/mp\_lockdown [on|off] — Emergency shield\n/mp\_digest — System digest report\n/mp\_broadcast <msg> — Broadcast to all users\n/reply <chat\_id> <msg> — Reply to support ticket\n/mp\_restart — Restart proxy\n/mp\_update — Check for updates\n/mp\_help — This help" "$(_tg_button_bar "$chat_id")"
             ;;
     esac
 }
 
-# Callback-query entry point. The interactive menus land here in the next
-# change; for now it exists so that _consume_updates honours the offset
-# contract and an unexpected tap is acknowledged rather than leaving the
-# client spinning forever.
-_process_callback() {
-    local chat_id="$1" message_id="$2" callback_id="$3" payload="$4"
-    : "$chat_id" "$message_id" "$payload"
-    tg_answer_cb "$callback_id" "" "false"
+# >>> TG_MENU_BEGIN
+
+
+# >>> TG_PENDING_BEGIN
+# ── Pending input ───────────────────────────────────────────────────────────
+#
+# Inline buttons cannot collect typed text, so a flow that needs a value arms a
+# prompt for that chat and the next plain message from it is taken as the
+# answer. State is one line per chat:
+#
+#   <chat_id>|<verb>|<target>|<expires_epoch>
+#
+# This daemon is the only reader AND the only writer (one shell, one loop), so
+# the rewrite needs no lock — the same reasoning the history appenders use.
+#
+# The answer is consumed by _tg_pending_try before the command dispatcher ever
+# sees it, and a slash command always escapes: being trapped in a prompt with no
+# way back to the command surface is a worse failure than losing an answer.
+_TG_PENDING_TTL=300
+_tg_pending_file() { printf '%s' "${INSTALL_DIR}/relay_stats/.tg_pending"; }
+
+_tg_pending_set() {
+    local chat="$1" verb="$2" target="${3:--}"
+    local f now exp tmp
+    f=$(_tg_pending_file)
+    # An empty path would make the temp file below land in the CURRENT
+    # DIRECTORY as "./.tmp.<pid>" — which is how a stray dotfile gets committed.
+    # INSTALL_DIR is always set in the shipped daemon, so this only ever fires
+    # in a caller that sourced the block without it.
+    [ -n "$f" ] || return 1
+    now=$(date +%s)
+    exp=$(( now + ${_TG_PENDING_TTL:-300} ))
+    mkdir -p "${INSTALL_DIR}/relay_stats" 2>/dev/null || true
+    tmp="${f}.tmp.$$"
+    # Re-arm REPLACES rather than appends: leaving an older line in place would
+    # answer with the stale verb, and the file is read top-down.
+    {
+        [ -f "$f" ] && grep -v "^${chat}|" "$f" 2>/dev/null
+        printf '%s|%s|%s|%s\n' "$chat" "$verb" "$target" "$exp"
+    } > "$tmp" 2>/dev/null && mv "$tmp" "$f" 2>/dev/null
+    chmod 600 "$f" 2>/dev/null || true
+    return 0
 }
+
+# Read-and-clear. Prints "<verb>|<target>"; non-zero when nothing was armed.
+_tg_pending_take() {
+    local chat="$1" f now tmp out="" matched=1
+    f=$(_tg_pending_file)
+    [ -n "$f" ] || return 1
+    [ -f "$f" ] || return 1
+    now=$(date +%s)
+    tmp="${f}.tmp.$$"
+    # Expired rows are dropped here rather than by a sweeper: this is the only
+    # place they matter, and a prompt nobody answers leaves no garbage behind.
+    while IFS='|' read -r _c _v _t _e; do
+        [ -z "$_c" ] && continue
+        if [ "$_c" = "$chat" ]; then
+            if [ "${_e:-0}" -gt "$now" ] 2>/dev/null; then
+                out="${_v}|${_t}"; matched=0
+            fi
+            continue
+        fi
+        printf '%s|%s|%s|%s\n' "$_c" "$_v" "$_t" "$_e"
+    done < "$f" > "$tmp" 2>/dev/null
+    mv "$tmp" "$f" 2>/dev/null || : > "$f"
+    [ "$matched" -eq 0 ] || return 1
+    printf '%s' "$out"
+    return 0
+}
+
+_tg_pending_clear() {
+    local chat="$1" f tmp
+    f=$(_tg_pending_file)
+    [ -n "$f" ] || return 0
+    [ -f "$f" ] || return 0
+    tmp="${f}.tmp.$$"
+    grep -v "^${chat}|" "$f" > "$tmp" 2>/dev/null
+    mv "$tmp" "$f" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+    return 0
+}
+
+# Arm a prompt and tell the chat about it. The prompt is SENT rather than used to
+# edit the card that spawned it, because that card is what the operator wants to
+# come back to when they cancel.
+_tg_pending_prompt() {
+    local chat="$1" verb="$2" target="$3" text="$4"
+    _tg_pending_set "$chat" "$verb" "$target" || return 1
+    _UI_ROLE="$(_check_tg_role "$chat")"
+    _kb_reset
+    _kb_row "❌ Cancel|p:x"
+    tg_send_to_kb "$chat" "${text}\n\n_Send it as a normal message. Any /command cancels._" "$(_kb_json)"
+    return 0
+}
+
+# Give an armed prompt first refusal on an incoming message. Returns 0 when the
+# message was consumed as an answer, 1 when the caller must dispatch it.
+_tg_pending_try() {
+    local chat="$1" text="$2" v
+    case "$text" in
+        /*) _tg_pending_clear "$chat"; return 1 ;;
+    esac
+    v=$(_tg_pending_take "$chat") || return 1
+    _tg_pending_run "$chat" "${v%%|*}" "${v#*|}" "$text"
+    return 0
+}
+
+# Dispatch a consumed answer to the flow that armed the prompt.
+_tg_pending_run() {
+    local chat="$1" verb="$2" target="$3" value="$4"
+    case "$verb" in
+        add)
+            if ! _cb_label_ok "$value"; then
+                tg_send_to "$chat" "❌ Invalid label — letters, digits, '_' and '-' only, max 32 characters."
+                return 1
+            fi
+            if ! "${INSTALL_DIR}/mtproxymax" secret add "$value" &>/dev/null; then
+                tg_send_to "$chat" "❌ Could not add *$(_esc "$value")* — it may already exist."
+                return 1
+            fi
+            tg_send_to "$chat" "✅ Secret *$(_esc "$value")* created.$(_tg_new_secret_link "$value")"
+            ;;
+        note|adtag)
+            # target is the label, read back out of a file on disk, so it is
+            # re-validated here exactly as it was on the way in.
+            if ! _cb_label_ok "$target" || ! _cb_secret_exists "$target"; then
+                tg_send_to "$chat" "❌ That secret no longer exists."
+                return 1
+            fi
+            if [ "$verb" = "adtag" ]; then
+                # 32 hex is what the engine accepts; "clear" reverts to the
+                # global tag. Anything else would be written and then ignored.
+                if [ "$value" != "clear" ] && ! [[ "$value" =~ ^[0-9a-fA-F]{32}$ ]]; then
+                    tg_send_to "$chat" "❌ An ad-tag must be 32 hex characters, or 'clear'."
+                    return 1
+                fi
+            fi
+            if "${INSTALL_DIR}/mtproxymax" secret "$verb" "$target" "$value" &>/dev/null; then
+                tg_send_to "$chat" "✅ ${verb} updated for *$(_esc "$target")*."
+            else
+                tg_send_to "$chat" "❌ Could not update the ${verb}."
+                return 1
+            fi
+            ;;
+        tplnew)
+            # "name" or "name conns ips quota expires". read rather than word
+            # splitting: an unquoted expansion would let a "*" in the text glob
+            # against the working directory.
+            local _nm _c _i _q _e
+            read -r _nm _c _i _q _e <<< "$value"
+            if ! _cb_label_ok "$_nm"; then
+                tg_send_to "$chat" "❌ Use letters, digits, '_' and '-' only, max 32 characters."
+                return 1
+            fi
+            if "${INSTALL_DIR}/mtproxymax" template save "$_nm" "${_c:-0}" "${_i:-0}" "${_q:-0}" "${_e:-0}" "" &>/dev/null; then
+                tg_send_to "$chat" "✅ Template *$(_esc "$_nm")* saved. Open *Templates* to tune each field."
+            else
+                tg_send_to "$chat" "❌ Could not save the template."
+                return 1
+            fi
+            ;;
+        tplnotes|tplexpires)
+            if ! _cb_label_ok "$target" || ! _cb_tpl_exists "$target"; then
+                tg_send_to "$chat" "❌ That template no longer exists."
+                return 1
+            fi
+            [ "$verb" = "tplnotes" ] && _cb_tpl_set "$target" notes "$value" || _cb_tpl_set "$target" expires "$value"
+            tg_send_to "$chat" "✅ Template *$(_esc "$target")* updated."
+            ;;
+        broadcast)
+            if [ -z "$value" ]; then
+                tg_send_to "$chat" "❌ Nothing to broadcast."
+                return 1
+            fi
+            if "${INSTALL_DIR}/mtproxymax" broadcast "$value" &>/dev/null; then
+                tg_send_to "$chat" "📢 Broadcast dispatched."
+            else
+                tg_send_to "$chat" "❌ Broadcast failed."
+                return 1
+            fi
+            ;;
+        setq|setc|seti|setx|setr)
+            # target is the label. It came out of a file on disk, so it is
+            # re-validated here exactly as it was on the way in.
+            if ! _cb_label_ok "$target" || ! _cb_secret_exists "$target"; then
+                tg_send_to "$chat" "❌ That secret no longer exists."
+                return 1
+            fi
+            _CB_TOAST=""
+            if _cb_apply_limit "$verb" "$target" "$value"; then
+                tg_send_to "$chat" "✅ *$(_esc "$target")*: ${_CB_TOAST}"
+            else
+                tg_send_to "$chat" "❌ ${_CB_TOAST}"
+                return 1
+            fi
+            ;;
+        *)
+            tg_send_to "$chat" "❌ That prompt is no longer valid."
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# The connect block for a just-created secret, or "" if it cannot be built.
+# Shared by every flow that provisions a secret so the wording and the
+# FakeTLS/plain branch stay in one place.
+_tg_new_secret_link() {
+    local label="$1" ip secret dh fs
+    ip=$(get_cached_ip)
+    [ -z "$ip" ] && return 0
+    secret=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+    [ -z "$secret" ] && return 0
+    if [ "${MASKING_ENABLED:-true}" != "false" ]; then
+        dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+        fs="ee${secret}${dh}"
+    else
+        fs="dd${secret}"
+    fi
+    printf '\n\n🔗 [Connect](https://t.me/proxy?server=%s&port=%s&secret=%s)\n📡 `%s:%s`' \
+        "$ip" "${PROXY_PORT}" "$fs" "$ip" "${PROXY_PORT}"
+}
+# <<< TG_PENDING_END
+# ── Interactive inline-keyboard menus ───────────────────────────────────────
+#
+# The security model: callback_data is entirely attacker-controlled — a user
+# can send any payload they like — so every tap is re-authorised here against
+# the same rules _process_cmd applies. A button must never grant more than
+# typing the equivalent command would.
+#
+# TG_CB_CAPS is the single source of truth for "what capability does this
+# action need". BOTH the renderer (to decide which buttons to show) and the
+# enforcer (to decide whether to act) read it, so the two cannot drift apart.
+# The same property is pinned by tests/test_telegram_callback_dispatch.sh,
+# which fails if this table stops matching _process_cmd's gates.
+#
+# Capabilities, weakest first: public < reseller < admin < superadmin.
+TG_CB_CAPS="n=public
+m=public
+m:h=public
+u:l=admin
+u:s=admin
+t=admin
+t:w=admin
+t:u=admin
+y=admin
+y:e=admin
+s=admin
+a:enable=admin
+a:disable=admin
+a:rotate=admin
+c:enable=admin
+c:disable=admin
+c:rotate=admin
+a:remove=superadmin
+c:remove=superadmin
+u:m=admin
+e=admin
+e:q=admin
+e:c=admin
+e:i=admin
+e:x=admin
+e:r=admin
+e:n=admin
+e:a=admin
+e:t=admin
+c:setq=admin
+c:setc=admin
+c:seti=admin
+c:setx=admin
+c:setr=admin
+c:tpl=admin
+p=public
+p:x=public
+k=admin
+k:e=admin
+k:p=admin
+k:a=admin
+k:s=admin
+k:d=admin
+k:n=admin
+g=admin
+g:a=admin
+g:b=admin
+y:d=admin
+y:p=admin
+y:f=admin
+y:v=admin
+y:u=admin
+a:rotall=superadmin
+c:rotall=superadmin
+a:restart=superadmin
+c:restart=superadmin
+a:update=superadmin
+c:update=superadmin
+a:lockdown=superadmin
+c:lockdown=superadmin"
+
+_tg_cap_rank() {
+    case "$1" in
+        public)     echo 0 ;;
+        reseller)   echo 1 ;;
+        admin)      echo 2 ;;
+        superadmin) echo 3 ;;
+        *)          echo -1 ;;
+    esac
+}
+
+# An unrecognised role string ranks as public-only and is refused LOUDLY,
+# whereas the literal role "none" is refused silently — mirroring _process_cmd,
+# where an unknown auth level is denied and audited but an unauthenticated
+# chatter is simply ignored. admins.conf is hand-editable, so anything that is
+# not exactly superadmin or reseller must never exceed public.
+_tg_role_rank() {
+    case "$1" in
+        superadmin) echo 3 ;;
+        reseller)   echo 1 ;;
+        *)          echo 0 ;;
+    esac
+}
+
+# Capability for a namespace, preferring the ns:action entry over the bare ns.
+_tg_cap_for() {
+    local ns="$1" act="${2:-}"
+    local k v found=""
+    while IFS='=' read -r k v; do
+        [ -z "$k" ] && continue
+        if [ -n "$act" ] && [ "$k" = "${ns}:${act}" ]; then printf '%s' "$v"; return 0; fi
+        [ "$k" = "$ns" ] && found="$v"
+    done <<< "$TG_CB_CAPS"
+    printf '%s' "$found"
+}
+
+# 0 if the role currently rendering (_UI_ROLE) may use this action.
+_cb_can() {
+    local cap need have
+    cap=$(_tg_cap_for "$1" "${2:-}")
+    [ -n "$cap" ] || return 1
+    need=$(_tg_cap_rank "$cap")
+    have=$(_tg_role_rank "${_UI_ROLE:-none}")
+    [ "$need" -ge 0 ] || return 1
+    [ "$have" -ge "$need" ]
+}
+
+# ── Rendering helpers ───────────────────────────────────────────────────────
+_tg_json_esc() {
+    local t="$1"
+    t="${t//\\/\\\\}"
+    t="${t//\"/\\\"}"
+    printf '%s' "$t"
+}
+
+_TG_KB=""
+_kb_reset() { _TG_KB=""; }
+# _kb_row "Label|payload" "Label|payload" ... — rows with no usable button are
+# dropped, which keeps a viewer without permission from seeing an empty row.
+_kb_row() {
+    local spec lbl data out="" first=1
+    for spec in "$@"; do
+        lbl="${spec%%|*}"; data="${spec#*|}"
+        [ -z "$data" ] && continue
+        [ "$first" -eq 1 ] || out="${out},"
+        first=0
+        out="${out}{\"text\":\"$(_tg_json_esc "$lbl")\",\"callback_data\":\"$(_tg_json_esc "$data")\"}"
+    done
+    [ -z "$out" ] && return 0
+    [ -n "$_TG_KB" ] && _TG_KB="${_TG_KB},"
+    _TG_KB="${_TG_KB}[${out}]"
+}
+_kb_json() { [ -n "$_TG_KB" ] && printf '{"inline_keyboard":[%s]}' "$_TG_KB"; }
+
+# Replace the message the button lived on. Both _CB_CHAT and _CB_MID come from
+# the callback itself, which Telegram authenticates, so no chat id ever has to
+# travel inside callback_data where a user could forge it.
+_cb_edit() {
+    local text="$1" kb="${2:-}"
+    tg_edit "$_CB_CHAT" "$_CB_MID" "$(printf '%b' "$text")" "$kb"
+}
+_cb_edit_markup() {
+    local kb="$1"
+    tg_edit_markup "$_CB_CHAT" "$_CB_MID" "$kb"
+}
+
+_tg_metrics_raw() {
+    curl -s --max-time 2 "http://127.0.0.1:${PROXY_METRICS_PORT:-9090}/metrics" 2>/dev/null
+}
+
+# Per-user live metrics in ONE awk pass: "label|conns|ips" per line. Forking
+# per user would make a 50-user menu unusably slow.
+_cb_user_metrics() {
+    local _m; _m=$(_tg_metrics_raw)
+    [ -z "$_m" ] && return 0
+    printf '%s' "$_m" | awk '
+        function lbl(s, k,   p, q) { p=index(s,k"=\""); if(!p) return ""; s=substr(s,p+length(k)+2); q=index(s,"\""); return q ? substr(s,1,q-1) : "" }
+        /^telemt_user_connections_current\{/ { u=lbl($0,"user"); if(u) c[u]+=$NF }
+        /^telemt_user_unique_ips_current\{/  { u=lbl($0,"user"); if(u) i[u]+=$NF }
+        END { for(u in c) printf "%s|%.0f|%.0f\n", u, c[u]+0, i[u]+0 }
+    '
+}
+
+_cb_secret_exists() {
+    [ -n "$1" ] && _cb_label_ok "$1" && [ -f "$SECRETS_FILE" ] && \
+        grep -qE "^$1\|" "$SECRETS_FILE" 2>/dev/null
+}
+
+# ── Views ───────────────────────────────────────────────────────────────────
+_cb_render_hub() {
+    local _up _msg
+    _up=$(get_uptime)
+    _msg="🛡️ *MTProxyMax* — $(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")"
+    _msg+="\n\n🟢 Running · ⏱ $(format_duration "${_up:-0}")"
+    _msg+="\n👥 $(get_active_connections) live connections"
+    _msg+="\n\nChoose a view:"
+    _kb_reset
+    _kb_row "$(_cb_can u l && printf '👥 Users|u:l:0')" "$(_cb_can t && printf '📈 Traffic|t')"
+    _kb_row "$(_cb_can y && printf '🖥 Server|y')"     "$(_cb_can k && printf '🧩 Templates|k')"
+    _kb_row "$(_cb_can g && printf '🛠 Tools|g')"      "$(_cb_can s && printf '⚙️ Settings|s')"
+    _kb_row "❓ Help|m:h"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The list is rendered from the same source Telegram is told about, fetched
+# over the CLI. The old version was a hand-maintained string that had already
+# drifted from TG_CMDS_* — it advertised commands that no longer existed and
+# missed ones that did.
+_cb_render_help() {
+    local _case="admin"
+    case "${_UI_ROLE:-none}" in
+        superadmin) _case="superadmin" ;;
+        reseller)   _case="reseller" ;;
+        *)          _case="public" ;;
+    esac
+
+    local out
+    out=$("${INSTALL_DIR}/mtproxymax" telegram commands "$_case" 2>/dev/null)
+    # An underscore in a command name is Markdown emphasis, so the leading slash
+    # has to be escaped or "/mp_status" renders as "/mp" + italic "status".
+    out=$(printf '%s' "$out" | sed 's|^|/|; s|_|\\_|g')
+
+    local _msg="📋 *Commands*"
+    if [ -n "$out" ]; then
+        _msg+="\n\n${out}"
+    else
+        _msg+="\n\n_Command list unavailable — try_ \`mtproxymax telegram sync-commands\`_._"
+    fi
+    _msg+="\n\n_Every one of these is also a button. Send any command to get the menu._"
+
+    _kb_reset
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_user_list() {
+    local page="${1:-0}" note="${2:-}"
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+    [ -f "$SECRETS_FILE" ] || { _cb_edit "📋 No secrets configured." ""; return 0; }
+
+    local -a _labels=() _enabled=()
+    local label secret created enabled rest
+    while IFS='|' read -r label secret created enabled rest || [ -n "$label" ]; do
+        [[ "$label" =~ ^# ]] && continue
+        _cb_label_ok "$label" || continue
+        _labels+=("$label"); _enabled+=("$enabled")
+    done < "$SECRETS_FILE"
+
+    local _total=${#_labels[@]}
+    local per=6
+    local _pages=$(( (_total + per - 1) / per ))
+    [ "$_pages" -lt 1 ] && _pages=1
+    [ "$page" -ge "$_pages" ] && page=$(( _pages - 1 ))
+
+    declare -A _conns=()
+    while IFS='|' read -r _l _c _i; do
+        [ -n "$_l" ] && _conns["$_l"]="${_c:-0}"
+    done < <(_cb_user_metrics)
+
+    local _msg="${note:+${note}\n\n}"
+    _msg+="👥 *Users* — ${_total} total"
+    # Declared separately on purpose: inside a single `local a=6 b=$((a+6))`
+    # bash expands $a against the OUTER scope, so _end silently came out as
+    # per rather than start+per and every page after the first rendered empty.
+    local _i _start _end
+    _start=$(( page * per ))
+    _end=$(( _start + per ))
+    [ "$_end" -gt "$_total" ] && _end=$_total
+    _kb_reset
+    for (( _i = _start; _i < _end; _i++ )); do
+        local _lbl="${_labels[$_i]}" _icon="🟢"
+        [ "${_enabled[$_i]}" != "true" ] && _icon="🔴"
+        local _btn="${_icon} ${_lbl}"
+        [ "${#_btn}" -gt 34 ] && _btn="${_btn:0:34}"
+        _kb_row "${_btn}|u:s:${_lbl}:${page}"
+    done
+    local _prev="" _next=""
+    [ "$page" -gt 0 ] && _prev="◀ Prev|u:l:$(( page - 1 ))"
+    [ "$_end" -lt "$_total" ] && _next="Next ▶|u:l:$(( page + 1 ))"
+    _kb_row "$_prev" "$(( page + 1 ))/${_pages}|n" "$_next"
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_bar() {
+    local pct="${1:-0}"
+    [[ "$pct" =~ ^-?[0-9]+$ ]] || pct=0
+    [ "$pct" -lt 0 ] && pct=0
+    [ "$pct" -gt 100 ] && pct=100
+    local _f=$(( pct / 10 )) _e=$(( 10 - pct / 10 ))
+    local _s="" _i
+    for (( _i = 0; _i < _f; _i++ )); do _s+="▓"; done
+    for (( _i = 0; _i < _e; _i++ )); do _s+="░"; done
+    printf '%s' "$_s"
+}
+
+_cb_render_user_detail() {
+    local label="$1" page="${2:-0}" note="${3:-}"
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _line _l _s _created _en _mc _mi _q _ex _notes _adtag
+    _line=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1)
+    IFS='|' read -r _l _s _created _en _mc _mi _q _ex _notes _adtag <<< "$_line"
+
+    local _conns=0 _ips=0
+    while IFS='|' read -r _ml _mc2 _mi2; do
+        [ "$_ml" = "$label" ] && { _conns="${_mc2:-0}"; _ips="${_mi2:-0}"; }
+    done < <(_cb_user_metrics)
+
+    local _in="${_cum_user_in[$label]:-0}" _out="${_cum_user_out[$label]:-0}"
+    local _total=$(( _in + _out ))
+    local _icon="🟢 active" ; [ "$_en" != "true" ] && _icon="🔴 disabled"
+
+    local _msg="${note:+${note}\n\n}"
+    _msg+="👤 *$(_esc "$label")*\n"
+    _msg+="🔌 ${_icon} · 📡 ${_conns} conn / ${_ips} IP\n"
+    _msg+="📊 since reset: ↓ $(format_bytes "$_out") ↑ $(format_bytes "$_in")\n"
+    if [ -n "$_q" ] && [ "$_q" -gt 0 ] 2>/dev/null; then
+        local _pct=$(( (_total * 100) / _q ))
+        [ "$_pct" -gt 100 ] && _pct=100
+        _msg+="🧮 quota $(_cb_bar "$_pct") ${_pct}% of $(format_bytes "$_q")\n"
+    else
+        _msg+="🧮 quota unlimited\n"
+    fi
+    if [ -n "$_ex" ] && [ "$_ex" != "0" ] && [ "$_ex" != "" ]; then
+        local _exp_e _days
+        _exp_e=$(_iso_to_epoch "$_ex")
+        if [ "${_exp_e:-0}" -gt 0 ] 2>/dev/null; then
+            _days=$(( (_exp_e - $(date +%s)) / 86400 ))
+            if [ "$_days" -lt 0 ]; then _msg+="⏳ expired on ${_ex}\n"
+            else _msg+="⏳ expires in ${_days}d (${_ex})\n"; fi
+        fi
+    else
+        _msg+="⏳ no expiry\n"
+    fi
+
+    local _reset; _reset=$(_cb_quota_reset_day "$label")
+    [ -n "$_notes" ] && _msg+="📝 $(_esc "$_notes")\n"
+    [ -n "$_reset" ] && _msg+="🔁 Quota resets on day ${_reset}\n"
+
+    _kb_reset
+    _kb_row "🔄 Refresh|u:s:${label}:${page}" "🔗 Link|u:k:${label}"
+    _kb_row "$(_kb_spec "⚙️ Manage" "u" "m" "$label" "$page")"
+    if [ "$_en" = "true" ]; then
+        _cb_can a disable && _kb_row "⏸ Disable|a:disable:${label}" "$(_cb_can a rotate && printf '♻️ Rotate|a:rotate:%s' "$label")"
+    else
+        _cb_can a enable && _kb_row "▶️ Enable|a:enable:${label}"
+    fi
+    _cb_can a remove && _kb_row "🗑 Remove|a:remove:${label}"
+    _kb_row "◀ Back|u:l:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# "Label|payload", or "" when the payload cannot be encoded. One payload over
+# 64 bytes makes Telegram reject the WHOLE keyboard with a 400, so a button that
+# silently disappears is strictly better than a card that fails to render — but
+# only where the caller says so in the body. See _cb_render_tpl_picker.
+_kb_spec() {
+    local lbl="$1" p
+    p=$(_cb_enc "$2" "$3" "$4" "$5") || return 0
+    printf '%s|%s' "$lbl" "$p"
+}
+
+# Human text for a preset value. Values travel the wire in their raw form (the
+# callback charset has no room for "+", "∞" or a space), so the pretty form is
+# always computed here rather than stored.
+_cb_preset_label() {
+    case "$1" in
+        q|c|i) [ "$2" = "0" ] && printf '∞' || printf '%s' "$2" ;;
+        x)     [ "$2" = "0" ] && printf 'never' || printf '+%sd' "$2" ;;
+        *)     printf '%s' "$2" ;;
+    esac
+}
+
+_cb_render_user_manage() {
+    local label="$1" page="${2:-0}"
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _line _l _s _created _en _mc _mi _q _ex _notes _adtag
+    _line=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1)
+    IFS='|' read -r _l _s _created _en _mc _mi _q _ex _notes _adtag <<< "$_line"
+
+    local _reset; _reset=$(_cb_quota_reset_day "$label")
+
+    local _msg="⚙️ *Manage $(_esc "$label")*\n\n"
+    if [ -n "$_q" ] && [ "$_q" -gt 0 ] 2>/dev/null; then
+        _msg+="🧮 Quota: $(format_bytes "$_q")\n"
+    else
+        _msg+="🧮 Quota: unlimited\n"
+    fi
+    _msg+="🔌 Max connections: $([ -n "$_mc" ] && [ "$_mc" != "0" ] && printf '%s' "$_mc" || printf 'unlimited')\n"
+    _msg+="🌐 Max IPs: $([ -n "$_mi" ] && [ "$_mi" != "0" ] && printf '%s' "$_mi" || printf 'unlimited')\n"
+    _msg+="⏳ Expires: $(_cb_expiry_text "$_ex")\n"
+    _msg+="🔁 Quota reset: $([ -n "$_reset" ] && printf 'day %s' "$_reset" || printf 'off')\n"
+    _msg+="📝 Note: $([ -n "$_notes" ] && printf '%s' "$(_esc "$_notes")" || printf '_none_')\n"
+    _msg+="🏷 Ad-tag: $([ -n "$_adtag" ] && printf '`%s`' "$(_esc "$_adtag")" || printf '_global default_')"
+    # The expiry picker's relative presets and its "never" option mean different
+    # CLI verbs, so say which is which rather than making the operator guess.
+
+    _kb_reset
+    _kb_row "$(_kb_spec "🧮 Quota" "e" "q" "$label" "$page")" \
+            "$(_kb_spec "🔌 Conns" "e" "c" "$label" "$page")"
+    _kb_row "$(_kb_spec "🌐 IPs" "e" "i" "$label" "$page")" \
+            "$(_kb_spec "⏳ Expiry" "e" "x" "$label" "$page")"
+    _kb_row "$(_kb_spec "🔁 Reset day" "e" "r" "$label" "$page")" \
+            "$(_kb_spec "🧩 Template" "e" "t" "$label" "$page")"
+    _kb_row "$(_kb_spec "📝 Note" "e" "n" "$label" "$page")" \
+            "$(_kb_spec "🏷 Ad-tag" "e" "a" "$label" "$page")"
+    _kb_row "◀ Back|u:s:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The picker for one limit field. Every button commits through the per-field
+# CLI verb — never `secret setlimits`, whose zeroes mean "unlimited" and would
+# silently clear the fields the operator did not touch.
+_cb_render_limits() {
+    local field="$1" label="$2" page="${3:-0}" act title presets
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    case "$field" in
+        q) act="setq"; title="Quota";               presets="5G 10G 50G 100G 0" ;;
+        c) act="setc"; title="Max connections";     presets="5 10 20 50 0" ;;
+        i) act="seti"; title="Max IPs";             presets="1 3 5 10 0" ;;
+        x) act="setx"; title="Expiry";              presets="7 30 90 365 0" ;;
+        r) act="setr"; title="Quota reset day";     presets="1 15 28 off" ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+
+    local _msg="🧮 *${title} — $(_esc "$label")*\n\n"
+    case "$field" in
+        q) _msg+="_Pick a cap, or ∞ for no limit._" ;;
+        c) _msg+="_Telegram opens ~3 connections per device, so a cap under 5 will break a single client._" ;;
+        i) _msg+="_An IP cap is a weak anti-sharing measure: mobile clients roam between cells._" ;;
+        x) _msg+="_Relative presets extend from today. 'never' clears the date._" ;;
+        r) _msg+="_Resets the traffic counter on that day of each month._" ;;
+    esac
+
+    _kb_reset
+    # Two per row. Built as an array rather than a space-joined string: a spec
+    # containing a space would otherwise split into two bogus buttons.
+    local -a _specs=()
+    local _v _spec
+    for _v in $presets; do
+        _spec=$(_kb_spec "$(_cb_preset_label "$field" "$_v")" "c" "$act" "$label" "$_v")
+        [ -n "$_spec" ] && _specs+=("$_spec")
+        if [ "${#_specs[@]}" -eq 2 ]; then _kb_row "${_specs[@]}"; _specs=(); fi
+    done
+    [ "${#_specs[@]}" -gt 0 ] && _kb_row "${_specs[@]}"
+    # A value the presets do not cover. It arms a pending prompt rather than
+    # committing, because the grammar has no room for free text.
+    _kb_row "$(_kb_enc_custom "$label" "$field")"
+    _kb_row "◀ Back|u:m:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# "✏️ Custom…" — arms a pending prompt for a value the presets do not cover. The
+# field rides in the page slot so the flow keeps the label as its target, which
+# is what every other payload in this file does.
+_kb_enc_custom() {
+    local label="$1" field="$2" p
+    p=$(_cb_enc "e" "z" "$label" "$field") || return 0
+    printf '✏️ Custom…|%s' "$p"
+}
+
+# ── Limit templates ─────────────────────────────────────────────────────────
+#
+# templates.conf holds "name|conns|ips|quota|expires|notes", and the CLI's
+# `template save` already overwrites by name — so editing a template is a
+# read-modify-write that rebuilds the row with one field replaced. No new CLI
+# verb is needed, but the rebuild has to carry the fields it did not touch:
+# template_save replaces the whole row, so a stale or mis-split read would
+# quietly reset notes and expiry, the two easiest columns to lose.
+
+_cb_tpl_get() {   # <name> <field 1..6> -> value, "" if absent
+    local f="${INSTALL_DIR}/templates.conf" _n _c _i _q _e _notes
+    [ -f "$f" ] || return 0
+    while IFS='|' read -r _n _c _i _q _e _notes; do
+        [ "$_n" = "$1" ] || continue
+        case "$2" in
+            1) printf '%s' "$_n" ;; 2) printf '%s' "$_c" ;; 3) printf '%s' "$_i" ;;
+            4) printf '%s' "$_q" ;; 5) printf '%s' "$_e" ;; 6) printf '%s' "$_notes" ;;
+        esac
+        return 0
+    done < "$f"
+}
+
+_cb_tpl_exists() {
+    [ -n "$1" ] && [ -f "${INSTALL_DIR}/templates.conf" ] && \
+        grep -qE "^$1\|" "${INSTALL_DIR}/templates.conf" 2>/dev/null
+}
+
+# Write the row back with one field replaced. Reads inside the same call that
+# writes it, so the fields the operator did not touch are the ones on disk now.
+_cb_tpl_set() {   # <name> <slot> <value>; slot = conns|ips|quota|expires|notes
+    local name="$1" slot="$2" value="$3"
+    local _c _i _q _e _notes
+    _c=$(_cb_tpl_get "$name" 2); _i=$(_cb_tpl_get "$name" 3)
+    _q=$(_cb_tpl_get "$name" 4); _e=$(_cb_tpl_get "$name" 5)
+    _notes=$(_cb_tpl_get "$name" 6)
+    case "$slot" in
+        conns)   _c="$value" ;;
+        ips)     _i="$value" ;;
+        quota)   _q="$value" ;;
+        expires) _e="$value" ;;
+        notes)   _notes="$value" ;;
+        *) return 1 ;;
+    esac
+    "${INSTALL_DIR}/mtproxymax" template save "$name" "${_c:-0}" "${_i:-0}" "${_q:-0}" "${_e:-0}" "${_notes:-}" &>/dev/null
+}
+
+_cb_render_tpl_list() {
+    local f="${INSTALL_DIR}/templates.conf" _msg="🧩 *Limit templates*\n" _n=0 _t _rest _skipped=""
+    _kb_reset
+    if [ -f "$f" ]; then
+        while IFS='|' read -r _t _rest; do
+            [ -z "$_t" ] && continue
+            # A name outside the callback charset cannot be a button. Say so in
+            # the body rather than letting _kb_spec drop it without a trace.
+            if ! _cb_label_ok "$_t"; then _skipped+="${_t} "; continue; fi
+            _kb_row "$(_kb_spec "📋 $_t" "k" "e" "$_t" "0")"
+            _n=$(( _n + 1 ))
+        done < "$f"
+    fi
+    if [ -n "$_skipped" ]; then
+        _msg+="\n_Not shown (name has characters a button cannot carry): ${_skipped}_"
+    fi
+    if [ "$_n" -eq 0 ]; then
+        _msg+="\n_Nothing saved yet._"
+    fi
+    _msg+="\n\n_A template is a named bundle of limits you can apply to any secret._"
+    _kb_row "$(_cb_can k n && printf '➕ New template|k:n')"
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_tpl_edit() {
+    local name="$1" page="${2:-0}" _c _i _q _e _notes
+    ! _cb_tpl_exists "$name" && { _CB_TOAST="Template '$name' not found"; return 1; }
+    _c=$(_cb_tpl_get "$name" 2); _i=$(_cb_tpl_get "$name" 3)
+    _q=$(_cb_tpl_get "$name" 4); _e=$(_cb_tpl_get "$name" 5)
+    _notes=$(_cb_tpl_get "$name" 6)
+
+    local _msg="🧩 *$(_esc "$name")*\n\n"
+    _msg+="🔌 Max connections: $([ -n "$_c" ] && [ "$_c" != "0" ] && printf '%s' "$_c" || printf 'unlimited')\n"
+    _msg+="🌐 Max IPs: $([ -n "$_i" ] && [ "$_i" != "0" ] && printf '%s' "$_i" || printf 'unlimited')\n"
+    _msg+="🧮 Quota: $([ -n "$_q" ] && [ "$_q" != "0" ] && printf '%s' "$(format_bytes "$_q")" || printf 'unlimited')\n"
+    _msg+="⏳ Expires: $(_cb_expiry_text "$_e")\n"
+    _msg+="📝 Notes: $([ -n "$_notes" ] && printf '%s' "$(_esc "$_notes")" || printf '_none_')"
+
+    _kb_reset
+    _kb_row "$(_kb_spec "🔌 Conns" "k" "p" "$name" "c")" "$(_kb_spec "🌐 IPs" "k" "p" "$name" "i")"
+    _kb_row "$(_kb_spec "🧮 Quota" "k" "p" "$name" "q")" "$(_kb_spec "⏳ Expires" "k" "p" "$name" "x")"
+    _kb_row "$(_kb_spec "📝 Notes" "k" "p" "$name" "n")"
+    _kb_row "$(_cb_can k s && printf '✨ Apply to a user…|k:s:%s:0' "$name")"
+    _kb_row "$(_cb_can k d && printf '🗑 Delete|k:d:%s:0' "$name")"
+    _kb_row "◀ Back|k"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The preset picker for one template field. Commits straight to c:tplset rather
+# than through a confirmation: this edits a stored template, which changes
+# nothing for a connected user and is one tap from being undone. The confirm
+# rule is for actions that touch live secrets.
+_cb_render_tpl_field() {
+    local name="$1" field="$2"
+    ! _cb_tpl_exists "$name" && { _CB_TOAST="Template '$name' not found"; return 1; }
+
+    local slot presets title hint
+    case "$field" in
+        c) slot="conns";   presets="5 10 20 50 0";   title="Max connections"; hint="Telegram opens ~3 connections per device." ;;
+        i) slot="ips";     presets="1 3 5 10 0";     title="Max IPs";          hint="A secondary anti-sharing measure." ;;
+        q) slot="quota";   presets="5G 10G 50G 100G 0"; title="Quota";         hint="0 means unlimited." ;;
+        x) slot="expires"; presets="0";              title="Expires";          hint="A date is set per user when the template is applied; type one to change it." ;;
+        n) slot="notes";   presets="";               title="Notes";            hint="Free text." ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+
+    if [ "$field" = "n" ]; then
+        # Notes has no useful presets, so it goes straight to a typed prompt.
+        _tg_pending_prompt "$_CB_CHAT" "tplnotes" "$name" \
+            "📝 *Notes for template $(_esc "$name")*\n\nSend the text to store."
+        _CB_TOAST="Send the note"
+        return 0
+    fi
+    if [ "$field" = "x" ]; then
+        _tg_pending_prompt "$_CB_CHAT" "tplexpires" "$name" \
+            "⏳ *Expiry for template $(_esc "$name")*\n\nSend a date as YYYY-MM-DD, or 0 for none."
+        _CB_TOAST="Send the date"
+        return 0
+    fi
+
+    local _msg="🧩 *${title} — $(_esc "$name")*\n\n_${hint}_"
+    _kb_reset
+    local -a _specs=()
+    local _v _spec
+    for _v in $presets; do
+        _spec=$(_kb_spec "$(_cb_preset_label "$field" "$_v")" "c" "tplset" "$name" "${field}${_v}")
+        [ -n "$_spec" ] && _specs+=("$_spec")
+        if [ "${#_specs[@]}" -eq 2 ]; then _kb_row "${_specs[@]}"; _specs=(); fi
+    done
+    [ "${#_specs[@]}" -gt 0 ] && _kb_row "${_specs[@]}"
+    _kb_row "◀ Back|k:e:${name}:0"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_tpl_apply_picker() {
+    local name="$1" page="${2:-0}" _t
+    ! _cb_tpl_exists "$name" && { _CB_TOAST="Template '$name' not found"; return 1; }
+
+    local _msg="✨ *Apply $(_esc "$name") to…*\n" _n=0
+    _kb_reset
+    while IFS='|' read -r _l _rest; do
+        [[ "$_l" =~ ^# ]] && continue
+        [ -z "$_l" ] && continue
+        _cb_label_ok "$_l" || continue
+        _kb_row "$(_kb_spec "👤 $_l" "c" "tpl" "$_l" "$name")"
+        _n=$(( _n + 1 ))
+    done < "$SECRETS_FILE"
+    [ "$_n" -eq 0 ] && _msg+="\n_No secrets to apply it to._"
+    _kb_row "◀ Back|k:e:${name}:0"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# Templates that can be applied to this secret. A name that cannot survive the
+# callback charset is listed as text rather than as a button: _kb_spec drops
+# what it cannot encode, and a template the operator can see is unavailable
+# beats one that silently is not there.
+_cb_render_tpl_picker() {
+    local label="$1" page="${2:-0}" f="${INSTALL_DIR}/templates.conf" _t _rest
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    [[ "$page" =~ ^[0-9]+$ ]] || page=0
+
+    local _msg="🧩 *Apply a template to $(_esc "$label")*\n\n"
+    _kb_reset
+    local _n=0 _skipped=""
+    if [ -f "$f" ]; then
+        while IFS='|' read -r _t _rest; do
+            [ -z "$_t" ] && continue
+            if ! _cb_label_ok "$_t"; then _skipped+="${_t} "; continue; fi
+            _kb_row "$(_kb_spec "📋 $_t" "c" "tpl" "$label" "$_t")"
+            _n=$(( _n + 1 ))
+        done < "$f"
+    fi
+    if [ -n "$_skipped" ]; then
+        _msg+="_Not shown (name has characters a button cannot carry): ${_skipped}_\n\n"
+    fi
+    if [ "$_n" -eq 0 ]; then
+        _msg+="_Nothing to apply. Save one with_ \`mtproxymax template save <name> <conns> <ips> <quota> <expires>\`_._\n"
+    fi
+    _kb_row "◀ Back|u:m:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_quota_reset_day() {
+    local f="${INSTALL_DIR}/secrets_quota_reset.conf" _l _d
+    [ -f "$f" ] || return 0
+    while IFS='|' read -r _l _d; do
+        [ "$_l" = "$1" ] && { printf '%s' "$_d"; return 0; }
+    done < "$f"
+}
+
+_cb_expiry_text() {
+    local ex="$1" e days
+    if [ -z "$ex" ] || [ "$ex" = "0" ]; then printf 'never'; return 0; fi
+    e=$(_iso_to_epoch "$ex")
+    if [ "${e:-0}" -gt 0 ] 2>/dev/null; then
+        days=$(( (e - $(date +%s)) / 86400 ))
+        if [ "$days" -lt 0 ]; then printf 'expired (%s)' "$ex"
+        else printf 'in %sd (%s)' "$days" "$ex"; fi
+    else
+        printf '%s' "$ex"
+    fi
+}
+
+_cb_render_confirm() {
+    local verb="$1" label="$2" page="${3:-0}" pretty=""
+    case "$verb" in
+        enable)  pretty="Enable" ;;
+        disable) pretty="Disable" ;;
+        rotate)  pretty="Rotate" ;;
+        remove)  pretty="Remove" ;;
+        rotall)  pretty="Rotate all secrets" ;;
+        restart) pretty="Restart the proxy" ;;
+        update)  pretty="Apply the update" ;;
+        lockdown)
+            case "$label" in
+                on)  pretty="Activate lockdown" ;;
+                off) pretty="Lift lockdown" ;;
+                *) _CB_TOAST="Unknown mode"; return 1 ;;
+            esac ;;
+        *) _CB_TOAST="Unknown action"; return 1 ;;
+    esac
+
+    # The global verbs are targetless. "_" is their placeholder, and it is
+    # matched here rather than treated as a label so that a secret genuinely
+    # named "_" is still a secret for enable/disable/rotate/remove.
+    case "$verb" in
+        rotall|restart|update|lockdown) label="" ;;
+    esac
+    [ -n "$label" ] && ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+
+    local _extra=""
+    case "$verb" in
+        rotall)  _extra="\n\nEvery client on every secret will have to reconnect." ;;
+        restart) _extra="\n\nThe proxy is briefly unreachable to all users." ;;
+        update)  _extra="\n\nThe installed script is replaced and the proxy may restart." ;;
+        lockdown) _extra="\n\nThis hardens the kernel posture and tightens the proxy immediately." ;;
+        disable)
+            local _c=0
+            while IFS='|' read -r _ml _mc2 _mi2; do
+                [ "$_ml" = "$label" ] && _c="${_mc2:-0}"
+            done < <(_cb_user_metrics)
+            [ "${_c:-0}" -gt 0 ] && _extra="\n\nThis immediately disconnects *${_c}* active session(s)."
+            ;;
+        remove) _extra="\n\nThe key stops working immediately and cannot be restored." ;;
+        rotate) _extra="\n\nEvery client using this key must reconnect." ;;
+    esac
+    local _msg="⚠️ *${pretty} $(_esc "$label")?*${_extra}"
+    _kb_reset
+    _kb_row "✅ Yes, ${pretty,,}|c:${verb}:${label}" "❌ Cancel|u:s:${label}:${page}"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# Arm a pending prompt for a limit value outside the preset set. The verb in the
+# store is the same one the preset commits through, so the typed value lands on
+# exactly the same validated path — the prompt is not a second, laxer way in.
+_cb_prompt_custom_limit() {
+    local label="$1" field="$2" act="" title=""
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    case "$field" in
+        q) act="setq"; title="quota (e.g. 250M, 2G, or 0 for unlimited)" ;;
+        c) act="setc"; title="maximum connections (a whole number, 0 for unlimited)" ;;
+        i) act="seti"; title="maximum unique IPs (a whole number, 0 for unlimited)" ;;
+        x) act="setx"; title="expiry as days from today (0 for never) or YYYY-MM-DD" ;;
+        r) act="setr"; title="quota reset day (1-28, or 'off')" ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+    _tg_pending_prompt "$_CB_CHAT" "$act" "$label" \
+        "✏️ *Custom ${act#set} for $(_esc "$label")*\n\nSend the value as a normal message — ${title}."
+    _CB_TOAST="Send the value"
+}
+
+# Validate and apply one limit change. Sets _CB_TOAST on failure; returns 0 when
+# the CLI accepted it.
+#
+# The value arrives through callback_data (attacker-controlled) or through the
+# pending store (a file on disk), so it is validated here rather than trusted.
+# Every field goes through the per-field `secret setlimit` verb and never
+# `secret setlimits`, whose zeroes read as "unlimited" and would silently clear
+# the fields the operator did not touch.
+_cb_apply_limit() {
+    local verb="$1" label="$2" value="$3"
+    case "$verb" in
+        setq)
+            [[ "$value" =~ ^[0-9]+[KMGTkmgt]?$ ]] || { _CB_TOAST="Enter a size like 250M or 2G"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" quota "$value" &>/dev/null \
+                && { _CB_TOAST="Quota updated"; return 0; }
+            ;;
+        setc)
+            { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 1000000 ]; } || { _CB_TOAST="Enter a number up to 1000000"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" conns "$value" &>/dev/null \
+                && { _CB_TOAST="Connection limit updated"; return 0; }
+            ;;
+        seti)
+            { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 100000 ]; } || { _CB_TOAST="Enter a number up to 100000"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" ips "$value" &>/dev/null \
+                && { _CB_TOAST="IP limit updated"; return 0; }
+            ;;
+        setx)
+            if [ "$value" = "0" ]; then
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" expires 0 &>/dev/null \
+                    && { _CB_TOAST="Expiry cleared"; return 0; }
+            elif [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                "${INSTALL_DIR}/mtproxymax" secret setlimit "$label" expires "$value" &>/dev/null \
+                    && { _CB_TOAST="Expiry set to ${value}"; return 0; }
+            elif [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 3650 ]; then
+                # Relative dates are the CLI's job: it already does the calendar
+                # arithmetic, including the short-month and timezone handling.
+                "${INSTALL_DIR}/mtproxymax" secret extend "$label" "$value" &>/dev/null \
+                    && { _CB_TOAST="Extended by ${value}d"; return 0; }
+            else
+                _CB_TOAST="Enter days (1-3650), YYYY-MM-DD, or 0 for never"
+                return 1
+            fi
+            ;;
+        setr)
+            case "$value" in
+                off) ;;
+                [0-9]|[12][0-9]) ;;
+                *) _CB_TOAST="Enter a day between 1 and 28, or 'off'"; return 1 ;;
+            esac
+            "${INSTALL_DIR}/mtproxymax" secret quota-reset "$label" "$value" &>/dev/null \
+                && { _CB_TOAST="Reset day updated"; return 0; }
+            ;;
+        *) _CB_TOAST="Unknown action"; return 1 ;;
+    esac
+    _CB_TOAST="Failed — check the server log"
+    return 1
+}
+
+# One field of a stored template, encoded as "<field-letter><value>" so a field
+# name and its value fit in the single slot the grammar has left.
+_cb_exec_tplset() {
+    local name="$1" spec="$2" field="${2:0:1}" value="${2:1}"
+    case "$field" in
+        c) { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 1000000 ]; } || { _CB_TOAST="Enter a number up to 1000000"; return 1; }
+           _cb_tpl_set "$name" conns "$value" ;;
+        i) { [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -le 100000 ]; } || { _CB_TOAST="Enter a number up to 100000"; return 1; }
+           _cb_tpl_set "$name" ips "$value" ;;
+        q) [[ "$value" =~ ^[0-9]+[KMGTkmgt]?$ ]] || { _CB_TOAST="Enter a size like 250M or 2G"; return 1; }
+           _cb_tpl_set "$name" quota "$value" ;;
+        *) _CB_TOAST="Unknown field"; return 1 ;;
+    esac
+    _CB_TOAST="Saved"
+    return 0
+}
+
+# The verbs that act on the server rather than on one secret. They have no
+# label, and for lockdown the second field is a mode rather than a page number.
+_cb_exec_global() {
+    local verb="$1" arg="$2" out=""
+    case "$verb" in
+        rotall)
+            if out=$("${INSTALL_DIR}/mtproxymax" secret rotate --all 2>&1); then
+                _CB_TOAST="All secrets rotated"
+            else
+                _CB_TOAST="Rotate-all failed"
+            fi
+            _cb_render_tools
+            ;;
+        restart)
+            if "${INSTALL_DIR}/mtproxymax" restart &>/dev/null; then
+                _CB_TOAST="Restarting"
+            else
+                _CB_TOAST="Restart failed"
+            fi
+            _cb_render_tools
+            ;;
+        update)
+            out=$("${INSTALL_DIR}/mtproxymax" update </dev/null 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | tail -5)
+            _CB_TOAST="Update finished"
+            _cb_render_update "$out"
+            ;;
+        lockdown)
+            case "$arg" in
+                on|off) ;;
+                *) _CB_TOAST="Unknown lockdown mode"; return 1 ;;
+            esac
+            if "${INSTALL_DIR}/mtproxymax" lockdown "$arg" &>/dev/null; then
+                _CB_TOAST="Lockdown ${arg}"
+                # LOCKDOWN_MODE is read by the renderers; reload it so the tools
+                # card reflects the change on the very next draw.
+                load_tg_settings
+            else
+                _CB_TOAST="Lockdown failed"
+            fi
+            _cb_render_tools
+            ;;
+        *) _CB_TOAST="Unknown action"; return 1 ;;
+    esac
+    return 0
+}
+
+# Only the c: namespace mutates anything. a: just renders a confirmation, so a
+# destructive action is never one mis-tap away.
+#
+# $3 is the origin list page for the secret verbs and the VALUE for the set-*
+# verbs: the grammar allows four fields and a commit needs both, so they share
+# the slot. The cost is that a limit change forgets which list page the operator
+# came from. Putting the value in the action instead would cost more — the
+# capability table matches exact keys and is what decides whether a tap is
+# allowed at all, so a dynamic action name could not be authorised.
+_cb_exec_action() {
+    local verb="$1" label="$2" page="${3:-0}" out=""
+    case "$verb" in
+        rotall|restart|update|lockdown)
+            # Targetless global verbs run before the label checks below: they
+            # have no secret to validate, and for lockdown the second field is
+            # the mode ("on"/"off") rather than a page.
+            _cb_exec_global "$verb" "$label"
+            return $?
+            ;;
+        tpl)
+            # Apply a stored template to a secret. The template name rides in
+            # the page slot, so both names have to survive the callback budget;
+            # _kb_spec drops the button when they cannot.
+            ! _cb_label_ok "$label" && { _CB_TOAST="Invalid label"; return 1; }
+            ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+            ! _cb_tpl_exists "$page" && { _CB_TOAST="Template '$page' not found"; return 1; }
+            if "${INSTALL_DIR}/mtproxymax" template apply "$page" "$label" &>/dev/null; then
+                _CB_TOAST="Applied"
+                _cb_render_user_manage "$label" 0
+            else
+                _CB_TOAST="Failed"
+                _cb_render_user_manage "$label" 0
+            fi
+            return 0
+            ;;
+        tplset)
+            # One field of a stored template. page is "<field-letter><value>".
+            ! _cb_tpl_exists "$label" && { _CB_TOAST="Template '$label' not found"; return 1; }
+            _cb_exec_tplset "$label" "$page" || return 1
+            _cb_render_tpl_edit "$label" 0
+            return 0
+            ;;
+        tplnew)
+            # Named only; the values come from the editor afterwards. A name is
+            # typed, so this is reached through the pending prompt rather than a
+            # button — the branch stays for completeness and tests.
+            ! _cb_label_ok "$page" && { _CB_TOAST="Invalid template name"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" template save "$page" 0 0 0 0 "" &>/dev/null \
+                && _CB_TOAST="Created" || _CB_TOAST="Failed"
+            _cb_render_tpl_edit "$page" 0
+            return 0
+            ;;
+        tpldel)
+            ! _cb_tpl_exists "$label" && { _CB_TOAST="Template '$label' not found"; return 1; }
+            "${INSTALL_DIR}/mtproxymax" template delete "$label" &>/dev/null \
+                && _CB_TOAST="Deleted" || _CB_TOAST="Failed"
+            _cb_render_tpl_list
+            return 0
+            ;;
+        enable|disable|rotate|remove) ;;
+        setq|setc|seti|setx|setr) ;;
+        *) _CB_TOAST="Unknown action"; return 1 ;;
+    esac
+    ! _cb_label_ok "$label" && { _CB_TOAST="Invalid label"; return 1; }
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    # Only the secret verbs carry a page number. Coercing unconditionally here
+    # would flatten a limit value like "10G" or "off" to 0 before it was read.
+    case "$verb" in
+        enable|disable|rotate|remove) [[ "$page" =~ ^[0-9]+$ ]] || page=0 ;;
+    esac
+
+    case "$verb" in
+        setq|setc|seti|setx|setr)
+            # Applied, then the card is redrawn. A button tap is the only caller
+            # that wants a redraw — the pending-input path shares this validation
+            # and reports back in the chat instead, which is why the write lives
+            # in _cb_apply_limit rather than here.
+            _cb_apply_limit "$verb" "$label" "$page" || return 1
+            _cb_render_user_manage "$label" 0
+            return 0
+            ;;
+    esac
+
+    if [ "$verb" = "remove" ]; then
+        if out=$("${INSTALL_DIR}/mtproxymax" secret remove "$label" 2>&1); then
+            _CB_TOAST="Removed"
+            _cb_render_user_list "$page" "🗑 Removed *$(_esc "$label")*"
+        else
+            _CB_TOAST="Failed"
+            _cb_render_user_detail "$label" "$page" "❌ Could not remove *$(_esc "$label")*"
+        fi
+        return 0
+    fi
+
+    if out=$("${INSTALL_DIR}/mtproxymax" secret "$verb" "$label" 2>&1); then
+        _CB_TOAST="Done"
+    else
+        _CB_TOAST="Failed"
+    fi
+    _cb_render_user_detail "$label" "$page"
+}
+
+_cb_render_traffic() {
+    local win="${1:-24h}"
+    [ -z "$win" ] && win="24h"
+    local _msg="📈 *Traffic*\n\n"
+    _msg+="Lifetime: ↓ $(format_bytes "${_cum_out:-0}") ↑ $(format_bytes "${_cum_in:-0}")\n"
+    _msg+="👥 $(get_active_connections) live connections\n\n"
+    _msg+="*Per user (since reset)*\n"
+    local label secret created enabled rest _rows=""
+    if [ -f "$SECRETS_FILE" ]; then
+        while IFS='|' read -r label secret created enabled rest || [ -n "$label" ]; do
+            [[ "$label" =~ ^# ]] && continue
+            _cb_label_ok "$label" || continue
+            [ "$enabled" != "true" ] && continue
+            _rows+="$(printf '%s\n' "$(( ${_cum_user_in[$label]:-0} + ${_cum_user_out[$label]:-0} ))|$label")"$'\n'
+        done < "$SECRETS_FILE"
+    fi
+    if [ -n "$_rows" ]; then
+        while IFS='|' read -r _b _l; do
+            [ -z "$_l" ] && continue
+            _msg+="👤 $(_esc "$_l"): ↓ $(format_bytes "${_cum_user_out[$_l]:-0}") ↑ $(format_bytes "${_cum_user_in[$_l]:-0}")\n"
+        done < <(printf '%s' "$_rows" | sort -t'|' -k1 -rn | head -8)
+    else
+        _msg+="No active users.\n"
+    fi
+    _kb_reset
+    _kb_row "🔄 Refresh|t" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_engine() {
+    local _m _msg
+    _m=$(_tg_metrics_raw)
+    _msg="🩺 *Engine*\n\n"
+    if [ -z "$_m" ]; then
+        _msg+="Metrics unavailable.\n"
+    else
+        _msg+=$(printf '%s' "$_m" | awk '
+            function v(n,   i) { return (n in m) ? m[n] : 0 }
+            /^telemt_uptime_seconds /        { m["up"]=$NF }
+            /^telemt_connections_total /     { m["tot"]=$NF }
+            /^telemt_connections_bad_total / { m["bad"]=$NF }
+            /^telemt_connections_current /   { m["cur"]=$NF }
+            /^telemt_upstream_connect_success_total / { m["oks"]=$NF }
+            /^telemt_upstream_connect_fail_total /    { m["fai"]=$NF }
+            END {
+                bad = (v("tot") > 0) ? (v("bad") * 100.0 / v("tot")) : 0
+                att = v("oks") + v("fai")
+                ok  = (att > 0) ? (v("oks") * 100.0 / att) : 100
+                printf "👥 live %d · total %d\n", v("cur"), v("tot")
+                printf "⚠️ bad handshakes %.1f%%\n", bad
+                printf "🔗 upstream success %.1f%%\n", ok
+            }')
+        _msg+=$'\n'
+    fi
+    _kb_reset
+    _kb_row "🔄 Refresh|y"        "$(_cb_can y d && printf '📊 Digest|y:d')"
+    _kb_row "$(_cb_can y p && printf '🌐 Upstreams|y:p')" "$(_cb_can y f && printf '🛰 Fleet|y:f')"
+    _kb_row "$(_cb_can y v && printf '🎟 Vouchers|y:v')"  "$(_cb_can y u && printf '⬆️ Updates|y:u')"
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The posture half of what /mp_digest used to render. The three load_*() calls
+# the old handler made are manager-only and were silent no-ops inside the daemon
+# — so it advertised an SSL Shield and a Cloud Backup status it could never
+# actually read. Only the settings the daemon genuinely loads are shown.
+_cb_render_digest() {
+    local _ip _up=0 _rc=0 _st _qos _hh _msg
+    _ip=$(get_cached_ip)
+    is_proxy_running && { _up=$(get_container_uptime); _rc=$(get_active_connections); }
+    _st="🟢 NORMAL"; [ "${LOCKDOWN_MODE:-false}" = "true" ] && _st="🔴 LOCKDOWN ACTIVE"
+    _qos="off"; [ "${QOS_LIMIT_MBPS:-0}" -gt 0 ] 2>/dev/null && _qos="${QOS_LIMIT_MBPS} Mbps/IP"
+    _hh="off"; [ -n "${HAPPY_HOURS_WINDOW:-}" ] && _hh="${HAPPY_HOURS_WINDOW}"
+
+    local _total=0 _active=0 _l _en _rest
+    while IFS='|' read -r _l _s _c _en _rest; do
+        [[ "$_l" =~ ^# ]] && continue
+        [ -z "$_l" ] && continue
+        _total=$(( _total + 1 ))
+        [ "$_en" = "true" ] && _active=$(( _active + 1 ))
+    done < "$SECRETS_FILE"
+
+    _msg="📊 *Digest*\n\n"
+    _msg+="🖥 Server: \`$(_esc "${_ip:-unknown}")\` (port ${PROXY_PORT:-?})\n"
+    _msg+="⚡️ Posture: ${_st}\n"
+    _msg+="⏱ Uptime: $(format_duration "${_up:-0}")\n"
+    _msg+="🔌 Connections: ${_rc} live\n"
+    _msg+="🏎 QoS shaping: ${_qos}\n"
+    _msg+="🕒 Happy hours: ${_hh}\n"
+    _msg+="🎫 Secrets: ${_active} active of ${_total}\n"
+    _msg+="📈 Total traffic: ↓ $(format_bytes "${_cum_out:-0}") ↑ $(format_bytes "${_cum_in:-0}")"
+    _kb_reset
+    _kb_row "◀ Back|y" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_upstreams() {
+    local uf="${INSTALL_DIR}/upstreams.conf" _msg="🌐 *Upstreams*\n"
+    if [ ! -f "$uf" ]; then
+        _msg+="\n🟢 direct — all traffic leaves from this server."
+    else
+        local name type addr user pass weight iface enabled icon
+        while IFS='|' read -r name type addr user pass weight iface enabled; do
+            [[ "$name" =~ ^# ]] && continue
+            [ -z "$name" ] && continue
+            # Backward compat: the old 7-column layout kept `enabled` in field 7.
+            if [ "$iface" = "true" ] || [ "$iface" = "false" ]; then enabled="$iface"; iface=""; fi
+            icon="🟢"; [ "$enabled" != "true" ] && icon="🔴"
+            _msg+="\n${icon} *$(_esc "$name")* — ${type}"
+            [ -n "$addr" ] && _msg+=" \`$(_esc "$addr")\`"
+            [ -n "$iface" ] && _msg+=" [${iface}]"
+            _msg+=" · weight ${weight:-?}"
+        done < "$uf"
+    fi
+    _kb_reset
+    _kb_row "◀ Back|y" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_fleet() {
+    local out
+    out=$("${INSTALL_DIR}/mtproxymax" fleet status 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')
+    local _msg="🛰 *Fleet*" _n=0 _f _h _ip _users _traffic _load
+    if [ -n "$out" ]; then
+        while IFS= read -r _f; do
+            case "$_f" in ""|HOSTNAME*|*"---"*) continue ;; esac
+            read -r _h _ip _users _traffic _load _ <<< "$_f"
+            [ -z "$_h" ] && continue
+            _msg+="\n🟢 *$(_esc "$_h")*"
+            [ -n "$_ip" ] && _msg+=" — \`$(_esc "$_ip")\`"
+            [ -n "$_users" ] && _msg+=" · 👥 ${_users}"
+            [ -n "$_traffic" ] && _msg+=" · 📊 ${_traffic}"
+            _n=$(( _n + 1 ))
+        done <<< "$out"
+    fi
+    [ "$_n" -eq 0 ] && _msg+="\n\n_No multi-server telemetry collected yet._"
+    _kb_reset
+    _kb_row "◀ Back|y" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_vouchers() {
+    local body _msg
+    body=$(_tg_voucher_lines)
+    if [ -n "$body" ]; then
+        _msg="🎟 *Active vouchers*${body}"
+    else
+        _msg="🎟 *Active vouchers*\n\n_None yet. Create them from the CLI with_ \`mtproxymax voucher create\`_._"
+    fi
+    _kb_reset
+    _kb_row "◀ Back|y" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# The update check is read-only; applying it is a separate, confirmed action.
+_cb_render_update() {
+    local out="$1" _msg="⬆️ *Updates*" _l
+    if [ -n "$out" ]; then
+        while IFS= read -r _l; do
+            [ -z "$_l" ] && continue
+            _msg+="\n• $(_esc "$_l")"
+        done <<< "$out"
+    else
+        _msg+="\n\n_No output from the update check._"
+    fi
+    _kb_reset
+    _kb_row "$(_cb_can a update && printf '⬆️ Apply update|a:update:_')"
+    _kb_row "◀ Back|y" "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# Everything that needs typed input, plus the three global verbs. The global
+# verbs are targetless, so they carry "_" where a secret label would go; the
+# dispatcher special-cases that placeholder for these verbs ONLY, so a secret
+# genuinely called "_" keeps working.
+_cb_render_tools() {
+    local _msg="🛠 *Tools*\n\n_Each of these needs something typed, or affects the whole server._"
+    _kb_reset
+    _kb_row "$(_cb_can g a && printf '➕ Add user|g:a')"   "$(_cb_can g b && printf '📢 Broadcast|g:b')"
+    _kb_row "$(_cb_can a rotall && printf '♻️ Rotate all|a:rotall:_')"
+    if [ "${LOCKDOWN_MODE:-false}" = "true" ]; then
+        _cb_can a lockdown && _kb_row "🔓 Lift lockdown|a:lockdown:off"
+    else
+        _cb_can a lockdown && _kb_row "🔒 Lockdown|a:lockdown:on"
+    fi
+    _kb_row "$(_cb_can a restart && printf '🔄 Restart proxy|a:restart:_')" \
+            "$(_cb_can a update  && printf '⬆️ Apply update|a:update:_')"
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+_cb_render_settings() {
+    local _msg="⚙️ *Settings*\n\n"
+    _msg+="🔌 Port: \`${PROXY_PORT:-?}\`\n"
+    _msg+="🌐 Domain: \`$(_esc "${PROXY_DOMAIN:-?}")\`\n"
+    _msg+="📊 Metrics port: \`${PROXY_METRICS_PORT:-?}\`\n"
+    _msg+="⏱ Report interval: ${TELEGRAM_INTERVAL:-6}h\n"
+    _kb_reset
+    _kb_row "🏠 Menu|m"
+    _cb_edit "$_msg" "$(_kb_json)"
+}
+
+# Send the connect link and QR as a NEW message rather than editing: an inline
+# keyboard cannot carry a photo, so the QR has to go out separately.
+_cb_send_link() {
+    local label="$1"
+    ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
+    local _secret _ip _dh _fs
+    _secret=$(grep -E "^${label}\|" "$SECRETS_FILE" 2>/dev/null | head -1 | cut -d'|' -f2)
+    _ip=$(get_cached_ip)
+    [ -z "$_ip" ] && { _CB_TOAST="Cannot detect the server IP"; return 1; }
+    if [ "${MASKING_ENABLED:-true}" != "false" ]; then
+        _dh=$(domain_to_hex "${PROXY_DOMAIN:-cloudflare.com}")
+        _fs="ee${_secret}${_dh}"
+    else
+        _fs="dd${_secret}"
+    fi
+    _CB_TOAST="Link sent"
+    send_proxy_qr_to "$_CB_CHAT" "$_ip" "${PROXY_PORT}" "$_fs"
+}
+
+# The standard button bar attached to ordinary command replies. Inline buttons
+# carry their message implicitly via callback_query.message.message_id, so a
+# reply becomes a live dashboard with no stored message id and no session
+# state. Filtered by the requesting chat's role, so a reply never advertises a
+# button its reader cannot use.
+_tg_button_bar() {
+    local chat="$1"
+    _UI_ROLE="$(_check_tg_role "$chat")"
+    _kb_reset
+    _kb_row "$(_cb_can u l && printf '👥 Users|u:l:0')" "$(_cb_can t && printf '📈 Traffic|t')"
+    _kb_row "$(_cb_can y && printf '🩺 Health|y')" "🏠 Menu|m"
+    _kb_json
+}
+
+# ── Dispatch ────────────────────────────────────────────────────────────────
+_cb_dispatch() {
+    local role cap need have
+    if ! _cb_dec "$_CB_DATA"; then
+        _CB_TOAST="This menu is out of date — send /menu"
+        return 1
+    fi
+    load_tg_settings
+    role=$(_check_tg_role "$_CB_CHAT")
+    _UI_ROLE="$role"
+
+    # Track the chatter so /mp_broadcast reaches button-only users too.
+    if [ -n "$_CB_CHAT" ]; then
+        mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+        grep -q "^${_CB_CHAT}$" "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || \
+            echo "$_CB_CHAT" >> "${INSTALL_DIR}/bot_users.txt" 2>/dev/null || true
+    fi
+
+    cap=$(_tg_cap_for "$_CB_NS" "$_CB_ACT")
+    if [ -z "$cap" ]; then
+        _CB_TOAST="This menu is out of date — send /menu"
+        return 1
+    fi
+    need=$(_tg_cap_rank "$cap")
+    have=$(_tg_role_rank "$role")
+    if [ "$have" -lt "$need" ]; then
+        if [ "$role" = "none" ]; then
+            # Unauthenticated: answer, change nothing, log nothing — the same
+            # silent refusal _process_cmd gives.
+            _CB_TOAST=""
+            return 1
+        fi
+        _tg_security_log "$_CB_CHAT" "callback ${_CB_NS}:${_CB_ACT}${_CB_TGT:+:}${_CB_TGT}"
+        _CB_TOAST="Permission denied"
+        _CB_ALERT="true"
+        return 1
+    fi
+
+    case "$_CB_NS" in
+        n) : ;;   # page indicator: acknowledge, leave the message alone
+        m)
+            if [ "$_CB_ACT" = "h" ]; then _cb_render_help; else _cb_render_hub; fi
+            ;;
+        u)
+            case "$_CB_ACT" in
+                l) _cb_render_user_list "${_CB_TGT:-0}" ;;
+                s) _cb_render_user_detail "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                k) _cb_send_link "$_CB_TGT" ;;
+                m) _cb_render_user_manage "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                *) _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        e)
+            # One namespace for "edit a property of this secret". The page slot
+            # is the origin card for the pickers and the field code for the
+            # custom-value prompt, so it is read per action rather than once.
+            case "$_CB_ACT" in
+                q|c|i|x|r) _cb_render_limits "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                z) _cb_prompt_custom_limit "$_CB_TGT" "${_CB_PAGE:-}" ;;
+                t) _cb_render_tpl_picker "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                n) ! _cb_secret_exists "$_CB_TGT" && { _CB_TOAST="Secret not found"; } || \
+                   _tg_pending_prompt "$_CB_CHAT" "note" "$_CB_TGT" \
+                       "📝 *Note for $(_esc "$_CB_TGT")*\n\nSend the text to store. Send \`-\` to clear it." ;;
+                a) ! _cb_secret_exists "$_CB_TGT" && { _CB_TOAST="Secret not found"; } || \
+                   _tg_pending_prompt "$_CB_CHAT" "adtag" "$_CB_TGT" \
+                       "🏷 *Ad-tag for $(_esc "$_CB_TGT")*\n\nSend the 32-hex tag from \@MTProxybot, or \`clear\` to fall back to the global tag." ;;
+                *) _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        a) _cb_render_confirm "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+        c) _cb_exec_action "$_CB_ACT" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+        p)
+            # The prompt's own Cancel button. It clears whatever is armed for
+            # THIS chat and nothing else — _CB_CHAT comes from the callback,
+            # which Telegram authenticates, never from callback_data.
+            _tg_pending_clear "$_CB_CHAT"
+            _CB_TOAST="Cancelled"
+            ;;
+        g)
+            case "$_CB_ACT" in
+                a) _tg_pending_prompt "$_CB_CHAT" "add" "-" "➕ *Add a user*\n\nSend the new secret's label." ;;
+                b) _tg_pending_prompt "$_CB_CHAT" "broadcast" "-" "📢 *Broadcast*\n\nSend the message to deliver to every known bot user." ;;
+                "") _cb_render_tools ;;
+                *) _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        k)
+            case "$_CB_ACT" in
+                "")  _cb_render_tpl_list ;;
+                e)   _cb_render_tpl_edit "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                p)   _cb_render_tpl_field "$_CB_TGT" "${_CB_PAGE:-}" ;;
+                s)   _cb_render_tpl_apply_picker "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                a)   _cb_render_tpl_apply_picker "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                d)   _cb_render_confirm "tpldel" "$_CB_TGT" "${_CB_PAGE:-0}" ;;
+                n)   _tg_pending_prompt "$_CB_CHAT" "tplnew" "-" "🧩 *New template*\n\nSend a name (letters, digits, '_', '-'), and optionally the values on the same line: \`name conns ips quota expires\`." ;;
+                *)   _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        t) _cb_render_traffic "${_CB_TGT:-24h}" ;;
+        y)
+            case "$_CB_ACT" in
+                "")  _cb_render_engine ;;
+                d)   _cb_render_digest ;;
+                p)   _cb_render_upstreams ;;
+                f)   _cb_render_fleet ;;
+                v)   _cb_render_vouchers ;;
+                # Read-only: the CLI's `update` APPLIES the update, so the check
+                # only reports what is installed and offers the apply button.
+                u)   _cb_render_update "Installed version: ${VERSION}" ;;
+                *)   _CB_TOAST="Unknown action" ;;
+            esac
+            ;;
+        s) _cb_render_settings ;;
+        *) _CB_TOAST="This menu is out of date — send /menu" ;;
+    esac
+    return 0
+}
+
+# Callback-query entry point. Bash has no `finally`, so answering is made
+# structural rather than a discipline: _cb_dispatch never answers, and the
+# exactly-one answer below runs on every path — including denial, a stale
+# menu, and an unknown namespace. Without it the client spins forever.
+_process_callback() {
+    _CB_CHAT="$1"; _CB_MID="$2"; _CB_ID="$3"; _CB_DATA="$4"
+    _CB_TOAST=""; _CB_ALERT="false"
+    _cb_dispatch || true
+    tg_answer_cb "$_CB_ID" "$_CB_TOAST" "$_CB_ALERT"
+}
+# >>> TG_FMT_BEGIN
+# ── Reply formatting ────────────────────────────────────────────────────────
+#
+# Command replies used to dump CLI output into a Markdown code fence, which
+# Telegram draws as a monospace box with a copy button. That is the wrong shape
+# for a status reply: it reads as pasted console output, it cannot wrap, and it
+# puts a tap target on every line.
+#
+# The replacement is one line per fact. Alignment by padding is not available —
+# `printf "%-14s"` pads with letters, and letters do not have a uniform advance
+# width in a proportional font, so padded columns collapse outside a fence. The
+# block-element glyphs used for bars and sparklines are a different case: they
+# are drawn as a tiling set and DO share an advance width, which is why the
+# charts can stay inline.
+
+# "  Key:            value" -> "✅ *Key*: value", one line each. The padding is
+# decorative, so dropping it costs nothing; the key/value pairs are the data.
+_tg_kv_lines() {
+    local _line _k _v _icon _n=0
+    while IFS= read -r _line; do
+        [ -z "$_line" ] && continue
+        [[ "$_line" =~ ^[[:space:]]*([^:]+):[[:space:]]*(.*)$ ]] || continue
+        _k="${BASH_REMATCH[1]}"
+        _v="${BASH_REMATCH[2]}"
+        # Trim the padding printf added between the key and the colon.
+        _k="${_k%"${_k##*[![:space:]]}"}"
+        [ -z "$_k" ] && continue
+        case "$_v" in
+            *fail*|*Fail*|*FAIL*|*error*|*Error*|*down*|*Down*|*stopped*|*not\ running*)
+                _icon="❌" ;;
+            *warn*|*Warn*|*WARN*|*degraded*|*slow*)
+                _icon="⚠️" ;;
+            *) _icon="✅" ;;
+        esac
+        printf '\n%s *%s*: %s' "$_icon" "$(_esc "$_k")" "$(_esc "$_v")"
+        _n=$(( _n + 1 ))
+    done
+    [ "$_n" -gt 0 ]
+}
+
+# Active vouchers as one line each, read from vouchers.conf rather than parsed
+# out of the CLI's padded table — the source of truth for both the list reply
+# and the create reply, and it needs no column alignment to be re-derived.
+#
+# skip_first drops the rows that already existed before a create, so the reply
+# shows the codes that were just generated instead of the whole inventory.
+_tg_voucher_lines() {
+    local skip_first="${1:-0}" f="${INSTALL_DIR}/vouchers.conf" _n=0
+    local _code _quota _days _conns _ips _tier _status _created _by _at
+    [ -f "$f" ] || return 0
+    while IFS='|' read -r _code _quota _days _conns _ips _tier _status _created _by _at; do
+        [ -z "$_code" ] && continue
+        [ "$_status" != "ACTIVE" ] && continue
+        _n=$(( _n + 1 ))
+        [ "$_n" -le "$skip_first" ] && continue
+        # The code goes inside a Markdown span, so anything outside the code
+        # alphabet would either break the span or inject formatting.
+        _code=$(printf '%s' "$_code" | tr -cd 'A-Za-z0-9-')
+        [ -z "$_code" ] && continue
+        printf '\n🎟 `%s`' "$_code"
+        [ -n "$_quota" ] && [ "$_quota" != "0" ] && printf ' · %s' "$(format_bytes "$_quota")"
+        [ -n "$_days" ] && [ "$_days" != "0" ] && printf ' · %sd' "$_days"
+        [ -n "$_tier" ] && [ "$_tier" != "standard" ] && printf ' · %s' "$_tier"
+    done < "$f"
+}
+
+# How many ACTIVE rows vouchers.conf holds, so a create can report only the new
+# ones. Counted before the create runs.
+_tg_voucher_count() {
+    local f="${INSTALL_DIR}/vouchers.conf" _status
+    [ -f "$f" ] || { printf '0'; return 0; }
+    local _c=0
+    while IFS='|' read -r _code _q _d _cn _i _t _status _cr _by _at; do
+        [ -z "$_code" ] && continue
+        [ "$_status" = "ACTIVE" ] && _c=$(( _c + 1 ))
+    done < "$f"
+    printf '%s' "$_c"
+}
+# <<< TG_FMT_END
+
+# <<< TG_MENU_END
 
 # Cleanup trap for temp files
 trap _cleanup EXIT
@@ -16394,6 +18220,7 @@ cli_main() {
             case "${1:-status}" in
                 setup)   check_root; telegram_setup_wizard ;;
                 sync-commands) check_root; telegram_sync_commands ;;
+                commands) telegram_print_commands "${2:-admin}" ;;
                 test)    telegram_test_message ;;
                 status|"")
                     if [ "$TELEGRAM_ENABLED" != "true" ]; then
@@ -19031,8 +20858,11 @@ show_info_qrcode() {
     echo -e "  ${BOLD}QR generation methods (auto-detected):${NC}"
     echo -e "  ${GREEN}1.${NC} ${BOLD}qrencode${NC} (native) — fastest, renders in terminal"
     echo -e "     Install: ${DIM}apt install qrencode${NC}"
-    echo -e "  ${GREEN}2.${NC} ${BOLD}Docker${NC} — uses alpine + qrencode container"
-    echo -e "  ${GREEN}3.${NC} ${BOLD}Web API${NC} — qrserver.com (for Telegram photo messages)"
+    echo -e "  ${GREEN}2.${NC} ${BOLD}python3-qrcode${NC} — renders a PNG for the bot and the HTML sheets"
+    echo -e "     Install: ${DIM}pip install qrcode${NC}"
+    echo -e "  ${DIM}Without one of these the bot sends the tappable link instead of a QR"
+    echo -e "  image. It is never rendered by a remote service: the link contains the"
+    echo -e "  secret, so posting it anywhere would hand over the key.${NC}"
     echo ""
     echo -e "  ${BOLD}Commands:${NC}"
     echo -e "  ${GREEN}mtproxymax secret qr <label>${NC}   Show QR in terminal"
