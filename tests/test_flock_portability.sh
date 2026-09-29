@@ -119,10 +119,10 @@ awk "/<<[[:space:]]*'TELEGRAM_SCRIPT'/{f=1;next} /^TELEGRAM_SCRIPT\$/{f=0} f" \
 assert_eq "generated daemon captured" "yes" \
     "$([ -s "$DAEMON_FULL" ] && echo yes || echo no)"
 
-# Declarations and function bodies only: stop before the cleanup trap so that
-# sourcing this cannot start the daemon's main loop.
+# Declarations and function bodies only: stop before the main loop or cleanup
+# trap so that sourcing this cannot start the daemon's main loop.
 DAEMON_PRELUDE="$TEST_TMPDIR/daemon_prelude.sh"
-awk '/^trap /{exit} {print}' "$DAEMON_FULL" >"$DAEMON_PRELUDE"
+awk '/^# Main loop/ || /^trap /{exit} {print}' "$DAEMON_FULL" >"$DAEMON_PRELUDE"
 
 assert_eq "daemon defines _lock_fd" "yes" \
     "$(grep -qE '^_lock_fd\(\)' "$DAEMON_FULL" && echo yes || echo no)"
