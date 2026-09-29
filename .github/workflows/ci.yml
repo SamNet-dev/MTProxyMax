@@ -1,0 +1,168 @@
+name: CI
+
+# Runs on every pull request that touches shell code. The workflow deliberately requests
+# no secrets and a read-only token: it executes code from pull requests, including forks,
+# so it uses `pull_request` (never `pull_request_target`) and grants nothing beyond
+# reading the repository.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.sh'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - '**.sh'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Syntax and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pure parser check — reports the file and line of any syntax error without
+      # executing anything. This cannot false-positive, so it is a hard gate.
+      - name: Parse every shell script
+        run: |
+          set -euo pipefail
+          for f in mtproxymax.sh install.sh tests/*.sh tests/integration/*.sh; do
+            bash -n "$f"
+            echo "ok  $f"
+          done
+
+      # Errors only. A 19k-line script carries a large backlog of style warnings, and
+      # gating on those on day one would make this job permanently red and therefore
+      # ignored. Warnings are still worth having locally: run `shellcheck mtproxymax.sh`
+      # without -S to see them. Tighten this to `warning` once the backlog is worked down.
+      - name: shellcheck (errors only)
+        run: |
+          shellcheck -S error mtproxymax.sh install.sh tests/*.sh tests/integration/*.sh
+
+  unit-tests:
+    name: Unit tests (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Report every distro rather than stopping at the first one that fails — the
+      # interesting signal is which platforms differ.
+      fail-fast: false
+      matrix:
+        # The install command is per-image and explicit rather than auto-detected: some
+        # images ship bash but still lack tools the suite needs (fedora:41 has bash but no
+        # `diff`, which silently failed one assertion until it was added here).
+        #
+        # Alpine deliberately installs ONLY bash. Adding coreutils/diffutils would shadow
+        # busybox and hide exactly the differences this row exists to catch.
+        #
+        # `quarantine` lists tests already known to fail on that image. They still run and
+        # their failures are printed, but they do not fail the build. Every entry here is a
+        # real, unfixed defect — delete the entry when the underlying bug is fixed.
+        include:
+          - image: debian:12
+            install: 'apt-get update -qq && apt-get install -y -qq bash diffutils'
+            quarantine: 'test_client_mss.sh'
+          - image: ubuntu:22.04
+            install: 'apt-get update -qq && apt-get install -y -qq bash diffutils'
+            quarantine: 'test_client_mss.sh'
+          - image: ubuntu:24.04
+            install: 'apt-get update -qq && apt-get install -y -qq bash diffutils'
+            quarantine: 'test_client_mss.sh'
+          # Alpine carries three known failures, all busybox divergences on a platform the
+          # README lists as supported. Each is fixed by an open PR — remove the entry once
+          # that PR has merged:
+          #   test_client_mss.sh    — broken on every distro, not a platform difference: it
+          #                           asserts on the stdout of generate_telemt_config, which
+          #                           takes a destination path and writes
+          #                           ${CONFIG_DIR}/config.toml instead. Fixed by #145.
+          #   test_traffic_reset.sh — busybox `flock` has no -w, so `flock -w 5 9` fails
+          #                           while `command -v flock` succeeds, so the guard never
+          #                           fires. Two call sites failed OPEN and silently wrote
+          #                           nothing. Fixed by #146.
+          #   test_guest.sh         — `date -d "+24 hours"` is invalid on busybox and the
+          #                           `date -r <epoch>` fallback fails as well (busybox -r
+          #                           means reference file), so expiring guest links got no
+          #                           expiry. Fixed by #148.
+          #
+          # Leaving an entry in place after its fix has landed is harmless — a quarantined
+          # test that passes is reported as PASS — so this list is correct in any merge
+          # order. run-all.sh flags such entries as "! still listed as quarantined" so a
+          # stale one is visible rather than silently ignored.
+          - image: alpine:3.20
+            install: 'apk add --no-cache bash'
+            quarantine: 'test_client_mss.sh,test_traffic_reset.sh,test_guest.sh'
+          - image: fedora:41
+            install: 'dnf install -y -q bash diffutils'
+            quarantine: 'test_client_mss.sh'
+    steps:
+      - uses: actions/checkout@v6
+
+      # Each distro runs the same suite in a container. Alpine is the row that earns its
+      # keep: its busybox userland (sed, grep, mktemp, date) differs from GNU, and Alpine
+      # is a documented supported platform that has never been exercised by CI.
+      #
+      # Note this uses `docker run` rather than the job-level `container:` key: JavaScript
+      # actions such as actions/checkout run with a `node` binary *inside* the job
+      # container, and the runner does not inject one, so a `container:` job on these
+      # images fails before it can install anything.
+      - name: Run suite in ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src \
+            -e MTPROXYMAX_QUARANTINE="${{ matrix.quarantine }}" \
+            "${{ matrix.image }}" sh -c '
+              set -e
+              ${{ matrix.install }}
+              bash tests/run-all.sh
+            '
+
+  systemd-integration:
+    name: Init integration (systemd)
+    # ubuntu-24.04 is a full VM with systemd as PID 1 and Docker already installed, so the
+    # generated unit's `Requires=docker.service` resolves against the real unit. Running
+    # this in a container instead would need --privileged --cgroupns=host, and a systemd
+    # container is not a faithful enough substitute for the real thing.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Confirm the runner really is systemd
+        # If this ever prints something other than "systemd", the job below would be
+        # testing nothing, so make that visible up front.
+        run: |
+          ps -p 1 -o comm=
+          systemctl is-system-running || true
+          sudo systemctl start docker || true
+
+      - name: Run systemd integration test
+        run: sudo bash tests/integration/autostart_systemd.sh
+
+  openrc-integration:
+    name: Init integration (OpenRC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      # OpenRC in a container needs the softlevel marker (its verify_boot() otherwise
+      # refuses to run any service) and a bash since the image ships only busybox ash;
+      # the test script sets both up itself.
+      - name: Run OpenRC integration test (Alpine)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.20 sh -c '
+            set -e
+            apk add --no-cache bash openrc
+            bash tests/integration/autostart_openrc.sh
+          '
