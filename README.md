@@ -5,7 +5,7 @@
     One script. Full control. Zero hassle.
   </p>
   <p align="center">
-    <img src="https://img.shields.io/badge/version-1.4.1--LTS-brightgreen" alt="Version"/>
+    <img src="https://img.shields.io/badge/version-1.4.2--LTS-brightgreen" alt="Version"/>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="License"/>
     <img src="https://img.shields.io/badge/engine-Rust_(telemt_3.x)-orange" alt="Engine"/>
     <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform"/>
@@ -1590,14 +1590,23 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
-### v1.4.2-LTS — Telemt Engine 3.5.9 & Transactional Middle-End Hardening
+### v1.4.2-LTS — Telemt Engine 3.5.9, Self-Healing Resilience & Enterprise Hardening
 
 - **Telemt Engine 3.5.9 (`e3f62db`):** Upgraded core Rust proxy engine to 3.5.9 ("Kostenfaktor") and 3.5.8 ("Kanzlersturz"):
-  - **Multi-call Firewall Binary Support (PR #933):** Preserved `argv[0]` when executing system helpers (`iptables`, `ip6tables`, `iptables-restore`, `ip6tables-restore`), fixing firewall command dispatches on systems where tools are symlinked to `xtables-nft-multi` or `xtables-legacy-multi`.
+  - **Multi-call Firewall Binary Support (PR #933 on telemt):** Preserved `argv[0]` when executing system helpers (`iptables`, `ip6tables`, `iptables-restore`, `ip6tables-restore`), resolving firewall command dispatch failures on systems where firewall binaries are symlinked to `xtables-nft-multi` or `xtables-legacy-multi`.
   - **Transactional Conntrack Reconciler:** Process-owned firewall state manager with automatic rollback on transition errors.
   - **Fenced Middle-End Lifecycle:** Generation fences preventing credential leaks across cutovers, transactional writer refresh, and hardswap publication tracking.
   - **Process-Wide User Admission Authority:** Incarnation isolation for user delete/re-create cycles and bounded compare-and-swap retry budgets for traffic buckets.
   - **Engine Tunables & Observability:** Added `direct_relay_buffer_budget_max_bytes` and `conntrack_control` to `mtproxymax tune`, and integrated Prometheus metrics for pending hardswaps (`telemt_me_hardswap_pending`) and conntrack rollbacks (`telemt_conntrack_rule_rollback_total`).
+- **Safe Liveness & Non-Destructive Auto-Healing ([#152](https://github.com/SamNet-dev/MTProxyMax/issues/152)):** Eliminated aggressive `docker rm -f` during background health checks (`run_heal`), introduced retryable liveness probing, and delegated clean container restarts to `start_proxy_container`.
+- **BusyBox Flock Portability & Alpine Linux 100% Green ([#146](https://github.com/SamNet-dev/MTProxyMax/pull/146)):** Converted file-path `flock -w` locks to file descriptor locks (`exec {_lock_fd}>...`), resolving BusyBox flock limitations and achieving 100% green test passes across Alpine Linux and OpenRC.
+- **Atomic Voucher State Transitions & Telegram Aliases ([#155](https://github.com/SamNet-dev/MTProxyMax/pull/155), [#156](https://github.com/SamNet-dev/MTProxyMax/pull/156)):** Enforced atomic voucher redemption to prevent race conditions or double-spend, unified command aliases (`/mp_voucher`, `/voucher`, `/vouchers`), and displayed owner chat IDs for reseller tracking.
+- **SIGPIPE Hazard Elimination ([#151](https://github.com/SamNet-dev/MTProxyMax/pull/151)):** Replaced premature `grep -q` in subshell pipelines with safe reads to avoid false-positive script terminations under `set -eo pipefail`.
+- **Pure-Bash Date Arithmetic & Timestamp Precision ([#148](https://github.com/SamNet-dev/MTProxyMax/pull/148), [#150](https://github.com/SamNet-dev/MTProxyMax/pull/150)):** Pure-bash civil calendar calculations eliminating dependency on external GNU/BSD `date` binaries, plus sub-second ISO timestamp parsing.
+- **Stale Prometheus Counter Scraper Correction ([#149](https://github.com/SamNet-dev/MTProxyMax/pull/149)):** Scraped `telemt_user_octets_*_total` and derived active connections from `telemt_user_connections_current`, restoring accurate traffic accounting.
+- **Accurate Init Detection ([#147](https://github.com/SamNet-dev/MTProxyMax/pull/147)):** Prevented false systemd detection in non-systemd container and OpenRC environments.
+- **Multi-Distro Matrix CI Pipeline ([#153](https://github.com/SamNet-dev/MTProxyMax/pull/153)):** Continuous integration across Ubuntu 22.04, Ubuntu 24.04, Debian 12, Alpine 3.19, Fedora 40, systemd, and OpenRC.
+- **Next-Gen Telegram Bot Interface ([#140](https://github.com/SamNet-dev/MTProxyMax/pull/140), [#141](https://github.com/SamNet-dev/MTProxyMax/pull/141), [#142](https://github.com/SamNet-dev/MTProxyMax/pull/142), [#143](https://github.com/SamNet-dev/MTProxyMax/pull/143)):** Native Telegram command menu integration (`setMyCommands`), responsive inline keyboards, zero-dependency update parser, and graphical traffic sparkline analytics.
 
 ### v1.4.1-LTS — Enterprise Hardening, Multi-Instance Isolation & Telemt 3.5.7
 
