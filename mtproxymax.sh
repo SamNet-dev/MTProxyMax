@@ -11544,6 +11544,213 @@ send_proxy_qr_to() {
 # Escape Markdown special chars in labels for Telegram
 _esc() { local t="$1"; t="${t//_/\\_}"; t="${t//\*/\\*}"; t="${t//\`/\\\`}"; echo "$t"; }
 
+# ── Bot API primitives ──────────────────────────────────────────────────────
+# The daemon is emitted from a QUOTED heredoc, so it inherits nothing from the
+# manager — no _mktemp, no log_*. Everything here is self-contained.
+#
+# tg_send()/tg_send_to() are deliberately left untouched: they have ~40 call
+# sites and tg_send also fires webhook_send, so the reply_markup-capable
+# variants below are additive rather than a signature change.
+
+# Single curl chokepoint for Bot API methods. Fields travel as urlencoded form
+# values — reply_markup is just a JSON string in one of them — which needs no
+# Content-Type header and no temp file, and keeps the token out of the process
+# list via -K process substitution.
+_tg_post_method() {
+    local _m="$1"; shift
+    local _f=()
+    while [ $# -gt 0 ]; do _f+=(--data-urlencode "$1"); shift; done
+    curl -s --max-time 15 -X POST \
+        -K <(printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$TELEGRAM_BOT_TOKEN" "$_m") \
+        "${_f[@]}" 2>/dev/null
+}
+
+# The "[label | ip]" prefix every outgoing message carries. Exposed because the
+# chunker has to budget for it — Telegram counts UTF-16 units, and an emoji in
+# the label costs two.
+_tg_header() {
+    local label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
+    local _ip; _ip=$(get_cached_ip)
+    if [ -n "$_ip" ]; then printf '[%s | %s] ' "$(_esc "$label")" "$_ip"
+    else printf '[%s] ' "$(_esc "$label")"; fi
+}
+
+# Split a body into pieces that each fit Telegram's 4096-unit cap, emitted with
+# a trailing \x1f after every piece so they can be read back with `read -d`.
+# A fenced block that straddles a split is closed in the outgoing piece and
+# reopened in the next, otherwise the monospace alignment breaks.
+_tg_chunk_text() {
+    local budget="$1" body="$2"
+    local _sep=$'\x1f'
+    local chunk="" line fence=0 out=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -n "$chunk" ] && [ $(( ${#chunk} + ${#line} + 1 )) -gt "$budget" ]; then
+            if [ "$fence" -eq 1 ]; then
+                out="${out}${chunk}"$'\n''```'"${_sep}"
+                chunk='```'
+            else
+                out="${out}${chunk}${_sep}"
+                chunk=""
+            fi
+        fi
+        if [ -z "$chunk" ]; then chunk="$line"; else chunk="${chunk}"$'\n'"${line}"; fi
+        case "$line" in
+            '```'*) if [ "$fence" -eq 0 ]; then fence=1; else fence=0; fi ;;
+        esac
+    done <<< "$body"
+    printf '%s%s' "${out}${chunk}" "$_sep"
+}
+
+# Send a text to a chat, chunked if needed, with an optional keyboard on the
+# final piece. A 400 from Telegram is retried once without parse_mode: a
+# malformed Markdown entity should cost the formatting, not the whole message.
+_tg_send_pieces() {
+    local _chat="$1" _hdr="$2" _body="$3" _markup="${4:-}"
+    local _budget=$(( 4096 - ${#_hdr} - 32 ))
+    [ "$_budget" -lt 256 ] && _budget=256
+    local -a _parts=()
+    local _piece=""
+    while IFS= read -r -d $'\x1f' _piece || [ -n "$_piece" ]; do
+        [ -z "$_piece" ] && continue
+        _parts+=("$_piece")
+    done < <(_tg_chunk_text "$_budget" "$_body")
+    local _n=${#_parts[@]} _i=0 _resp
+    local _last_out=""
+    for _piece in "${_parts[@]}"; do
+        _i=$(( _i + 1 ))
+        local _args=( "chat_id=${_chat}" "text=${_hdr}${_piece}" "parse_mode=Markdown" )
+        if [ "$_i" -eq "$_n" ] && [ -n "$_markup" ]; then
+            _args+=( "reply_markup=${_markup}" )
+        fi
+        _resp=$(_tg_post_method sendMessage "${_args[@]}")
+        _last_out="$_resp"
+        case "$_resp" in
+            *'"ok":true'*) : ;;
+            *'"error_code":400'*)
+                local _plain=( "chat_id=${_chat}" "text=${_hdr}${_piece}" )
+                if [ "$_i" -eq "$_n" ] && [ -n "$_markup" ]; then
+                    _plain+=( "reply_markup=${_markup}" )
+                fi
+                _last_out=$(_tg_post_method sendMessage "${_plain[@]}")
+                ;;
+        esac
+    done
+    printf '%s' "$_last_out"
+}
+
+# message_id of the last send, or empty.
+_tg_msg_id() { printf '%s' "$1" | grep -o '"message_id":[0-9]*' | head -1 | grep -o '[0-9]*'; }
+
+tg_send_kb() {
+    local _text="$1" _markup="${2:-}"
+    local _hdr; _hdr=$(_tg_header)
+    local _body; _body=$(printf '%b' "$_text")
+    _tg_send_pieces "${TELEGRAM_CHAT_ID}" "$_hdr" "$_body" "$_markup" >/dev/null
+    webhook_send "$_text" 2>/dev/null || true
+}
+
+tg_send_to_kb() {
+    local _chat="$1" _text="$2" _markup="${3:-}"
+    local _body; _body=$(printf '%b' "$_text")
+    _tg_send_pieces "$_chat" "" "$_body" "$_markup" >/dev/null
+}
+
+# Replace a message's text and keyboard in place. Telegram answers 400
+# "message is not modified" when the text AND markup are unchanged, which
+# happens on every tap of the page the user is already on — treat it as success.
+tg_edit() {
+    local _chat="$1" _mid="$2" _text="$3" _markup="${4:-}"
+    [ -n "$_mid" ] || return 0
+    local _args=( "chat_id=${_chat}" "message_id=${_mid}" "text=${_text}" "parse_mode=Markdown" )
+    [ -n "$_markup" ] && _args+=( "reply_markup=${_markup}" )
+    _tg_post_method editMessageText "${_args[@]}" >/dev/null
+}
+
+# Swap only the keyboard, leaving the body alone. Cheaper than a full edit and
+# it sidesteps "message is not modified" for a pure page flip.
+tg_edit_markup() {
+    local _chat="$1" _mid="$2" _markup="$3"
+    [ -n "$_mid" ] || return 0
+    _tg_post_method editMessageReplyMarkup \
+        "chat_id=${_chat}" "message_id=${_mid}" "reply_markup=${_markup}" >/dev/null
+}
+
+# Acknowledge a callback. The client spins until this arrives, so it must be
+# called on EVERY path including denial and error.
+tg_answer_cb() {
+    local _id="$1" _toast="${2:-}" _alert="${3:-false}"
+    [ -n "$_id" ] || return 0
+    local _args=( "callback_query_id=${_id}" )
+    [ -n "$_toast" ] && _args+=( "text=${_toast}" )
+    [ "$_alert" = "true" ] && _args+=( "show_alert=true" )
+    _tg_post_method answerCallbackQuery "${_args[@]}" >/dev/null
+}
+
+# ── Inline-keyboard callback_data codec ─────────────────────────────────────
+# Grammar: <ns>[:<action>[:<target>[:<page>]]], trailing empty fields trimmed.
+# All ASCII, so byte length equals character length. Fields 3 and 4 are purely
+# positional — their meaning depends on the namespace (for "u:l" field 3 is a
+# page; for "u:s" it is a label and field 4 the page). The dispatcher assigns
+# meaning; the codec only guarantees shape.
+#
+# The Bot API caps callback_data at 64 bytes, and a single over-long payload
+# makes Telegram reject the ENTIRE reply_markup with a 400 — the whole message
+# is lost, not just that one button. So _cb_enc refuses rather than truncating:
+# a truncated payload would decode into a different, still-valid target.
+_CB_MAX=64
+
+# Labels are the only caller-supplied field in a payload, and a ':' inside one
+# would shift the positional fields — turning "u:s:ali:ce" into a 4-field
+# payload that decodes to a different target. Refusing anything outside the
+# secrets.conf charset makes field injection structurally impossible.
+_cb_label_ok() {
+    [[ "$1" =~ ^[a-zA-Z0-9_-]{1,32}$ ]]
+}
+
+# _cb_enc <ns> <action> <target> <page> -> payload on stdout, non-zero if the
+# result would be malformed or over-long.
+_cb_enc() {
+    local ns="$1" act="$2" tgt="$3" page="$4" out
+    [[ "$ns" =~ ^[a-z]{1,2}$ ]] || return 1
+    if [ -n "$act" ]  && ! _cb_label_ok "$act";  then return 1; fi
+    if [ -n "$tgt" ]  && ! _cb_label_ok "$tgt";  then return 1; fi
+    if [ -n "$page" ] && ! _cb_label_ok "$page"; then return 1; fi
+    # An action namespace is meaningless without a target, so require one here
+    # and the dispatcher can then trust that any a:/c: payload it sees names a
+    # label. (It still re-validates that the label exists.)
+    case "$ns" in
+        a|c) [ -n "$tgt" ] || return 1 ;;
+    esac
+    out="$ns"
+    [ -n "$act" ]  && out="${out}:${act}"
+    [ -n "$tgt" ]  && out="${out}:${tgt}"
+    [ -n "$page" ] && out="${out}:${page}"
+    [ "${#out}" -le "$_CB_MAX" ] || return 1
+    printf '%s' "$out"
+}
+
+# _cb_dec <payload> -> sets _CB_NS _CB_ACT _CB_TGT _CB_PAGE; non-zero if the
+# payload is malformed or over-long.
+#
+# Sets globals rather than printing to stdout on purpose: rendering a menu with
+# 30 buttons would otherwise fork 30 subshells. Callers must therefore never
+# write `x=$(_cb_dec ...)` — the assignments would be lost.
+_cb_dec() {
+    local p="$1"
+    _CB_NS=""; _CB_ACT=""; _CB_TGT=""; _CB_PAGE=""
+    [ -n "$p" ] || return 1
+    [ "${#p}" -le "$_CB_MAX" ] || return 1
+    [[ "$p" =~ ^[a-z]{1,2}(:[A-Za-z0-9_-]{1,32}){0,3}$ ]] || return 1
+    local IFS=':' _f
+    local -a _fields
+    read -r -a _fields <<< "$p"
+    _CB_NS="${_fields[0]}"
+    [ "${#_fields[@]}" -gt 1 ] && _CB_ACT="${_fields[1]}"
+    [ "${#_fields[@]}" -gt 2 ] && _CB_TGT="${_fields[2]}"
+    [ "${#_fields[@]}" -gt 3 ] && _CB_PAGE="${_fields[3]}"
+    return 0
+}
+
 is_running() {
     is_proxy_running
 }
@@ -11768,6 +11975,206 @@ update_traffic() {
 
 get_cum_user_traffic() { echo "${_cum_user_in[$1]:-0} ${_cum_user_out[$1]:-0}"; }
 
+# `command -v python3` is not sufficient: the Windows Store ships a python3.exe
+# alias that sits on PATH but fails the moment it runs, and some distros ship a
+# stub. Probe by actually executing it.
+_tg_have_python() {
+    command -v python3 &>/dev/null || return 1
+    python3 -c '' &>/dev/null 2>&1
+}
+
+# Both extractors emit the same tab-separated 6-field records:
+#
+#   <update_id>\t<kind>\t<chat_id>\t<message_id>\t<callback_id>\t<payload>
+#
+# kind is "msg" or "cb"; for "msg" the callback id is "-". A record is emitted
+# for EVERY element of `result`, even one carrying no message at all, because
+# the consumer advances the offset per record — skipping one would make
+# Telegram redeliver it forever.
+_tg_parse_updates_py() {
+    printf '%s' "$1" | python3 -c '
+import json,sys
+
+# Pin LF. Python in text mode translates "\n" to os.linesep, so on Windows the
+# records would come out CRLF and the trailing "\r" would end up inside the
+# command payload. The awk extractor always emits LF; this keeps them identical
+# on every platform.
+try:
+    sys.stdout.reconfigure(newline="\n")
+except Exception:
+    pass
+
+def clean(v):
+    if not isinstance(v, str):
+        v = "" if v is None else str(v)
+    # only the first line is the command
+    v = v.split("\n")[0].replace("\t", " ").replace("\r", "")
+    return v[:512]
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+for r in data.get("result", []) or []:
+    if not isinstance(r, dict):
+        continue
+    uid = r.get("update_id")
+    if uid is None:
+        continue
+    cq = r.get("callback_query")
+    if isinstance(cq, dict):
+        m = cq.get("message")
+        m = m if isinstance(m, dict) else {}
+        ch = m.get("chat")
+        ch = ch if isinstance(ch, dict) else {}
+        print("%s\tcb\t%s\t%s\t%s\t%s" % (uid, ch.get("id", ""), m.get("message_id", ""),
+                                          cq.get("id", ""), clean(cq.get("data", ""))))
+    else:
+        m = r.get("message")
+        m = m if isinstance(m, dict) else {}
+        ch = m.get("chat")
+        ch = ch if isinstance(ch, dict) else {}
+        print("%s\tmsg\t%s\t%s\t-\t%s" % (uid, ch.get("id", ""), m.get("message_id", ""),
+                                          clean(m.get("text", ""))))
+' 2>/dev/null
+}
+
+# Dependency-free fallback, used on hosts without a working python3 — notably
+# Alpine, which this project supports via OpenRC.
+#
+# This MUST be a character scanner rather than a regex pass: a regex cannot tell
+# whether a `}` or `"` sits inside a string literal, and a command's text can
+# contain both ("tricky \"chat\":{\"id\":999}"). The scanner tracks string and
+# escape state and object/array depth, so embedded JSON in a text field is inert.
+#
+# One documented divergence from the python path: \uXXXX escapes are left as
+# literal text rather than decoded. Command text is ASCII in practice, and a
+# mis-decoded command simply matches nothing.
+_tg_parse_updates_awk() {
+    awk '
+    function reset() {
+        e_upd=""; e_chat=""; e_msgid=""; e_text=""; e_cbid=""; e_cbdata=""; e_cb=0
+    }
+    function scalar(k, parent, v) {
+        if (!inel) return
+        if      (k == "update_id"  && parent == "")               e_upd    = v
+        else if (k == "message_id" && parent == "message")        e_msgid  = v
+        else if (k == "id"         && parent == "chat")           e_chat   = v
+        else if (k == "text"       && parent == "message")        e_text   = v
+        else if (k == "id"         && parent == "callback_query") e_cbid   = v
+        else if (k == "data"       && parent == "callback_query") e_cbdata = v
+    }
+    function flush(   kind, cbid, pay, p) {
+        if (e_upd == "") return
+        if (e_cb) { kind = "cb";  cbid = e_cbid; pay = e_cbdata }
+        else      { kind = "msg"; cbid = "-";    pay = e_text }
+        p = index(pay, "\n"); if (p > 0) pay = substr(pay, 1, p - 1)
+        gsub(/\r/, "", pay)
+        if (length(pay) > 512) pay = substr(pay, 1, 512)
+        printf "%s\t%s\t%s\t%s\t%s\t%s\n", e_upd, kind, e_chat, e_msgid, cbid, pay
+    }
+    { if (NR == 1) s = $0; else s = s "\n" $0; next }
+    END {
+        n = length(s)
+        depth = 0; instr = 0; esc = 0; intok = 0
+        arrdepth = -1; inel = 0; want_result = 0
+        curkey = ""; buf = ""; kstk[0] = ""
+        reset()
+        for (i = 1; i <= n; i++) {
+            c = substr(s, i, 1)
+            if (instr) {
+                if (esc) {
+                    esc = 0
+                    if      (c == "n") buf = buf "\n"
+                    else if (c == "t") buf = buf "\t"
+                    else if (c == "r") buf = buf "\r"
+                    else if (c == "b") buf = buf "\b"
+                    else if (c == "f") buf = buf "\f"
+                    else if (c == "u") buf = buf "\\u"
+                    else buf = buf c
+                    continue
+                }
+                if (c == "\\") { esc = 1; continue }
+                if (c == "\"") {
+                    instr = 0
+                    j = i + 1
+                    while (j <= n) {
+                        d = substr(s, j, 1)
+                        if (d == " " || d == "\t" || d == "\n" || d == "\r") { j++; continue }
+                        break
+                    }
+                    if (j <= n && substr(s, j, 1) == ":") {
+                        curkey = buf
+                        if (curkey == "result" && depth == 1) want_result = 1
+                    } else {
+                        scalar(curkey, kstk[depth], buf)
+                    }
+                    continue
+                }
+                buf = buf c
+                continue
+            }
+            if (intok) {
+                if (c == "," || c == "}" || c == "]" || c == " " || c == "\t" || c == "\n" || c == "\r") {
+                    intok = 0
+                    scalar(curkey, kstk[depth], buf)
+                    buf = ""
+                    i--
+                    continue
+                }
+                buf = buf c
+                continue
+            }
+            if (c == "\"") { instr = 1; buf = ""; continue }
+            if (c == "{" || c == "[") {
+                if (c == "[" && want_result) { arrdepth = depth + 1; want_result = 0 }
+                depth++
+                if (c == "{" && inel && curkey == "callback_query") e_cb = 1
+                if (c == "{" && arrdepth >= 0 && depth == arrdepth + 1) {
+                    kstk[depth] = ""
+                    inel = 1
+                    reset()
+                } else {
+                    kstk[depth] = curkey
+                }
+                continue
+            }
+            if (c == "}" || c == "]") {
+                if (c == "}" && inel && depth == arrdepth + 1) { flush(); inel = 0 }
+                depth--
+                continue
+            }
+            if (c == ":" || c == "," || c == " " || c == "\t" || c == "\n" || c == "\r") continue
+            intok = 1; buf = c
+        }
+    }
+    ' <<< "$1"
+}
+
+# Read one batch of records and dispatch. Process substitution, deliberately not
+# a pipe: a pipeline would run the dispatchers in a subshell and silently
+# discard every global they set.
+_consume_updates() {
+    local _uid _kind _cid _mid _cbid _pay
+    while IFS=$'\t' read -r _uid _kind _cid _mid _cbid _pay || [ -n "$_uid" ]; do
+        [ -z "$_uid" ] && continue
+        [[ "$_uid" =~ ^[0-9]+$ ]] || continue
+        # Belt and braces: the extractors already strip CR from the payload and
+        # pin LF terminators, but a stray one here would silently corrupt every
+        # command by appending a character to it.
+        _pay="${_pay%$'\r'}"
+        # Advance per consumed record, not per batch: a parser failure midway
+        # then redelivers the unconsumed tail instead of losing it.
+        printf '%s\n' "$(( _uid + 1 ))" > "$OFFSET_FILE"
+        case "$_kind" in
+            msg) _process_cmd "$_uid" "$_cid" "$_pay" ;;
+            cb)  _process_callback "$_cid" "$_mid" "$_cbid" "$_pay" ;;
+        esac
+    done < <(if _tg_have_python; then _tg_parse_updates_py "$1"; else _tg_parse_updates_awk "$1"; fi)
+}
+
 process_commands() {
     local offset=$(cat "$OFFSET_FILE" 2>/dev/null || echo "0")
     [[ "$offset" =~ ^[0-9]+$ ]] || offset="0"
@@ -11776,38 +12183,7 @@ process_commands() {
         -K <(printf 'url = "https://api.telegram.org/bot%s/getUpdates?offset=%s&timeout=25"\n' "$TELEGRAM_BOT_TOKEN" "$offset") \
         2>/dev/null) || true
     [ -z "$updates" ] && return
-
-    if command -v python3 &>/dev/null; then
-        echo "$updates" | python3 -c "
-import json,sys
-try:
-    data=json.load(sys.stdin)
-    for r in data.get('result',[]):
-        uid=r['update_id']
-        txt=r.get('message',{}).get('text','').split('\n')[0][:200]
-        cid=r.get('message',{}).get('chat',{}).get('id','')
-        print(f'{uid}\t{cid}\t{txt}')
-except Exception:
-    pass
-" 2>/dev/null | while IFS=$'\t' read -r _uid _cid _txt || [ -n "$_uid" ]; do
-            [ -z "$_uid" ] && continue
-            _process_cmd "$_uid" "$_cid" "$_txt"
-        done
-    else
-        # Fallback: grep-based parsing (no python)
-        local _new_offset
-        _new_offset=$(echo "$updates" | grep -oE '"update_id"\s*:\s*[0-9]+' | tail -1 | grep -oE '[0-9]+')
-        if [ -n "$_new_offset" ]; then
-            echo "$((_new_offset + 1))" > "$OFFSET_FILE"
-        fi
-        local _text _cid
-        _text=$(echo "$updates" | grep -oE '"text"\s*:\s*"[^"]*"' | tail -1 | sed 's/.*"text"\s*:\s*"//;s/"$//')
-        _cid=$(echo "$updates" | grep -oE '"chat"\s*:\s*\{[^}]*"id"\s*:\s*-?[0-9]+' | tail -1 | grep -oE -- '-?[0-9]+$')
-        [ -n "$_text" ] && [ -n "$_cid" ] && {
-            _new_offset=${_new_offset:-0}
-            _process_cmd "$_new_offset" "$_cid" "$_text"
-        }
-    fi
+    _consume_updates "$updates"
 }
 
 _check_tg_role() {
@@ -11834,8 +12210,12 @@ _tg_security_log() {
 }
 
 _process_cmd() {
+    # update_id is accepted but no longer used for the offset: _consume_updates
+    # owns that, so it advances once per consumed record rather than once per
+    # dispatched command. Kept in the signature because callers and tests pass
+    # it positionally.
     local update_id="$1" chat_id="$2" text="$3"
-    echo "$((update_id + 1))" > "$OFFSET_FILE"
+    : "${update_id:=0}"
 
     local role
     role=$(_check_tg_role "$chat_id")
@@ -12273,6 +12653,16 @@ _process_cmd() {
             tg_send "📋 *MTProxyMax Commands (${VERSION})*\n\n*Public Self-Service:*\n/start — Self-service onboarding\n/my\_status <label> — Check data quota & expiry\n/voucher <code> — Redeem voucher code\n/support <msg> — Send ticket to helpdesk\n\n*Admin Control Plane:*\n/mp\_fleet — Global Federation Fleet Dashboard\n/mp\_voucher create <cnt> <qta> <dys> — Generate vouchers\n/mp\_voucher list — List vouchers\n/mp\_status — Proxy status\n/mp\_secrets — List secrets\n/mp\_link — Get proxy links + QR\n/mp\_add <label> — Add secret\n/mp\_remove / /mp\_revoke <label> — Remove secret\n/mp\_rotate <label> — Rotate secret\n/mp\_enable <label> — Enable secret\n/mp\_disable <label> — Disable secret\n/mp\_limits — Show user limits\n/mp\_setlimit — Set user limits\n/mp\_upstreams — List upstreams\n/mp\_traffic — Traffic report\n/mp\_health — Health check\n/mp\_lockdown [on|off] — Emergency shield\n/mp\_digest — System digest report\n/mp\_broadcast <msg> — Broadcast to all users\n/reply <chat\_id> <msg> — Reply to support ticket\n/mp\_restart — Restart proxy\n/mp\_update — Check for updates\n/mp\_help — This help"
             ;;
     esac
+}
+
+# Callback-query entry point. The interactive menus land here in the next
+# change; for now it exists so that _consume_updates honours the offset
+# contract and an unexpected tap is acknowledged rather than leaving the
+# client spinning forever.
+_process_callback() {
+    local chat_id="$1" message_id="$2" callback_id="$3" payload="$4"
+    : "$chat_id" "$message_id" "$payload"
+    tg_answer_cb "$callback_id" "" "false"
 }
 
 # Cleanup trap for temp files
