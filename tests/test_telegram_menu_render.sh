@@ -59,6 +59,8 @@ for _fn in _tg_security_log _cb_label_ok _cb_enc _cb_dec _esc _iso_to_epoch; do
     awk "/^${_fn}\\(\\)/,/^}\$/" "$DAEMON" >> "$FNS"
 done
 awk '/^# >>> TG_MENU_BEGIN$/,/^# <<< TG_MENU_END$/' "$DAEMON" >> "$FNS"
+# The traffic view renders windowed analytics, so it needs the history block too.
+awk '/^# >>> TG_HISTORY_BEGIN$/,/^# <<< TG_HISTORY_END$/' "$DAEMON" >> "$FNS"
 assert_eq "menu render extraction is valid bash" 0 \
     "$(bash -n "$FNS" 2>/dev/null; echo $?)"
 
@@ -99,6 +101,7 @@ render() {
         engine)   _cb_render_engine ;;
         settings) _cb_render_settings ;;
         manage)   _cb_render_user_manage "${3:-user01}" "${4:-0}" ;;
+        usertraffic) _cb_render_user_traffic "${3:-user01}" "${4:-0}" ;;
         limits_q) _cb_render_limits q "${3:-user01}" "${4:-0}" ;;
         limits_c) _cb_render_limits c "${3:-user01}" "${4:-0}" ;;
         limits_i) _cb_render_limits i "${3:-user01}" "${4:-0}" ;;
@@ -123,7 +126,7 @@ cbs_of() { printf '%s' "$1" | grep -o '"callback_data":"[^"]*"' | sed 's/.*:"//;
 
 echo "Telegram menu render tests"
 
-VIEWS="hub help list detail confirm traffic engine settings manage \
+VIEWS="hub help list detail confirm traffic engine settings manage usertraffic \
 limits_q limits_c limits_i limits_x limits_r \
 tpl_list tpl_edit tpl_field tpl_apply tpl_picker \
 tools digest upstreams fleet vouchers update"

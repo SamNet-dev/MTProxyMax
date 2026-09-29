@@ -249,7 +249,7 @@ cap_leaks() {
             # CLI verb (secret setlimit / extend / quota-reset / template apply),
             # and none of them is reachable by a reseller, whose only surface
             # stays the voucher commands.
-            u:m|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
+            u:m|u:t|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
             c:setq|c:setc|c:seti|c:setx|c:setr|c:tpl)
                 [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             # The server console and the template section: read-mostly views
