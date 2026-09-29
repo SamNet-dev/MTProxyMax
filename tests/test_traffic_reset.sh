@@ -41,10 +41,10 @@ SECRETS_LABELS=(alice bob)
 SECRETS_ENABLED=(true true)
 
 METRICS='# HELP test test
-telemt_user_octets_from_client{user="alice"} 120
-telemt_user_octets_to_client{user="alice"} 340
-telemt_user_octets_from_client{user="bob"} 50
-telemt_user_octets_to_client{user="bob"} 70'
+telemt_user_octets_from_client_total{user="alice"} 120
+telemt_user_octets_to_client_total{user="alice"} 340
+telemt_user_octets_from_client_total{user="bob"} 50
+telemt_user_octets_to_client_total{user="bob"} 70'
 
 _fetch_metrics() {
     [ "${METRICS_AVAILABLE:-true}" = "true" ] || return 1
