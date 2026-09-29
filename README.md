@@ -421,6 +421,17 @@ Full proxy management from your phone. Setup takes 60 seconds:
 mtproxymax telegram setup
 ```
 
+The bot registers its commands with Telegram, so tapping the **`/` menu button** in
+the chat lists everything you are allowed to run — no need to memorise them. The
+menu is scoped to your role: everyone sees the public self-service commands, admins
+see the Admin Control Plane, and superadmins additionally see `/mp_remove`,
+`/mp_restart`, `/mp_update` and `/mp_lockdown`. The list is re-synced whenever the
+bot service starts; to refresh it by hand use:
+
+```bash
+mtproxymax telegram sync-commands
+```
+
 | Command | Description |
 |---------|-------------|
 | `/mp_status` | Proxy status, uptime, connections |
@@ -1503,6 +1514,7 @@ mtproxymax update                       # Check for script + engine updates
 - **Automated SSL Shield (`ssl-shield`):** Zero-touch Let's Encrypt / `openssl` certificate issuance and ACME domain management.
 - **Automated Cloud Backups (`backup-cloud`):** Automatic tarball offloading to Telegram admin chat (`sendDocument`) or multi-cloud storage (`rclone`/S3/R2).
 - **Dual-Tier Telegram Bot (`telegram`):** Public self-service tier (`/start`, `/my_status <label>`, `/voucher`) combined with an authenticated Admin Control Plane (`/mp_fleet`, `/mp_secrets`, `/mp_lockdown`).
+- **Telegram Command Menu:** The bot registers its commands via `setMyCommands`, so the in-app `/` menu button lists every command you can run. Scopes mirror the role model — public commands for everyone, the Admin Control Plane for admins, and the superadmin-only commands (`/mp_remove`, `/mp_restart`, `/mp_update`, `/mp_lockdown`) only for superadmins. Re-synced on every bot service start and on `mtproxymax telegram sync-commands`.
 - **Comprehensive Hardening & Audit:** Fixed race conditions (`flock`), prevented configuration code injection (`grep | cut`), added comma/pipe CSV import normalization (`secret_import`), and ensured strict-mode container fallbacks across 18,369 lines (`100% clean`).
 
 ### v1.3.1 — Performance & Anti-DPI Upgrade Suite

@@ -10327,6 +10327,8 @@ admin_add() {
         echo "${tg_id}|${role}|${label}|$(date -u '+%Y-%m-%d')" >> "$ADMINS_FILE"
     fi
     log_success "Admin ${tg_id} registered as '${role}' (${label})"
+    # Keep the new admin's Telegram command menu in step with their role.
+    telegram_sync_commands &>/dev/null || true
 }
 
 admin_remove() {
@@ -10335,6 +10337,8 @@ admin_remove() {
     load_admins
     grep -v "^${tg_id}|" "$ADMINS_FILE" > "${ADMINS_FILE}.tmp" 2>/dev/null && mv "${ADMINS_FILE}.tmp" "$ADMINS_FILE"
     log_success "Admin ${tg_id} removed"
+    # Drop the revoked admin's menu so it stops offering admin commands.
+    telegram_clear_commands "$tg_id" &>/dev/null || true
 }
 
 admin_list() {
@@ -11017,6 +11021,136 @@ telegram_send_message() {
     return 1
 }
 
+# ── Telegram command menu (setMyCommands) ────────────────────────────────────
+# Without this the client-side "/" menu button has nothing to show and the bot's
+# commands are only discoverable by reading /mp_help. The lists below are the
+# single source of truth: the bot daemon re-runs `mtproxymax telegram
+# sync-commands` on boot rather than duplicating them into its own heredoc.
+# Format is one "command|description" per line, without the leading slash.
+TG_CMDS_PUBLIC="start|Self-service onboarding and help
+my_status|Check your data quota and expiry (usage: /my_status <label>)
+redeem|Redeem a voucher code (usage: /redeem <code> [label])
+voucher|Alias for /redeem
+support|Send a support request to the server admins"
+
+TG_CMDS_ADMIN="mp_help|Show all commands
+mp_status|Proxy status, uptime and traffic
+mp_secrets|List all secrets with per-user stats
+mp_link|Get proxy links and QR codes
+mp_add|Add a new secret (usage: /mp_add <label>)
+mp_rotate|Rotate a secret key (usage: /mp_rotate <label>)
+mp_enable|Enable a secret (usage: /mp_enable <label>)
+mp_disable|Disable a secret (usage: /mp_disable <label>)
+mp_limits|Show per-user limits
+mp_setlimit|Set user limits (connections, IPs, quota, expiry)
+mp_traffic|Detailed per-user traffic breakdown
+mp_upstreams|List upstream routes
+mp_health|Run health diagnostics
+mp_digest|System health and security digest
+mp_broadcast|Broadcast a message to all known bot users
+mp_fleet|Global federation fleet dashboard
+mp_voucher|Generate or list vouchers
+reply|Reply to a support ticket (usage: /reply <chat_id> <message>)"
+
+# Superadmins additionally get the four commands _process_cmd gates on role.
+TG_CMDS_SUPERADMIN="${TG_CMDS_ADMIN}
+mp_remove|Remove or revoke a secret (usage: /mp_remove <label>)
+mp_restart|Restart the proxy
+mp_update|Check for and apply updates
+mp_lockdown|Emergency lockdown toggle (usage: /mp_lockdown on/off)"
+
+# Render a "command|description" table as the JSON array the Bot API expects.
+_tg_commands_json() {
+    local table="$1" name desc json="" first=1 line
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        name="${line%%|*}"
+        desc="${line#*|}"
+        # Entries are static, but sanitise defensively: Telegram rejects the
+        # entire list if any single entry is malformed, so a stray control
+        # character or quote in a future description must not break the menu.
+        desc=$(printf '%s' "$desc" | tr '\t' ' ' | tr -d '[:cntrl:]')
+        desc="${desc//\\/\\\\}"
+        desc="${desc//\"/\\\"}"
+        [ "$first" -eq 1 ] || json="${json},"
+        first=0
+        json="${json}{\"command\":\"${name}\",\"description\":\"${desc}\"}"
+    done <<< "$table"
+    printf '[%s]' "$json"
+}
+
+# POST to a Bot API method, keeping the token out of the process list. Returns 0
+# only when Telegram acknowledges the call.
+_tg_api_post() {
+    local method="$1" body="$2"
+    local token="${TELEGRAM_BOT_TOKEN:-}"
+    [ -n "$token" ] || return 0
+    local _cfg
+    _cfg=$(_mktemp) || return 0
+    printf 'url = "https://api.telegram.org/bot%s/%s"\n' "$token" "$method" > "$_cfg"
+    local response
+    response=$(curl -s --max-time 10 -K "$_cfg" \
+        -H 'Content-Type: application/json' \
+        -d "$body" 2>/dev/null) || true
+    rm -f "$_cfg"
+    echo "$response" | grep -q '"ok":true'
+}
+
+# Register a command list for one scope. An empty scope means the default scope,
+# which applies to every user who has no more specific scope.
+_tg_set_commands() {
+    local scope="$1" commands="$2"
+    local body
+    if [ -n "$scope" ]; then
+        body="{\"commands\":${commands},\"scope\":${scope}}"
+    else
+        body="{\"commands\":${commands}}"
+    fi
+    _tg_api_post setMyCommands "$body"
+}
+
+# Push the whole menu: public commands for everyone, the admin control plane for
+# admins, and the privileged commands for superadmins. Entirely best-effort — a
+# network failure must never abort setup or the bot daemon.
+telegram_sync_commands() {
+    local cid role _rest
+    [ "${TELEGRAM_ENABLED:-false}" = "true" ] || return 0
+    [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || return 0
+
+    local pub admin super
+    pub=$(_tg_commands_json "$TG_CMDS_PUBLIC")
+    admin=$(_tg_commands_json "$TG_CMDS_ADMIN")
+    super=$(_tg_commands_json "$TG_CMDS_SUPERADMIN")
+
+    _tg_set_commands "" "$pub" || log_warn "Could not register the public command menu"
+
+    if [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+        _tg_set_commands "{\"type\":\"chat\",\"chat_id\":${TELEGRAM_CHAT_ID}}" "$super" || true
+    fi
+
+    # RBAC admins, mirroring the role gates in _process_cmd.
+    if [ -f "${ADMINS_FILE:-}" ]; then
+        while IFS='|' read -r cid role _rest || [ -n "$cid" ]; do
+            [[ "$cid" =~ ^-?[0-9]+$ ]] || continue
+            [ "$cid" = "${TELEGRAM_CHAT_ID:-}" ] && continue
+            if [ "$role" = "superadmin" ]; then
+                _tg_set_commands "{\"type\":\"chat\",\"chat_id\":${cid}}" "$super" || true
+            else
+                _tg_set_commands "{\"type\":\"chat\",\"chat_id\":${cid}}" "$admin" || true
+            fi
+        done < "${ADMINS_FILE}"
+    fi
+    return 0
+}
+
+# Drop a chat's custom menu so a revoked admin stops seeing the admin commands.
+telegram_clear_commands() {
+    local cid="${1:-}"
+    [[ "$cid" =~ ^-?[0-9]+$ ]] || return 0
+    _tg_api_post deleteMyCommands "{\"scope\":{\"type\":\"chat\",\"chat_id\":${cid}}}" || true
+    return 0
+}
+
 telegram_send_photo() {
     local photo_url="$1" caption="${2:-}"
     local token="${TELEGRAM_BOT_TOKEN}"
@@ -11215,6 +11349,9 @@ telegram_setup_wizard() {
 
     echo ""
     log_success "Telegram bot configured!"
+
+    # Populate the client-side "/" command menu straight away.
+    telegram_sync_commands &>/dev/null &
 
     # Send test message
     telegram_test_message
@@ -12146,6 +12283,11 @@ echo "$$" > "$PID_FILE"
 mkdir -p "$(dirname "$OFFSET_FILE")"
 load_tg_settings
 load_traffic
+
+# Register the client-side "/" command menu via the manager, which owns the
+# command tables. Best-effort and backgrounded so a Telegram outage can never
+# delay or break the poll loop.
+"${INSTALL_DIR}/mtproxymax" telegram sync-commands &>/dev/null &
 
 _last_report=0
 _report_interval=$(( ${TELEGRAM_INTERVAL:-6} * 3600 ))
@@ -14177,6 +14319,7 @@ show_cli_help() {
     echo -e "    ${GREEN}telegram setup${NC}          Run Telegram bot wizard"
     echo -e "    ${GREEN}telegram status${NC}         Show Telegram bot status"
     echo -e "    ${GREEN}telegram test${NC}           Send test message"
+    echo -e "    ${GREEN}telegram sync-commands${NC}  Refresh the in-app command menu"
     echo -e "    ${GREEN}broadcast <msg>${NC}         Broadcast announcement via Telegram bot"
     echo -e "    ${GREEN}telegram disable${NC}        Disable Telegram"
     echo -e "    ${GREEN}telegram remove${NC}         Remove Telegram bot"
@@ -15860,6 +16003,7 @@ cli_main() {
             load_secrets
             case "${1:-status}" in
                 setup)   check_root; telegram_setup_wizard ;;
+                sync-commands) check_root; telegram_sync_commands ;;
                 test)    telegram_test_message ;;
                 status|"")
                     if [ "$TELEGRAM_ENABLED" != "true" ]; then
