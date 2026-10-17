@@ -974,6 +974,31 @@ mtproxymax tune clear all                  # Revert all
 
 Whitelisted params are regex-validated on input. Invalid values are rejected. Also available in **TUI: Settings > [n] Engine tuning**.
 
+#### Middle-End NAT address with policy routing
+
+If Telegram traffic leaves through a VPN gateway while ordinary IP discovery uses
+the server's WAN, ME key derivation may use the wrong public address. Persist the
+actual IPv4 egress address and disable probing through the existing tuning commands:
+
+```bash
+mtproxymax tune set middle_proxy_nat_ip 203.0.113.10
+mtproxymax tune set middle_proxy_nat_probe false
+```
+
+Replace the example with the public IPv4 address seen by Telegram. These overrides
+are saved in `/opt/mtproxymax/tunings.conf` and reapplied when primary or additional
+instance configs are generated. Each command can restart the running proxy. NAT
+must also preserve the source TCP port for a direct ME connection; an IP override
+alone cannot repair port translation or an unreachable route. With a compatible
+SOCKS upstream, a valid public `BND.ADDR/BND.PORT` tuple supplies the ME endpoint.
+
+Restore automatic engine behavior with:
+
+```bash
+mtproxymax tune clear middle_proxy_nat_ip
+mtproxymax tune clear middle_proxy_nat_probe
+```
+
 ---
 
 ### ✅ Verify & Audit
