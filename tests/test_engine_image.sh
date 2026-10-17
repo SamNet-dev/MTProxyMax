@@ -20,7 +20,8 @@ docker() {
         pull) return "$pull_result" ;;
         tag) return "$tag_result" ;;
         build)
-            cp "${@: -1}/Dockerfile" "$tmp/Dockerfile"
+            local build_context="${!#}"
+            cp "$build_context/Dockerfile" "$tmp/Dockerfile"
             return "$build_result" ;;
         *) echo "Unexpected Docker operation: $*" >&2; return 99 ;;
     esac
