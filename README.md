@@ -1590,9 +1590,14 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
-### v1.4.2-LTS — Telemt Engine 3.5.9, Self-Healing Resilience & Enterprise Hardening
+### v1.4.2-LTS — Telemt Engine 3.5.14, Self-Healing Resilience & Enterprise Hardening
 
-- **Telemt Engine 3.5.9 (`e3f62db`):** Upgraded core Rust proxy engine to 3.5.9 ("Kostenfaktor") and 3.5.8 ("Kanzlersturz"):
+- **Telemt Engine 3.5.14 & Build Hardening ([#157](https://github.com/SamNet-dev/MTProxyMax/pull/157)):**
+  - Upgraded core Rust proxy engine to **3.5.14** (`9d5b896bb695c55e2905b82f276da84e45a0a2ec`), resolving Middle-End pool convergence failures and writer starvation under egress tunnels (#949), with autonomous conntrack recovery on absent iptables-nft chains (3.5.11) and replay-safe streaming downlink (3.5.13).
+  - Eliminated unsafe `:latest` registry relabeling in `build_telemt_image()`, ensuring missing prebuilt tags compile from source instead of mislabeling old cached binaries.
+  - Hardened Dockerfile compilation pipelines with exact SHA verification, `--locked` cargo builds, and operator precedence fixes in binary stripping.
+  - Added unit test suite `tests/test_engine_image.sh`.
+- **Telemt Engine 3.5.9 & 3.5.8 Features:**
   - **Multi-call Firewall Binary Support (PR #933 on telemt):** Preserved `argv[0]` when executing system helpers (`iptables`, `ip6tables`, `iptables-restore`, `ip6tables-restore`), resolving firewall command dispatch failures on systems where firewall binaries are symlinked to `xtables-nft-multi` or `xtables-legacy-multi`.
   - **Transactional Conntrack Reconciler:** Process-owned firewall state manager with automatic rollback on transition errors.
   - **Fenced Middle-End Lifecycle:** Generation fences preventing credential leaks across cutovers, transactional writer refresh, and hardswap publication tracking.

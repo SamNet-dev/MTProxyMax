@@ -41,8 +41,8 @@ RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.5.9"
-TELEMT_COMMIT="e3f62db"  # Pinned: v3.5.9 — Kostenfaktor: Trusted Helper Argv0 for multi-call firewall binaries & ME lifecycle
+TELEMT_MIN_VERSION="3.5.14"
+TELEMT_COMMIT="9d5b896bb695c55e2905b82f276da84e45a0a2ec"  # Pinned: v3.5.14 — autonomous, lifecycle-bounded ME pool convergence
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -1150,7 +1150,7 @@ wait_for_docker() {
     return 1
 }
 
-# Build telemt Docker image from latest GitHub release binary
+# Obtain the pinned telemt image, or build the exact commit from source
 build_telemt_image() {
     local force="${1:-false}"
 
@@ -1158,14 +1158,14 @@ build_telemt_image() {
     local version="${TELEMT_MIN_VERSION}-${commit}"
 
     # Skip if image already exists (unless forced)
-    if [ "$force" != "true" ] && docker image inspect "${DOCKER_IMAGE_BASE}:${version}" &>/dev/null; then
+    if [ "$force" = "false" ] && docker image inspect "${DOCKER_IMAGE_BASE}:${version}" &>/dev/null; then
         return 0
     fi
 
     # Strategy 1: Pull pre-built image from registry (fast — seconds)
     log_info "Pulling pre-built telemt v${version}..."
-    if docker pull "${REGISTRY_IMAGE}:${version}" 2>/dev/null; then
-        docker tag "${REGISTRY_IMAGE}:${version}" "${DOCKER_IMAGE_BASE}:${version}"
+    if [ "$force" != "source" ] && docker pull "${REGISTRY_IMAGE}:${version}" 2>/dev/null; then
+        docker tag "${REGISTRY_IMAGE}:${version}" "${DOCKER_IMAGE_BASE}:${version}" || return 1
         docker tag "${DOCKER_IMAGE_BASE}:${version}" "${DOCKER_IMAGE_BASE}:latest" 2>/dev/null || true
         log_success "Pulled telemt v${version}"
         mkdir -p "$INSTALL_DIR"
@@ -1173,20 +1173,8 @@ build_telemt_image() {
         return 0
     fi
 
-    # Strategy 2: Pull latest from registry if exact version not found
-    if [ "$force" != "source" ]; then
-        log_info "Exact version not in registry, trying latest..."
-        if docker pull "${REGISTRY_IMAGE}:latest" 2>/dev/null; then
-            docker tag "${REGISTRY_IMAGE}:latest" "${DOCKER_IMAGE_BASE}:${version}"
-            docker tag "${DOCKER_IMAGE_BASE}:${version}" "${DOCKER_IMAGE_BASE}:latest" 2>/dev/null || true
-            log_success "Pulled telemt (latest)"
-            mkdir -p "$INSTALL_DIR"
-            echo "$version" > "${INSTALL_DIR}/.telemt_version"
-            return 0
-        fi
-    fi
-
-    # Strategy 3: Build from source (slow first time, cached after)
+    # Never relabel registry :latest as the requested version.
+    # If the exact tag is unavailable (or source was requested), build the pin.
     log_warn "Pre-built image not available, compiling from source..."
     log_info "Includes: Prometheus metrics, ME perf fixes, critical ME bug fixes"
 
@@ -1201,10 +1189,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout "${TELEMT_COMMIT}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD)" = "${TELEMT_COMMIT}"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
-RUN cargo build --release && \
-    strip target/release/telemt 2>/dev/null || true && \
+RUN cargo build --release --locked && \
+    (strip target/release/telemt 2>/dev/null || true) && \
     cp target/release/telemt /telemt
 
 FROM debian:bookworm-slim
