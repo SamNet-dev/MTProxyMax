@@ -4729,6 +4729,8 @@ _TUNE_WHITELIST=(
     "accept_permit_timeout_ms:server:^[0-9]+$"
     "prefer_ipv6:general:^(true|false)$"
     "fast_mode:general:^(true|false)$"
+    "middle_proxy_nat_ip:general:^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])[.]){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$"
+    "middle_proxy_nat_probe:general:^(true|false)$"
     "log_level:general:^(debug|verbose|normal|silent)$"
     "direct_relay_buffer_budget_max_bytes:general:^[0-9]+$"
     "conntrack_control:server:^(true|false)$"

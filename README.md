@@ -974,6 +974,31 @@ mtproxymax tune clear all                  # Revert all
 
 Whitelisted params are regex-validated on input. Invalid values are rejected. Also available in **TUI: Settings > [n] Engine tuning**.
 
+#### Middle-End NAT address with policy routing
+
+If Telegram traffic leaves through a VPN gateway while ordinary IP discovery uses
+the server's WAN, ME key derivation may use the wrong public address. Persist the
+actual IPv4 egress address and disable probing through the existing tuning commands:
+
+```bash
+mtproxymax tune set middle_proxy_nat_ip 203.0.113.10
+mtproxymax tune set middle_proxy_nat_probe false
+```
+
+Replace the example with the public IPv4 address seen by Telegram. These overrides
+are saved in `/opt/mtproxymax/tunings.conf` and reapplied when primary or additional
+instance configs are generated. Each command can restart the running proxy. NAT
+must also preserve the source TCP port for a direct ME connection; an IP override
+alone cannot repair port translation or an unreachable route. With a compatible
+SOCKS upstream, a valid public `BND.ADDR/BND.PORT` tuple supplies the ME endpoint.
+
+Restore automatic engine behavior with:
+
+```bash
+mtproxymax tune clear middle_proxy_nat_ip
+mtproxymax tune clear middle_proxy_nat_probe
+```
+
 ---
 
 ### ✅ Verify & Audit
@@ -1592,6 +1617,7 @@ mtproxymax update                       # Check for script + engine updates
 
 ### v1.4.2-LTS — Telemt Engine 3.5.14, Self-Healing Resilience & Enterprise Hardening
 
+- **Persistent Middle-End NAT Overrides ([#158](https://github.com/SamNet-dev/MTProxyMax/pull/158)):** Added `middle_proxy_nat_ip` and `middle_proxy_nat_probe` to `mtproxymax tune` to persist public IPv4 egress address overrides for policy-routed networks (e.g. WireGuard/MikroTik) across config regenerations.
 - **Telemt Engine 3.5.14 & Build Hardening ([#157](https://github.com/SamNet-dev/MTProxyMax/pull/157)):**
   - Upgraded core Rust proxy engine to **3.5.14** (`9d5b896bb695c55e2905b82f276da84e45a0a2ec`), resolving Middle-End pool convergence failures and writer starvation under egress tunnels (#949), with autonomous conntrack recovery on absent iptables-nft chains (3.5.11) and replay-safe streaming downlink (3.5.13).
   - Eliminated unsafe `:latest` registry relabeling in `build_telemt_image()`, ensuring missing prebuilt tags compile from source instead of mislabeling old cached binaries.
