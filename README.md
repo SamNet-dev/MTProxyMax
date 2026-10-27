@@ -892,8 +892,13 @@ mtproxymax secret quota-reset alice 1          # Reset on the 1st
 mtproxymax secret quota-reset bob 15           # Reset on the 15th
 mtproxymax secret quota-reset alice off        # Disable
 
-# Reset the independent server-wide total (does not change user quotas)
-mtproxymax traffic reset-global
+# Reset traffic counters
+mtproxymax traffic reset-all -y                 # Reset BOTH server-wide total and all user counters
+mtproxymax traffic reset-users                  # Reset all per-user traffic counters (alias for secret reset-traffic all)
+mtproxymax traffic reset-global                 # Reset independent server-wide total counter only
+
+# Daily resource consumption monitoring via cron:
+# 0 0 * * * /opt/mtproxymax/mtproxymax traffic reset-all -y >/dev/null 2>&1
 
 # Global auto-rotate — rotates secrets older than N days
 mtproxymax auto-rotate 90                      # Rotate every 90 days
@@ -1539,7 +1544,10 @@ mtproxymax tui-theme [theme]            # Switch TUI color themes (dark, matrix,
 <summary><b>Monitoring</b></summary>
 
 ```bash
-mtproxymax traffic                      # Per-user traffic breakdown
+mtproxymax traffic                      # Per-user traffic breakdown and server total
+mtproxymax traffic reset-all [-y]       # Reset both server-wide total and all user counters
+mtproxymax traffic reset-users          # Reset all per-user traffic counters
+mtproxymax traffic reset-global [-y]    # Reset server-wide total counter only
 mtproxymax connections                  # Live active connections per user
 mtproxymax metrics                      # Engine metrics dashboard
 mtproxymax metrics live [seconds]       # Auto-refresh metrics (default: 5s)
@@ -1617,6 +1625,7 @@ mtproxymax update                       # Check for script + engine updates
 
 ### v1.4.2-LTS — Telemt Engine 3.5.14, Self-Healing Resilience & Enterprise Hardening
 
+- **Traffic Reset & Daily Monitoring Aliases ([#159](https://github.com/SamNet-dev/MTProxyMax/issues/159)):** Added `mtproxymax traffic reset-all` and `mtproxymax traffic reset-users` (plus `mtproxymax traffic help`) to allow resetting both global and per-user traffic counters in one step for daily consumption monitoring.
 - **Persistent Middle-End NAT Overrides ([#158](https://github.com/SamNet-dev/MTProxyMax/pull/158)):** Added `middle_proxy_nat_ip` and `middle_proxy_nat_probe` to `mtproxymax tune` to persist public IPv4 egress address overrides for policy-routed networks (e.g. WireGuard/MikroTik) across config regenerations.
 - **Telemt Engine 3.5.14 & Build Hardening ([#157](https://github.com/SamNet-dev/MTProxyMax/pull/157)):**
   - Upgraded core Rust proxy engine to **3.5.14** (`9d5b896bb695c55e2905b82f276da84e45a0a2ec`), resolving Middle-End pool convergence failures and writer starvation under egress tunnels (#949), with autonomous conntrack recovery on absent iptables-nft chains (3.5.11) and replay-safe streaming downlink (3.5.13).

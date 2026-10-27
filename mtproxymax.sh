@@ -4972,6 +4972,9 @@ _mtproxymax_completion() {
     # Subcommands
     [ "$cmd" = "resources" ] && [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "status clear set" -- "${cur}") )
     case "$cmd" in
+        traffic)
+            [ "$COMP_CWORD" -eq 2 ] && COMPREPLY=( $(compgen -W "reset-all reset-global reset-users help" -- "${cur}") )
+            ;;
         secret)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "add remove list info rotate clone rename enable disable limits setlimit setlimits link qr note stats sort top search archive unarchive archives generate-links extend bulk-extend disable-expired export import reset-traffic tag untag tags logs quota-reset purge-disabled sub export-json rename-prefix" -- "${cur}") )
@@ -6701,6 +6704,7 @@ run_traffic_reset_global() {
     if [ "$force" != "--force" ] && [ "$force" != "-y" ]; then
         echo -e "This will permanently reset the cumulative server-wide traffic counters."
         echo -e "Per-secret traffic and quotas will NOT be affected."
+        echo -e "${DIM}Tip: To reset per-user traffic counters, run: mtproxymax traffic reset-users (or reset-all)${NC}"
         echo -n -e "Are you sure you want to proceed? (y/N) "
         read -r confirm
         [[ "${confirm,,}" =~ ^y ]] || { log_error "Aborted."; return 0; }
@@ -6746,6 +6750,27 @@ run_traffic_reset_global() {
     
     audit_log "Global traffic reset to 0 (baseline: ${cur_in}|${cur_out})"
     log_success "Global traffic has been successfully reset!"
+}
+
+run_traffic_reset_all() {
+    local force="${1:-}"
+    check_root
+    load_settings
+    load_secrets
+
+    echo -e "\n  ── ⚠️ ${BOLD}Reset All Traffic Counters${NC} ──\n"
+    if [ "$force" != "--force" ] && [ "$force" != "-y" ]; then
+        echo -e "This will permanently reset BOTH server-wide and all per-user traffic counters."
+        echo -n -e "Are you sure you want to proceed? (y/N) "
+        read -r confirm
+        [[ "${confirm,,}" =~ ^y ]] || { log_error "Aborted."; return 0; }
+    fi
+
+    run_traffic_reset_global --force || return 1
+    secret_reset_traffic all || return 1
+
+    audit_log "All global and per-user traffic counters reset to 0"
+    log_success "All server-wide and per-user traffic counters have been successfully reset!"
 }
 
 run_guest() {
@@ -18881,33 +18906,62 @@ cli_main() {
 
         traffic)
             local subcmd="${1:-}"
-            if [ "$subcmd" = "reset-global" ]; then
-                shift
-                run_traffic_reset_global "$@"
-            else
-                load_settings
-                load_secrets
-            echo ""
-            draw_header "TRAFFIC"
-            local t_in t_out conns
-            read -r t_in t_out conns <<< "$(get_cumulative_proxy_stats)"
-            # Batch-load all user stats
-            _load_all_cumulative_user_stats 2>/dev/null
-            echo ""
-            echo -e "  ${BOLD}Total:${NC} ${SYM_DOWN} $(format_bytes "$t_in")  ${SYM_UP} $(format_bytes "$t_out")  ${BOLD}Connections:${NC} ${conns}"
-            echo ""
+            case "$subcmd" in
+                reset-global)
+                    shift
+                    run_traffic_reset_global "$@"
+                    ;;
+                reset-all)
+                    shift
+                    run_traffic_reset_all "$@"
+                    ;;
+                reset-users)
+                    shift
+                    check_root
+                    load_settings
+                    load_secrets
+                    secret_reset_traffic all "$@"
+                    ;;
+                help|--help|-h)
+                    echo ""
+                    echo -e "  ${BOLD}Usage:${NC} mtproxymax traffic [subcommand]"
+                    echo ""
+                    echo "  Subcommands:"
+                    echo "    (none)         Show server-wide total and per-user traffic breakdown"
+                    echo "    reset-all      Reset BOTH server-wide total and all per-user traffic counters"
+                    echo "    reset-global   Reset server-wide total counter only (leaves user quotas intact)"
+                    echo "    reset-users    Reset all per-user traffic counters (alias for secret reset-traffic all)"
+                    echo ""
+                    ;;
+                "")
+                    load_settings
+                    load_secrets
+                    echo ""
+                    draw_header "TRAFFIC"
+                    local t_in t_out conns
+                    read -r t_in t_out conns <<< "$(get_cumulative_proxy_stats)"
+                    # Batch-load all user stats
+                    _load_all_cumulative_user_stats 2>/dev/null
+                    echo ""
+                    echo -e "  ${BOLD}Total:${NC} ${SYM_DOWN} $(format_bytes "$t_in")  ${SYM_UP} $(format_bytes "$t_out")  ${BOLD}Connections:${NC} ${conns}"
+                    echo ""
 
-            # Per-user breakdown
-            for i in "${!SECRETS_LABELS[@]}"; do
-                [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
-                local label="${SECRETS_LABELS[$i]}"
-                local u_in=${_batch_cum_in["$label"]:-0}
-                local u_out=${_batch_cum_out["$label"]:-0}
-                local u_conns=${_batch_cum_conns["$label"]:-0}
-                echo -e "  ${GREEN}${SYM_OK}${NC} ${BOLD}${label}${NC}: ${SYM_DOWN} $(format_bytes "$u_in")  ${SYM_UP} $(format_bytes "$u_out")  conns: ${u_conns}"
-            done
-            echo ""
-            fi
+                    # Per-user breakdown
+                    for i in "${!SECRETS_LABELS[@]}"; do
+                        [ "${SECRETS_ENABLED[$i]}" = "true" ] || continue
+                        local label="${SECRETS_LABELS[$i]}"
+                        local u_in=${_batch_cum_in["$label"]:-0}
+                        local u_out=${_batch_cum_out["$label"]:-0}
+                        local u_conns=${_batch_cum_conns["$label"]:-0}
+                        echo -e "  ${GREEN}${SYM_OK}${NC} ${BOLD}${label}${NC}: ${SYM_DOWN} $(format_bytes "$u_in")  ${SYM_UP} $(format_bytes "$u_out")  conns: ${u_conns}"
+                    done
+                    echo ""
+                    ;;
+                *)
+                    log_error "Unknown traffic subcommand '$subcmd'. Run: mtproxymax traffic help"
+                    return 1
+                    ;;
+            esac
             ;;
 
         connections)

@@ -122,5 +122,15 @@ apply_pending_traffic_resets
 assert_eq "monthly reset clears stale daemon input" 0 "${_cum_user_in[bob]}"
 assert_eq "monthly reset clears stale daemon output" 0 "${_cum_user_out[bob]}"
 
+# Exercise reset-all
+METRICS_AVAILABLE=true
+printf '999|888\n' > "$STATS_DIR/cumulative_traffic"
+printf 'alice|1000|2000\nbob|3000|4000\n' > "$STATS_DIR/user_traffic"
+run_traffic_reset_all --force
+assert_eq "reset-all succeeds" 0 "$?"
+assert_eq "reset-all clears global counter" "0|0" "$(cat "$STATS_DIR/cumulative_traffic")"
+assert_eq "reset-all clears user traffic file" "" "$(cat "$STATS_DIR/user_traffic")"
+assert_eq "reset-all queues users-all daemon command" "users-all" "$(tail -n 1 "$STATS_DIR/.traffic_reset_pending")"
+
 printf '\n%d tests, %d failures\n' "$TESTS_RUN" "$TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]
