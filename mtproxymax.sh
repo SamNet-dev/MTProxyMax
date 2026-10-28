@@ -14243,11 +14243,16 @@ _cb_render_confirm() {
         *) _CB_TOAST="Unknown action"; return 1 ;;
     esac
 
+    local callback_target="$label" cancel_data="u:s:${label}:${page}"
     # The global verbs are targetless. "_" is their placeholder, and it is
     # matched here rather than treated as a label so that a secret genuinely
     # named "_" is still a secret for enable/disable/rotate/remove.
     case "$verb" in
-        rotall|restart|update|lockdown) label="" ;;
+        rotall|restart|update|lockdown)
+            label=""
+            callback_target="${callback_target:-_}"
+            cancel_data="g"
+            ;;
     esac
     [ -n "$label" ] && ! _cb_secret_exists "$label" && { _CB_TOAST="Secret '$label' not found"; return 1; }
 
@@ -14269,7 +14274,7 @@ _cb_render_confirm() {
     esac
     local _msg="⚠️ *${pretty} $(_esc "$label")?*${_extra}"
     _kb_reset
-    _kb_row "✅ Yes, ${pretty,,}|c:${verb}:${label}" "❌ Cancel|u:s:${label}:${page}"
+    _kb_row "✅ Yes, ${pretty,,}|c:${verb}:${callback_target}" "❌ Cancel|${cancel_data}"
     _cb_edit "$_msg" "$(_kb_json)"
 }
 
