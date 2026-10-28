@@ -496,6 +496,12 @@ The bot records rolling traffic samples under
 uses them for the analytics view and the periodic report. Samples are stored as
 **deltas**, so an engine restart or a traffic reset cannot corrupt a window.
 
+History is separate from cumulative traffic totals: recording starts when the
+history sampler is enabled and cannot reconstruct earlier daily usage from a
+total. If all available samples are less than 24 hours old, the 24-hour, 7-day,
+and 30-day windows can show the same traffic. A full 30-day window requires
+`TELEGRAM_HISTORY_RETENTION_DAYS=30` (or higher) and 30 days of collected samples.
+
 ```bash
 mtproxymax telegram history status   # sample counts, date range, retention
 mtproxymax telegram history prune    # apply retention now

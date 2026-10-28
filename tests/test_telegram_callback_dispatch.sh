@@ -274,5 +274,36 @@ assert_eq "capability table matches _process_cmd's gates" "" "$(cap_leaks)"
 assert_contains "capability table covers a:disable" "a:disable=admin" "$TG_CB_CAPS"
 assert_contains "capability table covers c:remove"  "c:remove=superadmin" "$TG_CB_CAPS"
 
+# Exercise the payload actually emitted by each global confirmation rather
+# than constructing a valid c: payload by hand. Empty fields fail _cb_dec.
+for _spec in restart:_ update:_ rotall:_ lockdown:on lockdown:off; do
+    _verb="${_spec%%:*}"; _target="${_spec#*:}"
+    run_cb superadmin 111 "a:${_spec}"
+    assert_eq "global prompt ${_spec} does not execute" "" "$(cat "$CALLS")"
+    _confirm=$(sed -n 's/.*"callback_data":"\(c:[^"]*\)".*/\1/p' "$EDITS")
+    assert_eq "global prompt preserves target ${_spec}" "c:${_spec}" "$_confirm"
+    _cb_dec "$_confirm"
+    assert_eq "global confirmation ${_spec} decodes" 0 "$?"
+    assert_contains "global cancel returns to tools ${_spec}" '"callback_data":"g"' "$(cat "$EDITS")"
+
+    case "$_verb" in
+        restart) _expected="restart" ;;
+        update) _expected="update" ;;
+        rotall) _expected="secret rotate --all" ;;
+        lockdown) _expected="lockdown ${_target}" ;;
+    esac
+    run_cb superadmin 111 "$_confirm"
+    assert_eq "rendered global confirmation executes ${_spec}" "$_expected" "$(cat "$CALLS")"
+    assert_eq "rendered global confirmation answered once ${_spec}" 1 "$(wc -l < "$ANSWERS" | tr -d ' ')"
+
+    run_cb reseller 333 "$_confirm"
+    assert_eq "rendered global confirmation denies reseller ${_spec}" "" "$(cat "$CALLS")"
+    assert_contains "global denial is visible ${_spec}" "Permission denied" "$(cat "$ANSWERS")"
+
+    run_cb superadmin 111 "g"
+    assert_eq "global cancel does not execute ${_spec}" "" "$(cat "$CALLS")"
+    assert_eq "global cancel renders tools ${_spec}" 1 "$(wc -l < "$EDITS" | tr -d ' ')"
+done
+
 printf '\n%d tests, %d failures\n' "$TESTS_RUN" "$TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]
