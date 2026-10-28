@@ -302,7 +302,7 @@ for _spec in restart:_ update:_ rotall:_ lockdown:on lockdown:off; do
 
     run_cb superadmin 111 "g"
     assert_eq "global cancel does not execute ${_spec}" "" "$(cat "$CALLS")"
-    assert_eq "global cancel renders tools ${_spec}" 1 "$(wc -l < "$EDITS" | tr -d ' ')"
+    assert_eq "global cancel renders tools ${_spec}" 1 "$(grep -c '^edit|' "$EDITS")"
 done
 
 printf '\n%d tests, %d failures\n' "$TESTS_RUN" "$TESTS_FAILED"
