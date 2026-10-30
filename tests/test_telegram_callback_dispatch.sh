@@ -103,6 +103,9 @@ load_tg_settings() { :; }
 is_running() { return 1; }
 log_warn() { :; }
 get_cached_ip() { echo "203.0.113.9"; }
+domain_to_hex() { echo "636c6f7564666c6172652e636f6d"; }
+_proxy_link() { printf 'https://t.me/proxy?server=%s&port=%s&secret=%s' "$1" "$2" "$3"; }
+send_proxy_qr_to() { printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" >> "$SENDS"; }
 _tg_metrics_raw() { printf ''; }
 
 cat > "$INSTALL_DIR/mtproxymax" <<'EOS'
@@ -124,6 +127,25 @@ audit_now() { cat "$AUDIT_LOG" 2>/dev/null || printf ''; }
 reset_audit() { : > "$AUDIT_LOG"; }
 
 echo "Telegram callback dispatcher tests"
+
+# Exercise the button through the real capability gate, not just its helper.
+PROXY_PORT=443
+PROXY_DOMAIN="cloudflare.com"
+MASKING_ENABLED=true
+for _role in superadmin; do
+    run_cb "$_role" 111 "u:k:alice"
+    assert_contains "$_role Links button sends a QR" "111|203.0.113.9|443|" "$(cat "$SENDS")"
+    assert_contains "$_role Links button includes the connection URL" "https://t.me/proxy?server=203.0.113.9&port=443&secret=ee" "$(cat "$SENDS")"
+    assert_contains "$_role Links button confirms delivery" "Link sent" "$(cat "$ANSWERS")"
+done
+run_cb reseller 333 "u:k:alice"
+assert_eq "reseller cannot retrieve another user's link" "" "$(cat "$SENDS")"
+assert_contains "reseller link request is denied" "Permission denied" "$(cat "$ANSWERS")"
+run_cb admin 444 "u:k:alice"
+assert_eq "unknown admin role cannot retrieve a link" "" "$(cat "$SENDS")"
+assert_contains "unknown admin role is denied" "Permission denied" "$(cat "$ANSWERS")"
+run_cb none 999 "u:k:alice"
+assert_eq "unauthenticated user cannot retrieve a link" "" "$(cat "$SENDS")"
 
 # ── Every path answers the callback exactly once ─────────────────────────────
 # Without this the client spins forever, so it must hold on denial, error and
@@ -249,7 +271,7 @@ cap_leaks() {
             # CLI verb (secret setlimit / extend / quota-reset / template apply),
             # and none of them is reachable by a reseller, whose only surface
             # stays the voucher commands.
-            u:m|u:t|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
+            u:k|u:m|u:t|e|e:q|e:c|e:i|e:x|e:r|e:n|e:a|e:t|e:z|\
             c:setq|c:setc|c:seti|c:setx|c:setr|c:tpl)
                 [ "$cap" = "admin" ] || { printf '%s=%s\n' "$key" "$cap"; } ;;
             # The server console and the template section: read-mostly views
