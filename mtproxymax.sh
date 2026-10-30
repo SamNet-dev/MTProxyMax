@@ -11996,12 +11996,14 @@ PYQ
 _tg_send_photo_file() {
     local chat="$1" file="$2" caption="${3:-}"
     [ -s "$file" ] || return 1
-    curl -s --max-time 30 -X POST \
+    local response
+    response=$(curl -s --max-time 30 -X POST \
         -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
         -F "chat_id=${chat}" \
         -F "photo=@${file}" \
-        --form-string "caption=[$(_esc "${TELEGRAM_SERVER_LABEL:-MTProxyMax}")] ${caption}" \
-        --form-string "parse_mode=Markdown" >/dev/null 2>&1
+        --form-string "caption=[${TELEGRAM_SERVER_LABEL:-MTProxyMax}] ${caption}" 2>/dev/null) || return 1
+    # HTTP 400/403 responses do not make curl fail. Check the Bot API result.
+    [[ "$(printf '%s' "$response" | tr -d '[:space:]')" == *'"ok":true'* ]]
 }
 
 # "https://t.me/proxy?...", the one form of the link that is also a credential.
@@ -12015,15 +12017,19 @@ _send_qr() {
     link=$(_proxy_link "$ip" "$port" "$secret")
     png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || png=""
     if [ -n "$png" ] && _qr_png "$link" "$png"; then
-        _tg_send_photo_file "$chat" "$png" "$caption"
-        rm -f "$png" 2>/dev/null
-        return 0
+        if _tg_send_photo_file "$chat" "$png" "$caption"; then
+            rm -f "$png" 2>/dev/null
+            return 0
+        fi
     fi
     rm -f "$png" 2>/dev/null
-    # No renderer here. Send the tappable link rather than reaching for a remote
-    # one: the operator gets something usable, and the key stays on this host.
-    tg_send_to "$chat" "🔗 [Connect](${link})\n\n_Install \`qrencode\` (or \`python3-qrcode\`) for a scannable QR._"
-    return 1
+    # No renderer, or the upload failed. Keep a usable connection link without
+    # handing the credential to a third-party QR service.
+    # Plain text also works when the URL or server label contains Markdown.
+    local response
+    response=$(_tg_post_method sendMessage "chat_id=${chat}" \
+        "text=🔗 Connect: ${link}") || return 1
+    [[ "$(printf '%s' "$response" | tr -d '[:space:]')" == *'"ok":true'* ]]
 }
 
 # Send QR code image for a proxy secret (no text URL — avoids Telegram bot bans)
@@ -13519,6 +13525,7 @@ m=public
 m:h=public
 u:l=admin
 u:s=admin
+u:k=admin
 t=admin
 t:w=admin
 t:u=admin
@@ -14757,8 +14764,15 @@ _cb_send_link() {
     else
         _fs="dd${_secret}"
     fi
-    _CB_TOAST="Link sent"
-    send_proxy_qr_to "$_CB_CHAT" "$_ip" "${PROXY_PORT}" "$_fs"
+    local _caption
+    _caption=$(printf '%s\n\n%s' "Scan in Telegram or tap the link to connect:" "$(_proxy_link "$_ip" "${PROXY_PORT}" "$_fs")")
+    if send_proxy_qr_to "$_CB_CHAT" "$_ip" "${PROXY_PORT}" "$_fs" "$_caption"; then
+        _CB_TOAST="Link sent"
+    else
+        _CB_TOAST="Could not send the link. Please retry."
+        _CB_ALERT="true"
+        return 1
+    fi
 }
 
 # The standard button bar attached to ordinary command replies. Inline buttons

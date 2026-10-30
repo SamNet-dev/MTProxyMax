@@ -62,7 +62,7 @@ FNS="$TEST_TMPDIR/daemon-fns.sh"
 for _fn in _tg_security_log _esc _cb_label_ok _cb_enc _cb_dec _process_cmd \
            _tg_pending_file _tg_pending_set _tg_pending_take _tg_pending_clear \
            _tg_pending_try _tg_pending_run _tg_new_secret_link \
-           _qr_png _proxy_link _tg_send_photo_file _send_qr \
+           _qr_png _proxy_link _tg_post_method _tg_send_photo_file _send_qr \
            send_proxy_qr send_proxy_qr_to; do
     awk "/^${_fn}\\(\\)/,/^}\$/" "$DAEMON" >> "$FNS"
 done
@@ -94,13 +94,20 @@ _tg_metrics_raw() { printf ''; }
 # separately: the point of the config file is that argv holds no secret.
 curl() {
     printf '%s\n' "$*" >> "$CURLS"
-    local _f
+    local _f _cfg=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            -K) _f="$2"; [ -r "$_f" ] && cat "$_f" >> "$CURLCFG" ;;
+            -K) _f="$2"; if [ -r "$_f" ]; then _cfg=$(cat "$_f"); printf '%s\n' "$_cfg" >> "$CURLCFG"; fi ;;
         esac
         shift
     done
+    if [[ "$_cfg" == *sendPhoto* ]] && [ -n "${CURL_PHOTO_RESPONSE:-}" ]; then
+        printf '%s' "$CURL_PHOTO_RESPONSE"
+    elif [ -n "${CURL_RESPONSE:-}" ]; then
+        printf '%s' "$CURL_RESPONSE"
+    else
+        printf '{"ok":true}'
+    fi
     return 0
 }
 
@@ -186,13 +193,46 @@ assert_contains "the upload goes to the chat that asked for it" "chat_id=777" "$
 # The bot token must travel in the curl config, never in argv where `ps` shows it.
 assert_not_contains "the bot token is not on the command line" "111:AAA" "$_curl_args"
 
+: > "$CURLS"; : > "$CURLCFG"
+_CB_CHAT="777"; _CB_TOAST=""; _CB_ALERT="false"
+_cb_send_link alice
+assert_eq "Links succeeds when the QR is accepted" 0 "$?"
+assert_contains "Links uploads a QR" "sendPhoto" "$(cat "$CURLCFG")"
+assert_contains "the QR caption contains the complete FakeTLS URL" \
+    "https://t.me/proxy?server=203.0.113.9&port=443&secret=ee$(printf 'a%.0s' $(seq 1 32))0a0b0c0d" "$(cat "$CURLS")"
+assert_not_contains "the URL caption is not parsed as Markdown" "parse_mode=Markdown" "$(cat "$CURLS")"
+
+# Telegram can reject an upload while curl itself exits successfully.
+CURL_RESPONSE='{"ok":false,"error_code":400,"description":"Bad Request"}'
+_tg_send_photo_file "777" "$SECRETS_FILE" "scan me"
+assert_eq "an API rejection fails the photo upload" 1 "$?"
+: > "$CURLS"; : > "$CURLCFG"
+send_proxy_qr_to "777" "203.0.113.9" "443" "eeaaaa0a0b0c0d" "scan me"
+assert_eq "both delivery attempts failing is reported" 1 "$?"
+assert_contains "a rejected photo falls back to a text link" "sendMessage" "$(cat "$CURLCFG")"
+assert_contains "fallback contains the complete connection secret" "secret=eeaaaa0a0b0c0d" "$(cat "$CURLS")"
+unset CURL_RESPONSE
+
+CURL_PHOTO_RESPONSE='{"ok":false,"error_code":400}'
+_CB_CHAT="777"; _CB_TOAST=""; _CB_ALERT="false"
+_cb_send_link alice
+assert_eq "the user Links action succeeds via text after photo rejection" 0 "$?"
+assert_eq "successful fallback is acknowledged" "Link sent" "$_CB_TOAST"
+CURL_RESPONSE='{"ok":false,"error_code":403}'
+_CB_TOAST=""; _CB_ALERT="false"
+_cb_send_link alice
+assert_eq "the user Links action reports failed delivery" 1 "$?"
+assert_eq "delivery failure opens a visible alert" true "$_CB_ALERT"
+assert_not_contains "delivery failure does not claim success" "Link sent" "$_CB_TOAST"
+unset CURL_RESPONSE CURL_PHOTO_RESPONSE
+
 # With no renderer at all, the link is still delivered — as the tappable link,
 # never by falling back to the third party.
 rm -f "$TEST_TMPDIR/bin/qrencode"
 : > "$SENDS"; : > "$CURLS"; : > "$CURLCFG"
 send_proxy_qr_to "777" "203.0.113.9" "443" "eeaaaa0a0b0c0d" "scan me"
 assert_not_contains "no renderer still means no third party" "qrserver" "$(cat "$CURLS")$(cat "$CURLCFG")"
-assert_contains "the fallback still delivers a usable link" "t.me/proxy?server=203.0.113.9" "$(cat "$SENDS")"
+assert_contains "the fallback still delivers a usable link" "t.me/proxy?server=203.0.113.9" "$(cat "$CURLS")"
 
 printf '\n%d tests, %d failures\n' "$TESTS_RUN" "$TESTS_FAILED"
 [ "$TESTS_FAILED" -eq 0 ]
