@@ -11995,13 +11995,21 @@ PYQ
 # not a URL the API can fetch itself.
 _tg_send_photo_file() {
     local chat="$1" file="$2" caption="${3:-}"
+    local parse_mode="${4:-}" label="${TELEGRAM_SERVER_LABEL:-MTProxyMax}"
+    local -a format=()
+    if [ "$parse_mode" = "Markdown" ]; then
+        label=$(_esc "$label")
+        label="${label//[/\\[}"
+        format=(--form-string "parse_mode=Markdown")
+    fi
     [ -s "$file" ] || return 1
     local response
     response=$(curl -s --max-time 30 -X POST \
         -K <(printf 'url = "https://api.telegram.org/bot%s/sendPhoto"\n' "$TELEGRAM_BOT_TOKEN") \
         -F "chat_id=${chat}" \
         -F "photo=@${file}" \
-        --form-string "caption=[${TELEGRAM_SERVER_LABEL:-MTProxyMax}] ${caption}" 2>/dev/null) || return 1
+        --form-string "caption=[${label}] ${caption}" \
+        "${format[@]}" 2>/dev/null) || return 1
     # HTTP 400/403 responses do not make curl fail. Check the Bot API result.
     [[ "$(printf '%s' "$response" | tr -d '[:space:]')" == *'"ok":true'* ]]
 }
@@ -12013,11 +12021,12 @@ _proxy_link() {
 
 _send_qr() {
     local chat="$1" ip="$2" port="$3" secret="$4" caption="$5"
+    local parse_mode="${6:-}"
     local link png
     link=$(_proxy_link "$ip" "$port" "$secret")
     png=$(mktemp "${TMPDIR:-/tmp}/mtpx-qr.XXXXXX") || png=""
     if [ -n "$png" ] && _qr_png "$link" "$png"; then
-        if _tg_send_photo_file "$chat" "$png" "$caption"; then
+        if _tg_send_photo_file "$chat" "$png" "$caption" "$parse_mode"; then
             rm -f "$png" 2>/dev/null
             return 0
         fi
@@ -12041,7 +12050,7 @@ send_proxy_qr() {
 
 send_proxy_qr_to() {
     local target_cid="$1" ip="$2" port="$3" secret="$4" caption="${5:-Scan in Telegram to connect}"
-    _send_qr "$target_cid" "$ip" "$port" "$secret" "$caption"
+    _send_qr "$target_cid" "$ip" "$port" "$secret" "$caption" "${6:-}"
 }
 
 # Escape Markdown special chars in labels for Telegram
@@ -14765,8 +14774,8 @@ _cb_send_link() {
         _fs="dd${_secret}"
     fi
     local _caption
-    _caption=$(printf '%s\n\n%s' "Scan in Telegram or tap the link to connect:" "$(_proxy_link "$_ip" "${PROXY_PORT}" "$_fs")")
-    if send_proxy_qr_to "$_CB_CHAT" "$_ip" "${PROXY_PORT}" "$_fs" "$_caption"; then
+    _caption="🔗 [Connect]($(_proxy_link "$_ip" "${PROXY_PORT}" "$_fs"))"
+    if send_proxy_qr_to "$_CB_CHAT" "$_ip" "${PROXY_PORT}" "$_fs" "$_caption" Markdown; then
         _CB_TOAST="Link sent"
     else
         _CB_TOAST="Could not send the link. Please retry."

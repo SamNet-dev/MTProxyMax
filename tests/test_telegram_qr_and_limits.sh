@@ -200,7 +200,14 @@ assert_eq "Links succeeds when the QR is accepted" 0 "$?"
 assert_contains "Links uploads a QR" "sendPhoto" "$(cat "$CURLCFG")"
 assert_contains "the QR caption contains the complete FakeTLS URL" \
     "https://t.me/proxy?server=203.0.113.9&port=443&secret=ee$(printf 'a%.0s' $(seq 1 32))0a0b0c0d" "$(cat "$CURLS")"
-assert_not_contains "the URL caption is not parsed as Markdown" "parse_mode=Markdown" "$(cat "$CURLS")"
+assert_contains "the QR caption uses a compact Connect link" "🔗 [Connect](https://t.me/proxy?" "$(cat "$CURLS")"
+assert_contains "the compact caption enables Markdown" "parse_mode=Markdown" "$(cat "$CURLS")"
+
+TELEGRAM_SERVER_LABEL='Test_Box[EU]'
+: > "$CURLS"
+_cb_send_link alice
+assert_contains "server label is escaped in a formatted caption" 'Test\_Box\[EU]' "$(cat "$CURLS")"
+TELEGRAM_SERVER_LABEL="TestBox"
 
 # Telegram can reject an upload while curl itself exits successfully.
 CURL_RESPONSE='{"ok":false,"error_code":400,"description":"Bad Request"}'
