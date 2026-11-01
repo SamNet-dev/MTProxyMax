@@ -41,8 +41,8 @@ RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.5.14"
-TELEMT_COMMIT="9d5b896bb695c55e2905b82f276da84e45a0a2ec"  # Pinned: v3.5.14 — autonomous, lifecycle-bounded ME pool convergence
+TELEMT_MIN_VERSION="3.5.16"
+TELEMT_COMMIT="84e5b82"  # Pinned: v3.5.16 (84e5b82) — Verfassungsgericht: retry jitter, RPC ping-pong latency validation, stalled ME relay fixes (#879), dual-stack metrics allowlist (#849)
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 
@@ -1189,7 +1189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD)" = "${TELEMT_COMMIT}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release --locked && \
     (strip target/release/telemt 2>/dev/null || true) && \

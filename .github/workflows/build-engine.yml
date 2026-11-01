@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       telemt_commit:
-        description: 'Full Telemt commit SHA to build from'
+        description: 'Telemt commit hash to build from (7-char or full SHA)'
         required: true
-        default: '9d5b896bb695c55e2905b82f276da84e45a0a2ec'
+        default: '84e5b82'
       version_tag:
-        description: 'Version tag (e.g. 3.4.8-10c9bcd)'
+        description: 'Version tag (e.g. 3.5.16-84e5b82)'
         required: true
-        default: '3.5.14-9d5b896bb695c55e2905b82f276da84e45a0a2ec'
+        default: '3.5.16-84e5b82'
 
 env:
   REGISTRY: ghcr.io
@@ -46,7 +46,7 @@ jobs:
           RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
           RUN git clone "https://github.com/${TELEMT_REPO}.git" /build
           WORKDIR /build
-          RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD)" = "${TELEMT_COMMIT}"
+          RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
           ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
           RUN cargo build --release --locked && (strip target/release/telemt 2>/dev/null || true) && cp target/release/telemt /telemt
           FROM debian:bookworm-slim

@@ -1629,10 +1629,12 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
-### v1.4.2-LTS — Telemt Engine 3.5.14, Self-Healing Resilience & Enterprise Hardening
+### v1.4.2-LTS — Telemt Engine 3.5.16, Self-Healing Resilience & Enterprise Hardening
 
 - **Traffic Reset & Daily Monitoring Aliases ([#159](https://github.com/SamNet-dev/MTProxyMax/issues/159)):** Added `mtproxymax traffic reset-all` and `mtproxymax traffic reset-users` (plus `mtproxymax traffic help`) to allow resetting both global and per-user traffic counters in one step for daily consumption monitoring.
 - **Persistent Middle-End NAT Overrides ([#158](https://github.com/SamNet-dev/MTProxyMax/pull/158)):** Added `middle_proxy_nat_ip` and `middle_proxy_nat_probe` to `mtproxymax tune` to persist public IPv4 egress address overrides for policy-routed networks (e.g. WireGuard/MikroTik) across config regenerations.
+- **Telemt Engine 3.5.16 Upgrade & Resilience:**
+  - Upgraded core Rust proxy engine to **3.5.16** (`84e5b82`), adding retry jitter (`X-Telemt-Retry-After-Ms`), RPC ping-pong latency validation, resolving stalled ME relays by observing child task completion (#879), dual-stack metrics allowlist matching (#849), and bounded opt-in wildcard host routing.
 - **Telemt Engine 3.5.14 & Build Hardening ([#157](https://github.com/SamNet-dev/MTProxyMax/pull/157)):**
   - Upgraded core Rust proxy engine to **3.5.14** (`9d5b896bb695c55e2905b82f276da84e45a0a2ec`), resolving Middle-End pool convergence failures and writer starvation under egress tunnels (#949), with autonomous conntrack recovery on absent iptables-nft chains (3.5.11) and replay-safe streaming downlink (3.5.13).
   - Eliminated unsafe `:latest` registry relabeling in `build_telemt_image()`, ensuring missing prebuilt tags compile from source instead of mislabeling old cached binaries.
