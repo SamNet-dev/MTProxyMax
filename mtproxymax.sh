@@ -1189,7 +1189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "$(printf '%.7s' "${TELEMT_COMMIT}")"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release --locked && \
     (strip target/release/telemt 2>/dev/null || true) && \
