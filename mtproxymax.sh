@@ -5228,7 +5228,7 @@ run_upload_test() {
     # 3. Live Traffic Upload vs Download Ratio Audit
     printf "  %-35s" "Live Ingress vs Egress metrics:"
     local _metrics
-    _metrics=$(fetch_metrics 2>/dev/null || true)
+    _metrics=$(_fetch_metrics 2>/dev/null || true)
     if [ -n "$_metrics" ]; then
         local up_bytes down_bytes
         up_bytes=$(echo "$_metrics" | awk '/^telemt_user_octets_from_client_total\{/{s+=$NF}END{printf "%.0f",s}')
