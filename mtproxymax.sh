@@ -41,8 +41,8 @@ RUNLEVELS_DIR="${RUNLEVELS_DIR:-/etc/runlevels}"
 SCANNER_SHIELD_SET="mtp_scanners"
 CONTAINER_NAME="mtproxymax"
 DOCKER_IMAGE_BASE="mtproxymax-telemt"
-TELEMT_MIN_VERSION="3.5.16"
-TELEMT_COMMIT="84e5b82"  # Pinned: v3.5.16 (84e5b82) — Verfassungsgericht: retry jitter, RPC ping-pong latency validation, stalled ME relay fixes (#879), dual-stack metrics allowlist (#849)
+TELEMT_MIN_VERSION="3.5.17"
+TELEMT_COMMIT="66708d2"  # Pinned: v3.5.17 (66708d2) — API capabilities/schema discovery, dry-run validation, scoped DNS overrides (#970)
 GITHUB_REPO="SamNet-dev/MTProxyMax"
 REGISTRY_IMAGE="ghcr.io/samnet-dev/mtproxymax-telemt"
 

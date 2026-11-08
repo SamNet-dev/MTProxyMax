@@ -1629,8 +1629,11 @@ mtproxymax update                       # Check for script + engine updates
 
 ## 📋 Changelog
 
-### v1.4.2-LTS — Telemt Engine 3.5.16, Self-Healing Resilience & Enterprise Hardening
+### v1.4.2-LTS — Telemt Engine 3.5.17, Self-Healing Resilience & Enterprise Hardening
 
+- **Telemt Engine 3.5.17 Upgrade & Enhanced JSON API ([telemt #970](https://github.com/telemt/telemt/pull/970)):**
+  - Upgraded core Rust proxy engine to **3.5.17** (`66708d2`), standardizing on the clean short tag layout (`3.5.17-66708d2`).
+  - Added JSON API capabilities and configuration schema discovery, dry-run validation with change preview and runtime guards, desired vs. effective state reporting, scoped DNS override management, access policy management with source deny rules, and cross-generation cache race fixes in observability settings.
 - **Upload Diagnostic Ingress/Egress Metrics ([#163](https://github.com/SamNet-dev/MTProxyMax/issues/163)):** Fixed function call resolution in `mtproxymax upload-test` (`_fetch_metrics`), restoring live ingress vs. egress ratio audits and eliminating false "metrics offline" reports.
 - **Traffic Reset & Daily Monitoring Aliases ([#159](https://github.com/SamNet-dev/MTProxyMax/issues/159)):** Added `mtproxymax traffic reset-all` and `mtproxymax traffic reset-users` (plus `mtproxymax traffic help`) to allow resetting both global and per-user traffic counters in one step for daily consumption monitoring.
 - **Persistent Middle-End NAT Overrides ([#158](https://github.com/SamNet-dev/MTProxyMax/pull/158)):** Added `middle_proxy_nat_ip` and `middle_proxy_nat_probe` to `mtproxymax tune` to persist public IPv4 egress address overrides for policy-routed networks (e.g. WireGuard/MikroTik) across config regenerations.

@@ -97,17 +97,17 @@ checkout_cmd=$(grep '^RUN git checkout' "$tmp/Dockerfile")
 checkout_cmd=${checkout_cmd#RUN }
 git() {
     case "$*" in
-        "checkout --detach 84e5b82") return 0 ;;
-        "checkout --detach 84e5b827a6619fb2e09ad3d09f253cdffe04bc2f") return 0 ;;
+        "checkout --detach 66708d2") return 0 ;;
+        "checkout --detach 66708d2866f3f3a4541c4fa67984d408e71a8af4") return 0 ;;
         "checkout --detach mismatch") return 0 ;;
-        "rev-parse HEAD") echo "84e5b827a6619fb2e09ad3d09f253cdffe04bc2f" ;;
+        "rev-parse HEAD") echo "66708d2866f3f3a4541c4fa67984d408e71a8af4" ;;
         *) return 1 ;;
     esac
 }
-TELEMT_COMMIT="84e5b82"
+TELEMT_COMMIT="66708d2"
 if ! eval "$checkout_cmd"; then echo 'FAIL: checkout validation failed with short commit'; exit 1; fi
 
-TELEMT_COMMIT="84e5b827a6619fb2e09ad3d09f253cdffe04bc2f"
+TELEMT_COMMIT="66708d2866f3f3a4541c4fa67984d408e71a8af4"
 if ! eval "$checkout_cmd"; then echo 'FAIL: checkout validation failed with full commit'; exit 1; fi
 
 TELEMT_COMMIT="mismatch"
