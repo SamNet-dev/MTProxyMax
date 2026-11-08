@@ -1189,7 +1189,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     rm -rf /var/lib/apt/lists/*
 RUN git clone "https://github.com/telemt/telemt.git" /build
 WORKDIR /build
-RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"
+RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "$(printf '%.7s' "${TELEMT_COMMIT}")"
 ENV CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 CARGO_PROFILE_RELEASE_DEBUG=false
 RUN cargo build --release --locked && \
     (strip target/release/telemt 2>/dev/null || true) && \
@@ -1214,7 +1214,7 @@ DOCKERFILE_EOF
         mkdir -p "$INSTALL_DIR"
         echo "$version" > "${INSTALL_DIR}/.telemt_version"
     else
-        log_error "Source build failed — ensure Docker has enough memory (2GB+)"
+        log_error "Source build failed — check docker build logs above (ensure Docker has 2GB+ RAM and internet access)"
         rm -rf "$build_dir"
         return 1
     fi
@@ -10429,7 +10429,10 @@ self_update() {
         log_success "Telemt engine is up to date (v${_current_ver})"
     else
         log_info "Engine update: v${_current_ver} -> v${_expected_ver}"
-        build_telemt_image true
+        if ! build_telemt_image true; then
+            log_error "Failed to obtain telemt engine v${_expected_ver}; keeping existing proxy running"
+            return 1
+        fi
         if is_proxy_running; then
             load_secrets
             restart_proxy_container
@@ -19323,7 +19326,10 @@ cli_main() {
             check_root
             load_settings
             log_info "Force-rebuilding telemt engine from source (commit ${TELEMT_COMMIT})..."
-            build_telemt_image source
+            if ! build_telemt_image source; then
+                log_error "Failed to build telemt engine from source; keeping existing proxy running"
+                return 1
+            fi
             if is_proxy_running; then
                 load_secrets
                 restart_proxy_container
@@ -19358,7 +19364,10 @@ cli_main() {
                     if [[ "$confirm" =~ ^[nN] ]]; then
                         return 0
                     fi
-                    build_telemt_image true
+                    if ! build_telemt_image true; then
+                        log_error "Failed to rebuild telemt engine; keeping existing proxy running"
+                        return 1
+                    fi
                     if is_proxy_running; then
                         load_secrets
                         restart_proxy_container
@@ -21513,7 +21522,10 @@ show_engine_menu() {
                 if [[ "$confirm" =~ ^[nN] ]]; then
                     press_any_key; continue
                 fi
-                build_telemt_image true
+                if ! build_telemt_image true; then
+                    log_error "Failed to rebuild telemt engine; keeping existing proxy running"
+                    press_any_key; continue
+                fi
                 if is_proxy_running; then
                     load_secrets
                     restart_proxy_container || true

@@ -53,7 +53,7 @@ build_telemt_image
 assert_no_latest_pull
 grep -q "^build --build-arg TELEMT_COMMIT=${TELEMT_COMMIT} " "$tmp/calls"
 assert_marker "$version"
-grep -Fq 'RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "${TELEMT_COMMIT:0:7}"' "$tmp/Dockerfile"
+grep -Fq 'RUN git checkout --detach "${TELEMT_COMMIT}" && test "$(git rev-parse HEAD | cut -c1-7)" = "$(printf '\''%.7s'\'' "${TELEMT_COMMIT}")"' "$tmp/Dockerfile"
 grep -Fq 'cargo build --release --locked' "$tmp/Dockerfile"
 
 reset_case
@@ -91,4 +91,26 @@ cp() { touch "$tmp/copied"; }
 if eval "$command_text"; then echo 'FAIL: cargo failure masked'; exit 1; fi
 test ! -e "$tmp/stripped"
 test ! -e "$tmp/copied"
-echo 'PASS: engine cache, exact pull, pinned fallback, source/force, build/tag failures, cargo failure propagation'
+
+# Verify the checkout verification instruction executes cleanly in POSIX mode without Bash-isms
+checkout_cmd=$(grep '^RUN git checkout' "$tmp/Dockerfile")
+checkout_cmd=${checkout_cmd#RUN }
+git() {
+    case "$*" in
+        "checkout --detach 84e5b82") return 0 ;;
+        "checkout --detach 84e5b827a6619fb2e09ad3d09f253cdffe04bc2f") return 0 ;;
+        "checkout --detach mismatch") return 0 ;;
+        "rev-parse HEAD") echo "84e5b827a6619fb2e09ad3d09f253cdffe04bc2f" ;;
+        *) return 1 ;;
+    esac
+}
+TELEMT_COMMIT="84e5b82"
+if ! eval "$checkout_cmd"; then echo 'FAIL: checkout validation failed with short commit'; exit 1; fi
+
+TELEMT_COMMIT="84e5b827a6619fb2e09ad3d09f253cdffe04bc2f"
+if ! eval "$checkout_cmd"; then echo 'FAIL: checkout validation failed with full commit'; exit 1; fi
+
+TELEMT_COMMIT="mismatch"
+if eval "$checkout_cmd"; then echo 'FAIL: mismatched commit accepted'; exit 1; fi
+
+echo 'PASS: engine cache, exact pull, pinned fallback, source/force, build/tag failures, cargo failure propagation, posix commit check'
