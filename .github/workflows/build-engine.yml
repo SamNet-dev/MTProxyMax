@@ -12,6 +12,10 @@ on:
         required: true
         default: '3.5.17-66708d2'
 
+concurrency:
+  group: build-telemt-engine-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: mtproxymax-telemt
